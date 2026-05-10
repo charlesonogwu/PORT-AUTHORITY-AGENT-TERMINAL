@@ -1,0 +1,43 @@
+# Sends a Telegram notification when a commit lands on main.
+# No secrets touch the file. No secrets touch the logs.
+# Reviewers see only ${{ secrets.X }} references.
+name: notify on push
+
+on:
+  push:
+    branches: [main]
+
+# Lock GITHUB_TOKEN to read-only metadata. This job doesn't need anything else.
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: send telegram notification
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.WARROOM_CHAT_ID }}
+          SHA: ${{ github.sha }}
+          AUTHOR: ${{ github.actor }}
+          REPO: ${{ github.event.repository.name }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT_URL: ${{ github.event.head_commit.url }}
+          MSG_SUBJECT_RAW: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          MSG_SUBJECT=$(printf '%s' "$MSG_SUBJECT_RAW" | head -n1 | head -c 200 | tr -d '\000-\037')
+          TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          read -r -d '' TEXT <<INNER || true
+          🔔 [audit-trigger] commit ${SHA} by ${AUTHOR} on ${REPO}
+
+          subject: ${MSG_SUBJECT}
+          branch: ${BRANCH}
+          url: ${COMMIT_URL}
+          ts: ${TS}
+
+          start phase 0 of the review pipeline.
+          INNER
+          curl --fail --silent --show-error -X POST             "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"             --data-urlencode "chat_id=${CHAT_ID}"             --data-urlencode "text=${TEXT}"             --data-urlencode "disable_web_page_preview=true"             -o /dev/null
