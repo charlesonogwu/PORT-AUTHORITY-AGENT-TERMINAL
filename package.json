@@ -1,0 +1,88 @@
+{
+  "name": "port-authority-agent-terminal-mcp",
+  "version": "0.1.0",
+  "description": "Windows-first lane coordinator for AI coding agents (Claude, Codex, etc.) — keeps multiple local agents from colliding on dev-server ports, Chrome debug ports, and Chrome user profiles. Includes a CLI, an MCP server, and a live dashboard.",
+  "license": "MIT",
+  "author": "charlesonogwu",
+  "homepage": "https://github.com/charlesonogwu/port-authority-agent-terminal#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/charlesonogwu/port-authority-agent-terminal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/charlesonogwu/port-authority-agent-terminal/issues"
+  },
+  "type": "module",
+  "bin": {
+    "paat": "dist/src/cli/index.js",
+    "port-authority": "dist/src/cli/index.js",
+    "portpilot": "dist/src/cli/index.js"
+  },
+  "main": "dist/src/core/index.js",
+  "types": "dist/src/core/index.d.ts",
+  "exports": {
+    ".": "./dist/src/core/index.js",
+    "./cli": "./dist/src/cli/index.js",
+    "./mcp": "./dist/src/mcp/server.js"
+  },
+  "files": [
+    "dist/src",
+    "assets/paat.ico",
+    "assets/paat-256.png",
+    "assets/paat-banner.png",
+    "assets/paat-readme-banner.png",
+    "scripts/postinstall.cjs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "npm run build:icons && npm run build:dashboard && tsc -p tsconfig.json",
+    "build:server": "tsc -p tsconfig.json",
+    "build:icons": "node scripts/build-icons.mjs",
+    "build:dashboard": "npm --prefix dashboard-ui/portpilot-dashboard install --no-audit --no-fund --silent && npm --prefix dashboard-ui/portpilot-dashboard run build && node scripts/sync-dashboard-html.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "dev": "tsx src/cli/index.ts",
+    "prepare": "node scripts/prepare.cjs",
+    "postinstall": "node scripts/postinstall.cjs",
+    "test": "tsc -p tsconfig.json && node --test --test-reporter=spec dist/tests/*.test.js",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "chrome": "tsx scripts/chrome.ts",
+    "robust-test": "tsx scripts/robust-test.ts",
+    "robust-test:verbose": "tsx scripts/robust-test.ts --verbose",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "windows",
+    "ai-agents",
+    "agent-coordination",
+    "claude",
+    "claude-desktop",
+    "codex",
+    "codex-desktop",
+    "chrome",
+    "chrome-devtools-protocol",
+    "cdp",
+    "remote-debugging",
+    "playwright",
+    "puppeteer",
+    "ports",
+    "lane",
+    "mcp",
+    "model-context-protocol",
+    "dashboard"
+  ],
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  }
+}

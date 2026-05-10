@@ -1,0 +1,46 @@
+# Build outputs
+dist/
+dashboard-ui/portpilot-dashboard/dist/
+dashboard-ui/portpilot-dashboard/node_modules/
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+
+# Per-machine state (never committed)
+.portpilot/
+agent-lanes/
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+.claude/settings.local.json
+
+# Environment / secrets
+.env
+.env.local
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# Test outputs
+coverage/
+.nyc_output/
+.tmp/
+
+# npm / yarn
+.npm/
+.yarn/
+*.tgz
+yarn-error.log
+npm-debug.log*
+
+# Logs
+*.log
+logs/
+
+# Chrome extension build artefacts
+chrome-extension/icons/*.bak
