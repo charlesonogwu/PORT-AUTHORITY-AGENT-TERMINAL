@@ -9,9 +9,9 @@
 > dev servers, Chrome debug ports, and Chrome profiles when they all run on the
 > same machine.
 
-`paat` is a small CLI + MCP server + live dashboard you run locally. Each agent
-asks `paat` for a **lane** — an app port, a Chrome remote-debugging port, and a
-dedicated Chrome user-data-dir — before launching any browser automation. `paat`
+`PAAT` is a small CLI + MCP server + live dashboard you run locally. Each agent
+asks `PAAT` for a **lane** — an app port, a Chrome remote-debugging port, and a
+dedicated Chrome user-data-dir — before launching any browser automation. `PAAT`
 then enforces, on every re-check, that the agent only ever attaches to a Chrome
 running with **its own** profile, never a sibling agent's.
 
@@ -72,7 +72,7 @@ When two agents reuse the same Chrome debug port, the second one **silently atta
 
 Worse, two agents reusing the same `--user-data-dir` will **corrupt each other's profile**: Chrome's SingletonLock breaks, sessions invalidate, extensions reset.
 
-`paat` reserves a separate **lane** per (agent, project) pair so that never happens.
+`PAAT` reserves a separate **lane** per (agent, project) pair so that never happens.
 
 ## What a lane is
 
@@ -144,9 +144,9 @@ Restart the desktop app and the agent now has these tools available:
 
 A natural-language prompt that just works once both desktops are wired:
 
-> *Open https://example.com via paat in this folder.*
+> *Open https://example.com via PAAT in this folder.*
 
-The agent picks up that "via paat" → calls `open` → the session shows up on
+The agent picks up that "via PAAT" → calls `open` → the session shows up on
 the live dashboard within 2 seconds.
 
 ## Safety contract
@@ -159,7 +159,7 @@ the live dashboard within 2 seconds.
 | `unsafe-unknown`         | Debug port is held by a non-Chrome process. **Do not attach.** |
 
 `unsafe-*` verdicts cause `paat check` to exit code 3 and `launch-chrome` /
-`open` to refuse. **`paat` will never kill a process on its own.** The
+`open` to refuse. **`PAAT` will never kill a process on its own.** The
 dashboard's manual Kill button is the only path to termination, and it
 refuses to kill anything that isn't a Chromium-family process.
 
