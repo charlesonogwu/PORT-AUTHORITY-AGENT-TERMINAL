@@ -24,6 +24,8 @@ running with **its own** profile, never a sibling agent's.
 
 ## Quick install (Windows)
 
+> **Open PowerShell first** — not Command Prompt (`cmd.exe`). Press `Win+R`, type `powershell`, hit Enter. The install command below is a PowerShell one-liner; running it in `cmd.exe` produces `'iwr' is not recognized`.
+
 One PowerShell line. Auto-installs from npm if published, else from this repo.
 
 ```powershell
