@@ -1,0 +1,64 @@
+export const HELP = `portpilot — local lane coordinator for AI coding agents
+
+USAGE:
+  portpilot <command> [options]
+
+COMMANDS:
+  list                          List all lanes
+  status                        Show lanes + live port observations + warnings
+  reserve --owner <n> --cwd <p> Reserve a lane (allocates app & Chrome ports + profile dir)
+                  [--session <id>]   parallel session id (different sessions = different ports)
+                  [--task "..."] [--app-range 3000-3099] [--chrome-range 9322-9399]
+                  [--no-app-port] [--no-chrome-port] [--browser-script <path>] [--json]
+  check --owner <n> --cwd <p>   Verify the lane is safe to use right now (Chrome attach safety)
+                  [--session <id>] [--json]
+  release --owner <n> --cwd <p> Mark a lane as released
+                  [--session <id>] [--remove] (delete the entry instead of marking)
+  next [--range 9322-9399]      Find the next free port in a range
+                  [--json]
+  doctor                        Audit registry vs. live ports, suggest cleanups
+                  [--json]
+  prune                         Garbage-collect released lanes from the registry
+                  [--all]                    remove every released lane regardless of age
+                  [--older-than 24h]         only remove released lanes older than this (default 24h)
+                  [--dry-run]                preview without writing
+  launch-chrome --owner <n> --cwd <p>
+                                Launch Chrome bound to the lane's debug port + profile
+                  [--session <id>] [--dry-run] [--bin <path>]
+  config <subcommand>           Manage ~/.portpilot/config.json
+                  show                       (default) print current config
+                  recommend                  show RAM-based recommendation
+                  init [--force]             write recommended config (preserves existing values)
+                  set <key> <value>          set maxActiveLanes / warnAtActiveLanes / chromeDebugRange / appPortRange
+                  path                       print the config file path
+  dashboard [--port 7321] [--host 127.0.0.1] [--no-open] [--allow-remote]
+                                Start a local dashboard at http://127.0.0.1:7321
+                                showing every lane, its current page, and live Chrome status.
+                                --allow-remote is required to bind --host to anything other
+                                than 127.0.0.1 / ::1 / localhost (the dashboard exposes POST
+                                endpoints; remote bind is a real attack surface).
+  shortcut <subcommand>         Manage the Windows desktop shortcut for the dashboard
+                  install [--port 7321] [--icon "<dll>,<index>"]   create / refresh shortcut
+                  uninstall                                         remove the shortcut
+                  status                                            show install state
+  autostart <subcommand>        Auto-start the dashboard at Windows login
+                  install                                          add a shortcut to the Windows Startup folder
+                  uninstall                                        remove the autostart entry
+                  status                                           show whether autostart is enabled
+  mcp                           Run the MCP server over stdio
+  help                          Show this help
+
+GLOBAL FLAGS:
+  --json                        Emit machine-readable JSON
+  --owner <name>                Agent owner: codex, claude, gemini, ...
+  --cwd <path>                  Project working directory
+  -h, --help                    Show help
+
+EXAMPLES:
+  portpilot reserve --owner codex --cwd C:\\Users\\me\\Downloads\\vend-site --task "ship checkout"
+  portpilot check  --owner codex --cwd C:\\Users\\me\\Downloads\\vend-site
+  portpilot list --json
+  portpilot doctor
+
+Storage: %HOME%/.portpilot/lanes.json (override with PORTPILOT_HOME).
+`;

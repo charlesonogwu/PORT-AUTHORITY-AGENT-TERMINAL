@@ -1,5 +1,8 @@
 # Build outputs
-dist/
+# NOTE: dist/src/ IS committed so `npm install -g github:...` skips the
+# build entirely (prepare.cjs early-exits when dist/src/cli/index.js
+# exists). dist/tests/ and the dashboard's own dist/ are still excluded.
+dist/tests/
 dashboard-ui/portpilot-dashboard/dist/
 dashboard-ui/portpilot-dashboard/node_modules/
 *.tsbuildinfo

@@ -1,0 +1,223 @@
+import { KNOWN_LLM_OWNERS, isStale, laneSessionId, normalizeCwd, ownerSlug, projectSlug } from "../core/lane.js";
+import { listLanes } from "../core/registry.js";
+import { extractUserDataDir, isChromeProcess } from "../core/chrome.js";
+export async function readPortpilotLanes() {
+    const lanes = await listLanes();
+    return lanes.map((l) => toUnified(l));
+}
+function toUnified(l) {
+    const out = {
+        source: "portpilot",
+        id: l.id,
+        owner: l.owner,
+        project: l.project,
+        cwd: l.cwd,
+        sessionId: laneSessionId(l),
+        chromeProfileDir: l.chromeProfileDir,
+        status: l.status,
+        createdAt: l.createdAt,
+        lastSeen: l.lastSeen,
+    };
+    if (l.task !== undefined)
+        out.task = l.task;
+    if (l.appPort !== undefined)
+        out.appPort = l.appPort;
+    if (l.chromeDebugPort !== undefined)
+        out.chromeDebugPort = l.chromeDebugPort;
+    if (l.browserScript !== undefined)
+        out.browserScript = l.browserScript;
+    if (l.pid !== undefined)
+        out.pid = l.pid;
+    if (l.notes !== undefined)
+        out.notes = l.notes;
+    return out;
+}
+/**
+ * Pick out every Chromium-family parent process listening with
+ * --remote-debugging-port from the scanner's observations. Each one is a
+ * candidate for a dashboard entry, regardless of whether portpilot claims it.
+ *
+ * This is the LEGACY path — only finds Chromes with a TCP debug port.
+ * For the broader enumeration that also catches `--remote-debugging-pipe`
+ * Chromes (Playwright / Puppeteer default), use `findAllAgentChromes`.
+ */
+export function findLiveChromes(observations) {
+    const seen = new Set();
+    const out = [];
+    for (const o of observations) {
+        if (!isChromeProcess(o))
+            continue;
+        const cl = o.commandLine ?? "";
+        if (!/--remote-debugging-port=/.test(cl))
+            continue;
+        if (/--type=/.test(cl))
+            continue; // skip helper subprocesses
+        const profileDir = extractUserDataDir(cl);
+        const key = `${o.port}:${o.pid ?? 0}:${profileDir ?? "?"}`;
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        const live = { port: o.port, debugMode: "port" };
+        if (o.pid !== undefined)
+            live.pid = o.pid;
+        if (o.command !== undefined)
+            live.command = o.command;
+        if (o.commandLine !== undefined)
+            live.commandLine = o.commandLine;
+        if (profileDir !== undefined)
+            live.profileDir = profileDir;
+        out.push(live);
+    }
+    return out;
+}
+const CHROMIUM_NAMES = new Set([
+    "chrome.exe",
+    "chromium.exe",
+    "msedge.exe",
+    "brave.exe",
+    "thorium.exe",
+    "chrome",
+    "chromium",
+    "google-chrome",
+    "google-chrome-stable",
+    "msedge",
+    "brave",
+]);
+function isChromiumProcessName(name) {
+    return CHROMIUM_NAMES.has((name || "").toLowerCase());
+}
+/**
+ * Enumerate every Chromium-family PARENT process on the box and return one
+ * LiveChrome for each that's clearly being driven via CDP — whether by TCP
+ * port or stdio pipe.
+ *
+ * Why this exists: many agents (Playwright, Puppeteer, anything calling
+ * `chromium.launch()`) start Chrome with `--remote-debugging-pipe` instead
+ * of `--remote-debugging-port`. Pipe-mode Chrome opens NO listening port,
+ * so the legacy port-scan path above can't see them at all. They're the
+ * single biggest blind spot in dashboard coverage.
+ *
+ * We deliberately filter to "looks driven by an agent":
+ *   - Has --remote-debugging-port=N, OR
+ *   - Has --remote-debugging-pipe
+ * That keeps the user's regular browsing Chrome out of the dashboard.
+ *
+ * On non-Windows or when the process snapshot is empty, returns []. The
+ * caller is expected to fall back to `findLiveChromes` in that case.
+ */
+export function findAllAgentChromes(snap) {
+    const out = [];
+    const seen = new Set();
+    for (const proc of snap.processes.values()) {
+        if (!isChromiumProcessName(proc.name))
+            continue;
+        const cl = proc.commandLine ?? "";
+        if (/--type=/.test(cl))
+            continue; // helper subprocess (renderer/utility/gpu/zygote)
+        const portMatch = /--remote-debugging-port=(\d+)/.exec(cl);
+        // Match the literal flag only — reject `--remote-debugging-pipe-token=…`
+        // and similar variants that start with the same prefix.
+        const hasPipe = /--remote-debugging-pipe(?=\s|$|=)/.test(cl);
+        if (!portMatch && !hasPipe)
+            continue; // not an agent-driven Chrome
+        if (seen.has(proc.pid))
+            continue;
+        seen.add(proc.pid);
+        const profileDir = extractUserDataDir(cl);
+        // Prefer port mode when both are present — it's strictly more useful
+        // (we can read tabs).
+        const live = portMatch
+            ? { port: Number(portMatch[1]), debugMode: "port", pid: proc.pid, command: proc.name, commandLine: cl }
+            : { port: 0, debugMode: "pipe", pid: proc.pid, command: proc.name, commandLine: cl };
+        if (profileDir !== undefined)
+            live.profileDir = profileDir;
+        out.push(live);
+    }
+    return out;
+}
+function profilesEqual(a, b) {
+    if (!a || !b)
+        return false;
+    return normalizeCwd(a).toLowerCase() === normalizeCwd(b).toLowerCase();
+}
+/**
+ * Heuristically guess the agent owner from a Chrome profile directory.
+ * Pure best-effort — used when an external Chrome (one not registered in
+ * portpilot) shows up. Returns the literal "external" if no known agent
+ * name is recognizable. Uses the same canonical list as the allocator so
+ * both surfaces stay in sync.
+ */
+export function inferOwnerFromProfile(profileDir) {
+    if (!profileDir)
+        return "external";
+    const lower = profileDir.toLowerCase();
+    for (const c of KNOWN_LLM_OWNERS) {
+        if (lower.includes(c))
+            return c;
+    }
+    return "external";
+}
+/**
+ * Heuristically pick a project slug from a Chrome profile directory.
+ */
+export function inferProjectFromProfile(profileDir) {
+    if (!profileDir)
+        return "unknown";
+    const segments = profileDir.split(/[\\/]/).filter(Boolean);
+    const leaf = segments[segments.length - 1] ?? "";
+    const dashIdx = leaf.indexOf("-");
+    if (dashIdx !== -1)
+        return leaf.slice(dashIdx + 1);
+    return leaf || "unknown";
+}
+/**
+ * Tries to infer the project working directory from a Chrome profile path.
+ * Heuristics:
+ *   1. Profile is INSIDE the project (e.g. "<cwd>/.automation/chrome-profile-codex")
+ *      → return the cwd by walking up until we leave the .automation segment.
+ *   2. Otherwise we have no way to know — return undefined.
+ */
+export function inferCwdFromProfile(profileDir) {
+    if (!profileDir)
+        return undefined;
+    const norm = normalizeCwd(profileDir);
+    const lower = norm.toLowerCase();
+    const automationIdx = lower.indexOf("\\.automation\\");
+    if (automationIdx !== -1)
+        return norm.slice(0, automationIdx);
+    const altIdx = lower.indexOf("/.automation/");
+    if (altIdx !== -1)
+        return norm.slice(0, altIdx);
+    return undefined;
+}
+/**
+ * Build the merged list of entries the dashboard will render. Each entry is
+ * either:
+ *   • a portpilot-registered lane with optional live Chrome
+ *   • an external live Chrome with no portpilot registration (owner inferred)
+ *
+ * Live Chromes are matched to lanes by debug port + profile path.
+ */
+export function mergeSources(portpilotLanes, liveChromes) {
+    const out = [];
+    const matchedLaneIds = new Set();
+    for (const live of liveChromes) {
+        const lane = portpilotLanes.find((l) => l.chromeDebugPort === live.port && profilesEqual(l.chromeProfileDir, live.profileDir));
+        if (lane) {
+            matchedLaneIds.add(lane.id);
+            out.push({ lane, live, source: "portpilot" });
+        }
+        else {
+            out.push({ live, source: "external" });
+        }
+    }
+    for (const l of portpilotLanes) {
+        if (matchedLaneIds.has(l.id))
+            continue;
+        out.push({ lane: l, source: "portpilot" });
+    }
+    return out;
+}
+void ownerSlug; // keep export consistent with callers that may use it
+void isStale;
+void projectSlug;
