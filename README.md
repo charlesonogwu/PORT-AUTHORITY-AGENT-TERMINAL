@@ -24,28 +24,35 @@ running with **its own** profile, never a sibling agent's.
 
 ## Quick install (Windows)
 
-> **Open PowerShell first** — not Command Prompt (`cmd.exe`). Press `Win+R`, type `powershell`, hit Enter. The install command below is a PowerShell one-liner; running it in `cmd.exe` produces `'iwr' is not recognized`.
+**Prereqs:** Node.js ≥ 18.17 (which gives you `npm`) and `git` on PATH. Get Node from <https://nodejs.org/>; get Git from <https://git-scm.com/>.
 
-One PowerShell line. Auto-installs from npm if published, else from this repo.
+### Recommended — works in Command Prompt, PowerShell, anywhere
 
-```powershell
-iwr -useb https://raw.githubusercontent.com/charlesonogwu/port-authority-agent-terminal/main/scripts/install.ps1 | iex
+```
+npm install -g github:charlesonogwu/port-authority-agent-terminal
 ```
 
-The installer:
+One line. Single command. ~60 seconds. The package's `prepare` script auto-builds the React dashboard + TypeScript on install, so you don't need a separate build step.
 
-1. Verifies Node.js ≥ 18.17 + npm.
-2. Installs the package globally (npm if available, GitHub source as fallback).
-3. Auto-detects your machine's RAM and writes a sensible per-machine config.
-4. Tells you the next three commands to run.
-
-After install, you have **three CLI aliases** (all the same binary):
+When it's done you'll have **three CLI aliases** (all the same binary), a desktop shortcut to the dashboard, and Start Menu entries:
 
 ```
 paat              # the short one you'll actually type
 port-authority    # the readable one for scripts
 portpilot         # legacy alias
 ```
+
+Open the dashboard with `paat dashboard` or click the new desktop icon → goes to <http://127.0.0.1:7321/>.
+
+### Alternative — PowerShell installer with extra niceties
+
+If you'd rather a wrapper that also runs `paat config init` and prints next steps, paste this into a **PowerShell** window (NOT cmd.exe — it uses `iwr`/`iex`):
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/charlesonogwu/port-authority-agent-terminal/main/scripts/install.ps1 | iex
+```
+
+Same end result, slightly more verbose output. Pass `-Autostart` to also enable Windows-login autostart (off by default).
 
 > **Platform support.** Windows 10/11 only is officially tested. The code has
 > Mac/Linux fallback branches but they are not part of CI. PRs welcome if
