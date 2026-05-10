@@ -32,10 +32,18 @@ export declare function shortcutPaths(): ShortcutPaths;
  *       chrome process start and first paint without false negatives.
  *
  *  Open behavior (after the mutex is held):
- *    - If Chrome/Edge has a window with our profile: focus + exit.
- *    - Else: ensure server is up, spawn Chrome --app= window, wait for
- *      the window to appear, focus it, exit.
- *    - If no Chromium-family browser is found: fall back to Start-Process $Url.
+ *    1. ALWAYS probe http://127.0.0.1:<port>/healthz first. The presence of
+ *       a chrome.exe with our profile is NOT proof the server is alive —
+ *       a previous launch can leave the chrome window pointing at a now-dead
+ *       server (e.g. node crashed at boot, or the baked path went stale).
+ *    2. If healthz fails AND there are orphan chrome processes with our
+ *       profile, kill them so we don't end up focusing a window that's
+ *       sitting on a "127.0.0.1 refused to connect" error page.
+ *    3. If healthz fails, start the server. Try the baked node + cliJs
+ *       path first; if either is missing, fall back to `paat dashboard`
+ *       resolved via Get-Command. Poll healthz (not a fixed sleep) until
+ *       it answers 200 or we time out.
+ *    4. Then either focus the existing chrome window, or spawn a new one.
  */
 export declare function buildLauncherScript(opts: {
     node: string;
