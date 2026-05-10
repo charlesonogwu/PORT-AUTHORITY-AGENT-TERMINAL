@@ -51,7 +51,7 @@ Microsoft Defender keylogger heuristics.
 
 ## Installer (Phase 3)
 
-- [ ] `scripts/install.sh` - bash equivalent of install.ps1; checks node >= 18.17,
+- [ ] `scripts/install.sh` - bash equivalent of install.ps1; checks node >= 20,
       installs the npm package, runs `paat shortcut install` + `paat autostart install`
 - [ ] `scripts/postinstall.cjs` - extend `shouldSkip()` to allow macOS;
       currently it bails on non-Windows

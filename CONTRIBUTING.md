@@ -15,7 +15,7 @@ to make Mac/Linux nicer will not merge.
 You need:
 
 - Windows 10 or 11
-- Node.js 18.17 or newer
+- Node.js 20 or newer (Node 18 reached end-of-life in April 2025 and is no longer supported)
 - Git
 - Google Chrome (or Chromium / Edge / Brave) installed in a default path
 
