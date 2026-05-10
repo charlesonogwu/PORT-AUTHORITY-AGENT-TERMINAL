@@ -265,4 +265,4 @@ See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-[MIT](LICENSE)\n<!-- audit pipeline trigger test -->\n
+[MIT](LICENSE)\n<!-- audit pipeline trigger test -->\n\n<!-- pipeline test 2 -->\n
