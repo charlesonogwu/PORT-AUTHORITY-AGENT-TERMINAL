@@ -39,17 +39,33 @@ function laneOn(port = 9322): Lane {
   };
 }
 
-test("isSafeInitialUrl: accepts http/https/about/file/chrome/view-source/data", () => {
+test("isSafeInitialUrl: accepts only http/https + about:blank/about:newtab", () => {
   for (const url of [
     "http://example.com",
     "https://example.com",
+    "https://example.com/path?q=1#h",
     "about:blank",
-    "file:///tmp/x.html",
-    "chrome://newtab/",
-    "view-source:https://example.com",
-    "data:text/html,hi",
+    "about:newtab",
+    "ABOUT:BLANK", // case-insensitive about pages
   ]) {
     assert.equal(isSafeInitialUrl(url), true, url);
+  }
+});
+
+test("isSafeInitialUrl: rejects local-file / browser-internal schemes (security regression — see audit finding #4)", () => {
+  // These were previously accepted; an MCP agent could navigate the
+  // launched Chrome to file:///C:/Users/<you>/.ssh/id_rsa and read it
+  // via the lane's debug port. Default-deny.
+  for (const url of [
+    "file:///tmp/x.html",
+    "file:///C:/Windows/System32/drivers/etc/hosts",
+    "chrome://newtab/",
+    "chrome://settings/",
+    "view-source:https://example.com",
+    "data:text/html,hi",
+    "about:version", // any about: page other than blank/newtab
+  ]) {
+    assert.equal(isSafeInitialUrl(url), false, url);
   }
 });
 

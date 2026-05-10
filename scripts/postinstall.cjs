@@ -1,9 +1,21 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 /**
- * npm postinstall hook — wires up the desktop icon, the Start Menu entry,
- * and the Windows-login autostart for portpilot. Runs automatically after
- * `npm install -g port-authority-agent-terminal-mcp` (or local install).
+ * npm postinstall hook — wires up the desktop icon and the Start Menu entry
+ * for portpilot. Runs automatically after `npm install -g
+ * port-authority-agent-terminal-mcp` (or local install).
+ *
+ * Login-time autostart is INTENTIONALLY OPT-IN. We used to enable it
+ * automatically here, but a security audit (finding #1) flagged that as
+ * "persistence as a side effect of installation," which is a pattern AV
+ * scanners recognise from real malware. Users who want autostart get it
+ * with one explicit command after install:
+ *
+ *     paat autostart install
+ *
+ * Or, when running the install.ps1 bootstrap, by passing -Autostart.
+ * Setting PAAT_ENABLE_AUTOSTART=1 in the env also opts in for the
+ * postinstall path (useful for unattended Windows-login installs).
  *
  * Why CommonJS (.cjs): npm runs `postinstall` via `node`, not via tsx, and
  * the package's own `dist/` may not be on disk at this point during the
@@ -89,12 +101,22 @@ function main() {
   const shortcutOk = run(cliJs, ["shortcut", "install"]);
   if (!shortcutOk) warn("shortcut install failed — try `paat shortcut install` manually.");
 
-  log("Enabling Windows-login autostart…");
-  const autoOk = run(cliJs, ["autostart", "install"]);
-  if (!autoOk) warn("autostart install failed — try `paat autostart install` manually.");
-
-  if (shortcutOk && autoOk) {
-    log("Done. portpilot will start when you log in. Open the dashboard with `portpilot` or `paat dashboard`.");
+  // Login-time autostart is OPT-IN. Setting PAAT_ENABLE_AUTOSTART=1 keeps
+  // the old behavior (useful for unattended installs that explicitly want
+  // dashboard-on-login). Default is to leave autostart disabled and tell
+  // the user the one command they'd run to enable it later.
+  if (process.env.PAAT_ENABLE_AUTOSTART === "1") {
+    log("PAAT_ENABLE_AUTOSTART=1 detected — enabling Windows-login autostart…");
+    const autoOk = run(cliJs, ["autostart", "install"]);
+    if (!autoOk) warn("autostart install failed — try `paat autostart install` manually.");
+    if (shortcutOk && autoOk) {
+      log("Done. portpilot will start when you log in. Open the dashboard with `paat dashboard` or click the desktop icon.");
+    }
+  } else {
+    if (shortcutOk) {
+      log("Done. Open the dashboard with `paat dashboard` or click the new desktop icon.");
+      log("Want portpilot to start automatically at Windows login? Run: paat autostart install");
+    }
   }
 }
 

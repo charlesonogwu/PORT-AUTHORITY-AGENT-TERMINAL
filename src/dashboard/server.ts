@@ -1,6 +1,7 @@
-import { createServer, Server } from "node:http";
+import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
 import { AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import process from "node:process";
 import { buildSnapshot } from "./snapshot.js";
 import { killChromeByPid } from "./kill.js";
@@ -54,6 +55,113 @@ function validateConfigPatch(raw: unknown): { ok: true; patch: ConfigPatch } | {
   return { ok: true, patch };
 }
 
+/* -------------------------------------------------------------------------- */
+/*  CSRF + cross-origin guard for state-changing POST endpoints               */
+/* -------------------------------------------------------------------------- */
+/**
+ * The dashboard binds 127.0.0.1 by default. Without a CSRF check, any web
+ * page the user visits in any browser can issue blind POSTs to
+ * `http://127.0.0.1:7321/api/{kill,focus,hide,config}` — the browser
+ * fires the request even though CORS prevents reading the response. That
+ * lets a hostile page (a) kill arbitrary chrome PIDs by guessing them,
+ * or worse (b) overwrite portpilot's config (no PID guessing needed for
+ * /api/config).
+ *
+ * Defense in three layers, all required:
+ *
+ *   1. A random per-server-startup token. The dashboard HTML embeds it
+ *      via `<meta name="paat-csrf">`. The React app reads that meta tag
+ *      and sends it as the `X-Portpilot-CSRF` header on every POST.
+ *      A cross-site page cannot read that meta tag (same-origin
+ *      restriction) and cannot reproduce the token.
+ *
+ *   2. Strict `Content-Type: application/json`. This forces a CORS
+ *      preflight on cross-origin requests, which our missing CORS
+ *      headers will then reject. Combined with #1, the only way a
+ *      request can reach a POST handler is if it came from the
+ *      dashboard's own origin.
+ *
+ *   3. Origin / Sec-Fetch-Site sanity checks. Belt-and-braces: even if
+ *      a future config relaxes CORS, requests from other origins are
+ *      rejected explicitly.
+ *
+ * The token is regenerated on every server start. Restarting the
+ * dashboard invalidates outstanding browser tabs, which forces a
+ * page reload to fetch the new token. That's the right behavior — old
+ * tabs from a previous server lifetime shouldn't be authorized.
+ */
+
+function generateCsrfToken(): string {
+  return randomBytes(24).toString("hex"); // 48 hex chars, 192 bits
+}
+
+const CSRF_HEADER = "x-portpilot-csrf";
+
+/**
+ * Returns null on success, or an HTTP 403 reason string when the
+ * request must be rejected. The caller is expected to write a 403 with
+ * the reason as the response body.
+ */
+function checkCsrfAndOrigin(req: IncomingMessage, expectedToken: string, listenHost: string, listenPort: number): string | null {
+  // 1. Token must match
+  const got = (req.headers[CSRF_HEADER] as string | undefined) ?? "";
+  if (!got || got !== expectedToken) {
+    return "missing or invalid X-Portpilot-CSRF header";
+  }
+
+  // 2. Content-Type must be application/json (forces CORS preflight on cross-origin)
+  const ct = String(req.headers["content-type"] ?? "").toLowerCase();
+  if (!ct.startsWith("application/json")) {
+    return "Content-Type must be application/json";
+  }
+
+  // 3. Origin/Referer must be same-origin (when present — Origin is sent on
+  //    cross-origin and same-origin POSTs by every modern browser).
+  const expectedOrigins = new Set<string>([
+    `http://${listenHost}:${listenPort}`,
+    `http://localhost:${listenPort}`,
+    `http://127.0.0.1:${listenPort}`,
+  ]);
+  const origin = req.headers.origin as string | undefined;
+  if (origin && !expectedOrigins.has(origin.toLowerCase())) {
+    return `cross-origin request from ${origin} rejected`;
+  }
+  // Sec-Fetch-Site: same-origin / same-site / none (direct nav). Reject
+  // "cross-site" explicitly — the only way a real attacker page reaches
+  // us is via cross-site fetch.
+  const sfs = req.headers["sec-fetch-site"];
+  if (sfs && String(sfs).toLowerCase() === "cross-site") {
+    return "Sec-Fetch-Site: cross-site rejected";
+  }
+
+  return null;
+}
+
+function rejectCsrf(res: ServerResponse, reason: string): void {
+  res.writeHead(403, {
+    "content-type": "application/json",
+    "cache-control": "no-store",
+  }).end(JSON.stringify({ ok: false, error: `forbidden: ${reason}` }));
+}
+
+/**
+ * Embed the CSRF token into the served dashboard HTML. The React app
+ * reads it from `<meta name="paat-csrf" content="...">` on first load.
+ */
+function injectCsrfToken(html: string, token: string): string {
+  const metaTag = `<meta name="paat-csrf" content="${token}" />`;
+  // Insert just after <head> if there's no existing csrf meta; replace
+  // any prior placeholder if our build pipeline added one.
+  if (/<meta\s+name=["']paat-csrf["'][^>]*\/?>/i.test(html)) {
+    return html.replace(/<meta\s+name=["']paat-csrf["'][^>]*\/?>/i, metaTag);
+  }
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head[^>]*>/i, (m) => `${m}\n    ${metaTag}`);
+  }
+  // Fallback: prepend (HTML without <head> is unusual but handle it)
+  return `${metaTag}\n${html}`;
+}
+
 export interface DashboardServerOptions {
   port?: number;
   host?: string;
@@ -64,6 +172,8 @@ export interface DashboardServerHandle {
   server: Server;
   port: number;
   url: string;
+  /** The CSRF token in use this server lifetime — exposed for tests. */
+  csrfToken: string;
   close(): Promise<void>;
 }
 
@@ -84,6 +194,19 @@ export async function startDashboardServer(opts: DashboardServerOptions = {}): P
   const wantPort = opts.port ?? 7321;
   const cdpTimeoutMs = opts.cdpTimeoutMs ?? 1500;
 
+  // Random per-server-startup CSRF token. Embedded into the HTML the
+  // dashboard serves, required on every state-changing POST. Restarting
+  // the server invalidates open browser tabs (they'll fail their first
+  // POST and the user reloads). That's intentional — a token from a
+  // previous server lifetime should not authorize new actions.
+  const csrfToken = generateCsrfToken();
+  const dashboardHtml = injectCsrfToken(DASHBOARD_HTML, csrfToken);
+
+  // listenedPort is filled in after server.listen() completes. Until
+  // then we use the requested port for origin checks; the value gets
+  // updated to the actual bound port (matters if wantPort was taken).
+  let listenedPort = wantPort;
+
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${host}`);
@@ -93,7 +216,7 @@ export async function startDashboardServer(opts: DashboardServerOptions = {}): P
           res.writeHead(200, {
             "content-type": "text/html; charset=utf-8",
             "cache-control": "no-store",
-          }).end(DASHBOARD_HTML);
+          }).end(dashboardHtml);
           return;
         }
         if (url.pathname === "/api/snapshot") {
@@ -116,6 +239,15 @@ export async function startDashboardServer(opts: DashboardServerOptions = {}): P
         }
         res.writeHead(404, { "content-type": "text/plain" }).end("not found");
         return;
+      }
+      // ALL POST routes require a valid CSRF token + same-origin headers.
+      // Reject before any side effect runs.
+      if (req.method === "POST") {
+        const reason = checkCsrfAndOrigin(req, csrfToken, host, listenedPort);
+        if (reason !== null) {
+          rejectCsrf(res, reason);
+          return;
+        }
       }
       // POST /api/config — update maxActiveLanes / warnAtActiveLanes from the dashboard UI
       if (req.method === "POST" && url.pathname === "/api/config") {
@@ -239,12 +371,14 @@ export async function startDashboardServer(opts: DashboardServerOptions = {}): P
 
   const addr = server.address() as AddressInfo;
   const port = addr.port;
+  listenedPort = port; // sync the closure-visible value with the actual bound port
   const url = `http://${host}:${port}/`;
 
   return {
     server,
     port,
     url,
+    csrfToken,
     async close() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },

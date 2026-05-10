@@ -168,10 +168,27 @@ export function isChromeBinaryPath(p: string | undefined): boolean {
  * which a malicious MCP agent could otherwise smuggle through the `open`
  * tool to subvert the launched Chrome.
  */
+/**
+ * Default scheme allowlist for `initialUrl`. We deliberately do NOT
+ * accept `file:`, `chrome:`, `data:`, or `view-source:` — an MCP agent
+ * with the `open` tool can otherwise navigate the launched browser to
+ * `file:///C:/Users/<you>/.ssh/id_rsa` (or any local file Chrome can
+ * read) and then read it via the lane's debug port. Restricting to
+ * remote / blank schemes keeps the launched browser's filesystem
+ * authority pinned.
+ *
+ * If a future caller has a legitimate need for one of the blocked
+ * schemes, gate it behind an explicit `allowUnsafeSchemes: true` flag
+ * in the calling code path — do NOT relax this default.
+ */
+const SAFE_ABOUT_PAGES = new Set(["about:blank", "about:newtab"]);
+
 export function isSafeInitialUrl(url: string | undefined): boolean {
   if (!url || url.length === 0) return false;
-  if (url.startsWith("-")) return false;
-  return /^(https?:|about:|file:|chrome:|view-source:|data:)/i.test(url);
+  if (url.startsWith("-")) return false; // never a flag-injection
+  if (/^https?:\/\//i.test(url)) return true;
+  if (SAFE_ABOUT_PAGES.has(url.toLowerCase())) return true;
+  return false;
 }
 
 export class UnsafeChromeArgError extends Error {

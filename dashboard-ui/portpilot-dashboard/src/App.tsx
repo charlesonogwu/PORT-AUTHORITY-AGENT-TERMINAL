@@ -27,6 +27,25 @@ const POLL_MS = 2_000
 const KILL_CONFIRM_MS = 3_000
 
 /* -------------------------------------------------------------------------- */
+/*  CSRF-aware fetch helper                                                   */
+/* -------------------------------------------------------------------------- */
+/**
+ * Read the CSRF token the server injected into <meta name="paat-csrf">
+ * on the dashboard HTML. The server requires this token in the
+ * X-Portpilot-CSRF header on every state-changing POST. Without it,
+ * a hostile page on any other origin could blind-fire requests at
+ * 127.0.0.1:7321/api/{kill,focus,hide,config} and (e.g.) wipe the
+ * user's portpilot config or kill their agent's chrome.
+ */
+function getCsrfToken(): string {
+  if (typeof document === "undefined") return ""
+  const meta = document.querySelector(
+    'meta[name="paat-csrf"]'
+  ) as HTMLMetaElement | null
+  return meta?.content ?? ""
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Single-instance: detect when the dashboard is open in another tab/window  */
 /* -------------------------------------------------------------------------- */
 /**
@@ -601,7 +620,10 @@ function FocusButton({ pid }: { pid: number }) {
     try {
       const r = await fetch("/api/focus", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "X-Portpilot-CSRF": getCsrfToken(),
+        },
         body: JSON.stringify({ pid }),
       })
       const data = (await r.json()) as { ok: boolean; error?: string }
@@ -681,7 +703,10 @@ function HideAllButton({ sessions }: { sessions: LiveSession[] }) {
         try {
           const r = await fetch("/api/hide", {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              "X-Portpilot-CSRF": getCsrfToken(),
+            },
             body: JSON.stringify({ pid: s.pid }),
           })
           const data = (await r.json()) as { ok: boolean }
@@ -782,7 +807,10 @@ function KillAllButton({
         try {
           const r = await fetch("/api/kill", {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              "X-Portpilot-CSRF": getCsrfToken(),
+            },
             body: JSON.stringify({ pid: s.pid }),
           })
           const data = (await r.json()) as { ok: boolean }
@@ -856,7 +884,10 @@ function HideButton({ pid }: { pid: number }) {
     try {
       const r = await fetch("/api/hide", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "X-Portpilot-CSRF": getCsrfToken(),
+        },
         body: JSON.stringify({ pid }),
       })
       const data = (await r.json()) as { ok: boolean; error?: string }
@@ -927,7 +958,10 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
     try {
       const r = await fetch("/api/kill", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "X-Portpilot-CSRF": getCsrfToken(),
+        },
         body: JSON.stringify({ pid }),
       })
       const data = (await r.json()) as KillResult

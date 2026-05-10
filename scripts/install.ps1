@@ -4,8 +4,11 @@
 #   iwr -useb https://raw.githubusercontent.com/charlesonogwu/port-authority-agent-terminal/main/scripts/install.ps1 | iex
 #
 # Optional switches (when invoking the script directly, not via `| iex`):
-#   .\install.ps1 -NoAutostart    Skip enabling Windows-login autostart.
-#                                 (Run `paat autostart install` later if you change your mind.)
+#   .\install.ps1 -Autostart    Enable Windows-login autostart in this run.
+#                               Default is OFF — it's a security-sensitive form
+#                               of persistence and we want the user to opt in
+#                               explicitly. (Run `paat autostart install` later
+#                               instead if you skipped it now.)
 #
 # What it does:
 #   1. Verifies Node.js >= 18.17 and npm are present.
@@ -13,14 +16,14 @@
 #      Otherwise clones from GitHub, builds, and `npm link`s it.
 #   3. Auto-runs `paat config init` so you start with a sensible per-machine cap.
 #   4. Installs desktop + Start Menu shortcuts.
-#   5. Enables Windows-login autostart (skip with -NoAutostart).
+#   5. Enables Windows-login autostart ONLY if -Autostart was passed.
 #   6. Prints the next steps you need to actually use it.
 #
 # Re-running this script is safe — it upgrades in place.
 
 [CmdletBinding()]
 param(
-  [switch]$NoAutostart
+  [switch]$Autostart
 )
 
 $ErrorActionPreference = "Stop"
@@ -164,18 +167,20 @@ try {
 }
 
 # ── Windows-login autostart ───────────────────────────────────────────────
-# Drops a shortcut into the per-user Startup folder so the dashboard boots
-# silently when the user logs in. Disable any time with
-# `paat autostart uninstall`. Skip entirely with -NoAutostart.
-if ($NoAutostart) {
-  Write-Warn "Autostart skipped (-NoAutostart). Enable later with: $BIN_NAME autostart install"
-} else {
+# OPT-IN. Adding the dashboard to the Windows Startup folder is a form of
+# persistence; static AV scanners flag silent persistence as a side effect
+# of installation. We default to OFF and ask the user to pass -Autostart
+# (or run `paat autostart install` later) if they actually want it.
+if ($Autostart) {
   try {
     & $BIN_NAME autostart install | Out-Null
     Write-Ok "Autostart at Windows login enabled"
   } catch {
     Write-Warn "$BIN_NAME autostart install failed — run it later by hand."
   }
+} else {
+  Write-Host "  i Autostart at Windows login is disabled by default." -ForegroundColor DarkGray
+  Write-Host "    Enable it any time with: $BIN_NAME autostart install" -ForegroundColor DarkGray
 }
 
 # ── Done ───────────────────────────────────────────────────────────────────
