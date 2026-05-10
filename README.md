@@ -2,7 +2,7 @@
   <img src="assets/paat-readme-banner.png" alt="Port Authority Agent Terminal" width="720" />
 </p>
 
-# Port Authority Agent Terminal — `paat`
+# Port Authority Agent Terminal — `PAAT`
 
 > Windows-first lane coordinator for AI coding agents.
 > Stops Claude Desktop, Codex Desktop, and friends from stomping on each other's
