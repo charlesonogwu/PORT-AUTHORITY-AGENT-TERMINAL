@@ -24,7 +24,7 @@ running with **its own** profile, never a sibling agent's.
 
 ## Quick install (Windows)
 
-**Prereqs:** Node.js ≥ 18.17 (which gives you `npm`) and `git` on PATH. Get Node from <https://nodejs.org/>; get Git from <https://git-scm.com/>.
+**Prereqs:** Node.js ≥ 20 (which gives you `npm`) and `git` on PATH. Get Node from <https://nodejs.org/>; get Git from <https://git-scm.com/>.
 
 ### Recommended — works in Command Prompt, PowerShell, anywhere
 

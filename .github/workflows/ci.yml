@@ -30,7 +30,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ["18.x", "20.x", "22.x"]
+        # Node 18 was dropped 2026-05-10:
+        # - Reached end-of-life April 2025 (no security patches upstream).
+        # - Ships with an npm version that has bug npm/cli#4828 (rollup
+        #   native binding install fails for vite). Vite build fails with
+        #   "Cannot find native binding" on Windows runners. The bug is
+        #   fixed in npm bundled with Node 20+, so dropping the version is
+        #   strictly easier than maintaining a workaround for an EOL Node.
+        # If anyone shows up needing Node 18 support, fix engines and
+        # add it back here together.
+        node: ["20.x", "22.x"]
 
     steps:
       - name: Checkout
