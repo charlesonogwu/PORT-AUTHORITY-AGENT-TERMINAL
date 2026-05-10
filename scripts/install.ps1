@@ -8,7 +8,7 @@
 #                                 (Run `paat autostart install` later if you change your mind.)
 #
 # What it does:
-#   1. Verifies Node.js >= 18.17 and npm are present.
+#   1. Verifies Node.js >= 20 and npm are present (Node 18 hit end-of-life April 2025).
 #   2. If the package is published on npm, runs `npm install -g port-authority-agent-terminal-mcp`.
 #      Otherwise clones from GitHub, builds, and `npm link`s it.
 #   3. Auto-runs `paat config init` so you start with a sensible per-machine cap.
@@ -47,13 +47,13 @@ Write-Step "Checking prerequisites"
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   Write-Err "Node.js not found on PATH."
-  Write-Host "    Install Node 18.17 or newer from https://nodejs.org/ and re-run this installer."
+  Write-Host "    Install Node 20 or newer from https://nodejs.org/ and re-run this installer."
   exit 1
 }
 $nodeVer = (& node --version) -replace '^v',''
 $nodeMajor = [int](($nodeVer -split '\.')[0])
-if ($nodeMajor -lt 18) {
-  Write-Err "Node $nodeVer is too old. portpilot requires Node 18.17 or newer."
+if ($nodeMajor -lt 20) {
+  Write-Err "Node $nodeVer is too old. portpilot requires Node 20 or newer (Node 18 hit end-of-life April 2025)."
   exit 1
 }
 Write-Ok "Node $nodeVer"
