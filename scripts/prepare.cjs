@@ -18,19 +18,23 @@
  * Devdeps repair (the github-install path):
  * When npm runs `prepare` during `npm install -g github:user/repo`, in
  * theory npm installs devDependencies first so the build can run. In
- * practice we have seen two failure modes:
- *   - Users with `production=true` in their global .npmrc skip devDeps
- *     entirely, so `sharp`, `tsx`, and `typescript` aren't on disk when
- *     prepare fires.
- *   - Some npm versions (≥10.x in certain configurations) don't install
- *     devDeps for git installs at all.
- * Either way the symptom is the same: `npm run build:icons` fails with
- *   ERR_MODULE_NOT_FOUND: Cannot find package 'sharp'
- * To self-heal, we sniff for `node_modules/sharp`. If it's missing we run
- *   npm install --include=dev --no-audit --no-fund --ignore-scripts
- * exactly once before invoking the build. `--ignore-scripts` is critical
- * — without it, that nested install would re-trigger this same prepare
- * script and recurse.
+ * practice we have seen it skip them when:
+ *   - the user has `production=true` in their global .npmrc, or
+ *   - certain npm 10.x configurations don't fetch devDeps for git installs
+ * Either way the symptom is `tsc: not found` (or sharp ENOENT, when
+ * we still ran `build:icons`). Now `build:icons` early-exits when its
+ * outputs are already on disk (they're committed to git), so the only
+ * devDep we strictly need at install time is typescript.
+ *
+ * If `node_modules/typescript` is missing we run a nested
+ *   npm install --include=dev --no-audit --no-fund
+ * once. That nested install would itself re-trigger this same prepare
+ * script (npm runs prepare on `npm install` with no args), so we set
+ * PAAT_PREPARE_RUNNING=1 in its env and check that env var at the top
+ * of this script — the nested invocation early-exits and the outer
+ * invocation continues to the build. This lets sharp's own postinstall
+ * download its native binary (we deliberately removed the previous
+ * `--ignore-scripts` flag because it was breaking sharp).
  */
 
 const fs = require("node:fs");
@@ -39,7 +43,17 @@ const { spawnSync } = require("node:child_process");
 
 const repoRoot = path.resolve(__dirname, "..");
 const distEntry = path.join(repoRoot, "dist", "src", "cli", "index.js");
-const sharpDir = path.join(repoRoot, "node_modules", "sharp");
+const typescriptDir = path.join(repoRoot, "node_modules", "typescript");
+
+// Recursion guard. The nested `npm install --include=dev` we run below
+// will trigger a second invocation of this script via the `prepare`
+// lifecycle. We set PAAT_PREPARE_RUNNING=1 in that nested process's env
+// so this top-of-script check exits it cleanly without re-running the
+// install or build.
+if (process.env.PAAT_PREPARE_RUNNING === "1") {
+  console.log("[paat prepare] nested invocation detected (PAAT_PREPARE_RUNNING=1) — skipping");
+  process.exit(0);
+}
 
 if (process.env.CI === "true") {
   console.log("[paat prepare] CI=true detected, skipping (CI runs build explicitly)");
@@ -51,24 +65,32 @@ if (fs.existsSync(distEntry)) {
   process.exit(0);
 }
 
-// Self-heal missing devDeps before invoking the build. See header comment.
-if (!fs.existsSync(sharpDir)) {
+// Self-heal missing devDeps (specifically: typescript for `tsc`). See
+// header comment for the rationale and the recursion-guard contract.
+if (!fs.existsSync(typescriptDir)) {
   console.log(
-    "[paat prepare] sharp not found in node_modules — installing devDependencies " +
-      "(--include=dev --ignore-scripts) before build...",
+    "[paat prepare] typescript not found in node_modules — installing devDependencies " +
+      "(this is normal on a fresh `npm install -g github:...`)",
   );
   const install = spawnSync(
     "npm",
-    ["install", "--include=dev", "--no-audit", "--no-fund", "--ignore-scripts"],
-    { stdio: "inherit", shell: true, cwd: repoRoot },
+    ["install", "--include=dev", "--no-audit", "--no-fund"],
+    {
+      stdio: "inherit",
+      shell: true,
+      cwd: repoRoot,
+      env: { ...process.env, PAAT_PREPARE_RUNNING: "1" },
+    },
   );
   if (install.status !== 0) {
     console.error(
-      "[paat prepare] failed to install devDependencies (exit " + install.status + "). " +
-        "Try running this manually:\n" +
-        "  cd " + repoRoot + "\n" +
-        "  npm install --include=dev\n" +
-        "  npm run build",
+      "[paat prepare] failed to install devDependencies (exit " + install.status + ").\n" +
+        "Workaround — clone the repo and build manually:\n" +
+        "  git clone https://github.com/charlesonogwu/port-authority-agent-terminal.git\n" +
+        "  cd port-authority-agent-terminal\n" +
+        "  npm install\n" +
+        "  npm run build\n" +
+        "  npm link",
     );
     process.exit(install.status ?? 1);
   }
@@ -82,5 +104,11 @@ const r = spawnSync("npm", ["run", "build"], {
   stdio: "inherit",
   shell: true,
   cwd: repoRoot,
+  // Propagate the recursion-guard env into the build so any nested
+  // `npm install` (e.g. `build:dashboard` doing `npm --prefix
+  // dashboard-ui/portpilot-dashboard install`) doesn't re-fire
+  // OUR prepare script. The dashboard subdir has its own package.json
+  // and its own (unrelated) prepare hook, if any.
+  env: { ...process.env, PAAT_PREPARE_RUNNING: "1" },
 });
 process.exit(r.status ?? 1);

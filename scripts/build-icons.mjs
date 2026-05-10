@@ -12,12 +12,20 @@
  * The default crop is centered on the front-robot silhouette, which is the
  * most recognisable element down to 16×16. Override with env vars when
  * iterating: PAAT_CROP_LEFT, PAAT_CROP_TOP, PAAT_CROP_SIZE.
+ *
+ * IMPORTANT: All four output files are checked into git. End users running
+ * `npm install -g github:...` do NOT need to regenerate them — sharp +
+ * png-to-ico are dev-only conveniences for iterating on the source PNG.
+ * If every output file is already present we exit before importing sharp,
+ * so a missing/broken sharp install never crashes the build.
+ *
+ * To force a rebuild: set PAAT_FORCE_ICONS=1 in the env, or delete one of
+ * the output files before running `npm run build:icons`.
  */
+import { existsSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import sharp from "sharp";
-import pngToIco from "png-to-ico";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const BANNER = join(REPO_ROOT, "assets", "paat-banner.png");
@@ -61,8 +69,11 @@ function letterboxBg() {
  * (transparent by default — see letterboxBg). `fit: "contain"` is sharp's
  * letterbox mode. We do NOT call .flatten() — that would force-fill alpha
  * with a solid colour and destroy any transparency in the source.
+ *
+ * `sharp` is passed in (rather than imported at module scope) because we
+ * lazy-load it inside main() — see header comment for the rationale.
  */
-async function squareLetterbox(size, bg) {
+async function squareLetterbox(sharp, size, bg) {
   return sharp(BANNER)
     .resize(size, size, {
       fit: "contain",
@@ -74,6 +85,30 @@ async function squareLetterbox(size, bg) {
 }
 
 async function main() {
+  // End users get all four icon outputs from git — no need to invoke sharp
+  // unless someone is iterating on the source PNG. This skip is what makes
+  // `npm install -g github:...` work on machines where sharp's native
+  // binary fails to install (corp networks, unsupported arches, --ignore-
+  // scripts, etc.). Forcing a rebuild: PAAT_FORCE_ICONS=1.
+  const allOutputsExist =
+    existsSync(ICO_OUT) &&
+    existsSync(PNG_OUT_256) &&
+    existsSync(PNG_OUT_FAV) &&
+    existsSync(DASHBOARD_FAVICON) &&
+    existsSync(DASHBOARD_FAVICON_PNG);
+  if (allOutputsExist && process.env.PAAT_FORCE_ICONS !== "1") {
+    console.log(
+      "[build-icons] all icon outputs already exist — skipping (set PAAT_FORCE_ICONS=1 to rebuild)",
+    );
+    return;
+  }
+
+  // Lazy-import sharp + png-to-ico so the file doesn't crash with
+  // ERR_MODULE_NOT_FOUND when those devDeps aren't present (the
+  // common case during a `npm install -g github:...` build).
+  const { default: sharp } = await import("sharp");
+  const { default: pngToIco } = await import("png-to-ico");
+
   const meta = await sharp(BANNER).metadata();
   const bg = letterboxBg();
   const bgDesc = bg.alpha === 0 ? "transparent" : `rgb(${bg.r},${bg.g},${bg.b})`;
@@ -85,7 +120,7 @@ async function main() {
   //    Each size is rendered from the original (not from a smaller buffer)
   //    so we get the best lanczos3 result at each resolution.
   const pngBuffers = await Promise.all(
-    ICO_SIZES.map((s) => squareLetterbox(s, bg)),
+    ICO_SIZES.map((s) => squareLetterbox(sharp, s, bg)),
   );
 
   // 2. Pack into a multi-resolution .ico.
@@ -95,11 +130,11 @@ async function main() {
   console.log(`[build-icons] wrote ${ICO_OUT} (${icoBuffer.length} bytes)`);
 
   // 3. Standalone PNGs (README + dashboard).
-  const png256 = await squareLetterbox(256, bg);
+  const png256 = await squareLetterbox(sharp, 256, bg);
   await writeFile(PNG_OUT_256, png256);
   console.log(`[build-icons] wrote ${PNG_OUT_256}`);
 
-  const png32 = await squareLetterbox(32, bg);
+  const png32 = await squareLetterbox(sharp, 32, bg);
   await writeFile(PNG_OUT_FAV, png32);
   console.log(`[build-icons] wrote ${PNG_OUT_FAV}`);
 
