@@ -36,6 +36,11 @@ function shouldSkip() {
   if (process.platform !== "win32") return "non-Windows platform";
   if (process.env.PAAT_SKIP_POSTINSTALL === "1") return "PAAT_SKIP_POSTINSTALL=1";
   if (process.env.CI === "true") return "running in CI";
+  // PAAT_PREPARE_RUNNING is set by scripts/prepare.cjs when it kicks off
+  // a nested `npm install` to repair missing devDependencies. That nested
+  // install fires postinstall too, but we only want to wire shortcuts at
+  // the FINAL global install — not during the prepare-time devdeps repair.
+  if (process.env.PAAT_PREPARE_RUNNING === "1") return "nested prepare-time install";
   // Skip when installed as a transitive dep of someone else's project.
   // npm sets npm_config_global=true for `npm i -g`. We also allow a direct
   // local install of THIS package (when developing — package root has our
