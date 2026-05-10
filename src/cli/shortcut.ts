@@ -89,10 +89,18 @@ function psSingle(s: string): string {
  *       chrome process start and first paint without false negatives.
  *
  *  Open behavior (after the mutex is held):
- *    - If Chrome/Edge has a window with our profile: focus + exit.
- *    - Else: ensure server is up, spawn Chrome --app= window, wait for
- *      the window to appear, focus it, exit.
- *    - If no Chromium-family browser is found: fall back to Start-Process $Url.
+ *    1. ALWAYS probe http://127.0.0.1:<port>/healthz first. The presence of
+ *       a chrome.exe with our profile is NOT proof the server is alive —
+ *       a previous launch can leave the chrome window pointing at a now-dead
+ *       server (e.g. node crashed at boot, or the baked path went stale).
+ *    2. If healthz fails AND there are orphan chrome processes with our
+ *       profile, kill them so we don't end up focusing a window that's
+ *       sitting on a "127.0.0.1 refused to connect" error page.
+ *    3. If healthz fails, start the server. Try the baked node + cliJs
+ *       path first; if either is missing, fall back to `paat dashboard`
+ *       resolved via Get-Command. Poll healthz (not a fixed sleep) until
+ *       it answers 200 or we time out.
+ *    4. Then either focus the existing chrome window, or spawn a new one.
  */
 export function buildLauncherScript(opts: { node: string; cliJs: string; port: number }): string {
   const { node, cliJs, port } = opts;
@@ -105,7 +113,10 @@ export function buildLauncherScript(opts: { node: string; cliJs: string; port: n
     ``,
     `$ErrorActionPreference = "SilentlyContinue"`,
     `$Url = "http://127.0.0.1:${port}/"`,
+    `$HealthzUrl = $Url + "healthz"`,
     `$AppProfile = Join-Path $env:USERPROFILE ".portpilot\\dashboard-app-profile"`,
+    `$BakedNode = ${psSingle(node)}`,
+    `$BakedCliJs = ${psSingle(cliJs)}`,
     ``,
     `# Acquire a named mutex so concurrent shortcut clicks serialise.`,
     `# Plain name (no Global\\) makes it per-Windows-session, which is exactly`,
@@ -122,6 +133,46 @@ export function buildLauncherScript(opts: { node: string; cliJs: string; port: n
     `[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindowAsync(System.IntPtr hWnd, int nCmdShow);`,
     `"@ -Name PpWin -Namespace Pp -ErrorAction SilentlyContinue`,
     `} catch { }`,
+    ``,
+    `function Test-Healthz {`,
+    `  # 1-second health probe. Returns $true iff GET /healthz answers 200.`,
+    `  try {`,
+    `    $r = Invoke-WebRequest -Uri $HealthzUrl -TimeoutSec 1 -UseBasicParsing`,
+    `    return ($r.StatusCode -eq 200)`,
+    `  } catch { return $false }`,
+    `}`,
+    ``,
+    `function Wait-ForHealthz {`,
+    `  # Poll up to ~10s. Faster + more reliable than a fixed Start-Sleep on`,
+    `  # slow-boot machines where the node server takes longer to come up.`,
+    `  for ($i = 0; $i -lt 50; $i++) {`,
+    `    if (Test-Healthz) { return $true }`,
+    `    Start-Sleep -Milliseconds 200`,
+    `  }`,
+    `  return $false`,
+    `}`,
+    ``,
+    `function Resolve-PaatCommand {`,
+    `  # Fallback to PATH when the baked node/cliJs path went stale (e.g. user`,
+    `  # reinstalled to a different prefix and the launcher was never refreshed).`,
+    `  # Returns @{ FilePath, Args } if we can find paat, else $null.`,
+    `  if ((Test-Path $BakedNode) -and (Test-Path $BakedCliJs)) {`,
+    `    return @{`,
+    `      FilePath = $BakedNode`,
+    `      Args = @($BakedCliJs, 'dashboard', '--port', '${port}', '--no-open')`,
+    `    }`,
+    `  }`,
+    `  $cmd = Get-Command paat -ErrorAction SilentlyContinue`,
+    `  if (-not $cmd) { $cmd = Get-Command port-authority -ErrorAction SilentlyContinue }`,
+    `  if (-not $cmd) { $cmd = Get-Command portpilot -ErrorAction SilentlyContinue }`,
+    `  if ($cmd) {`,
+    `    return @{`,
+    `      FilePath = $cmd.Source`,
+    `      Args = @('dashboard', '--port', '${port}', '--no-open')`,
+    `    }`,
+    `  }`,
+    `  return $null`,
+    `}`,
     ``,
     `function Find-DashboardProcess {`,
     `  # Returns the chrome.exe / msedge.exe with our --user-data-dir. Prefers`,
@@ -141,6 +192,19 @@ export function buildLauncherScript(opts: { node: string; cliJs: string; port: n
     `  if ($main) { return $main } else { return $any }`,
     `}`,
     ``,
+    `function Stop-OrphanDashboardChrome {`,
+    `  # Called when the server is dead but Chrome processes still exist with`,
+    `  # our profile. Those windows are showing "127.0.0.1 refused to connect"`,
+    `  # and re-clicking the shortcut would just keep focusing them. Kill them`,
+    `  # so the new launch path can start fresh.`,
+    `  $procs = Get-CimInstance Win32_Process -Filter "Name='chrome.exe' OR Name='msedge.exe'" -ErrorAction SilentlyContinue`,
+    `  foreach ($cp in $procs) {`,
+    `    if (-not $cp.CommandLine) { continue }`,
+    `    if (-not $cp.CommandLine.Contains("--user-data-dir=$AppProfile")) { continue }`,
+    `    Stop-Process -Id $cp.ProcessId -Force -ErrorAction SilentlyContinue`,
+    `  }`,
+    `}`,
+    ``,
     `function Focus-Window($p) {`,
     `  if (-not $p) { return }`,
     `  if ($p.MainWindowHandle -eq 0) { return }`,
@@ -151,21 +215,24 @@ export function buildLauncherScript(opts: { node: string; cliJs: string; port: n
     `}`,
     ``,
     `try {`,
-    `  $existing = Find-DashboardProcess`,
+    `  # Step 1: Is the server already alive?`,
+    `  $serverAlive = Test-Healthz`,
     ``,
-    `  if (-not $existing) {`,
-    `    # No dashboard chrome running. Make sure the HTTP server is up.`,
-    `    $alive = $false`,
-    `    try {`,
-    `      $r = Invoke-WebRequest -Uri ($Url + "healthz") -TimeoutSec 1 -UseBasicParsing`,
-    `      if ($r.StatusCode -eq 200) { $alive = $true }`,
-    `    } catch { }`,
-    `    if (-not $alive) {`,
-    `      $argsList = @(${psSingle(cliJs)}, 'dashboard', '--port', '${port}', '--no-open')`,
-    `      Start-Process -FilePath ${psSingle(node)} -ArgumentList $argsList -WindowStyle Hidden`,
-    `      Start-Sleep -Milliseconds 1500`,
+    `  # Step 2: If not, kill any orphan chrome on our profile so we don't`,
+    `  # end up focusing a "site can't be reached" window, then start the server.`,
+    `  if (-not $serverAlive) {`,
+    `    Stop-OrphanDashboardChrome`,
+    ``,
+    `    $resolved = Resolve-PaatCommand`,
+    `    if ($resolved) {`,
+    `      Start-Process -FilePath $resolved.FilePath -ArgumentList $resolved.Args -WindowStyle Hidden`,
+    `      $serverAlive = Wait-ForHealthz`,
     `    }`,
+    `  }`,
     ``,
+    `  # Step 3: Find or open the dashboard window.`,
+    `  $existing = Find-DashboardProcess`,
+    `  if (-not $existing -and $serverAlive) {`,
     `    # Find a Chromium-family browser to host the --app= window.`,
     `    $chrome = $null`,
     `    foreach ($candidate in @(`,
