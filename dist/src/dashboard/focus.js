@@ -147,11 +147,11 @@ function runPowerShell(script, timeoutMs) {
  * Validates PID is actually a Chromium process before issuing the focus.
  */
 export async function focusChromeWindow(pid, opts = {}) {
-    if (process.platform !== "win32") {
-        return { ok: false, error: "focus is currently Windows-only" };
-    }
     if (!Number.isInteger(pid) || pid <= 0) {
         return { ok: false, error: "invalid pid" };
+    }
+    if (process.platform !== "win32") {
+        return { ok: false, error: "focus is currently Windows-only" };
     }
     // Same safety check as kill: confirm the PID is a Chromium process by
     // looking it up in a fresh port scan. Refuses to focus anything we
@@ -184,11 +184,11 @@ export async function focusChromeWindow(pid, opts = {}) {
  * PID is a Chromium process before touching the window.
  */
 export async function hideChromeWindow(pid, opts = {}) {
-    if (process.platform !== "win32") {
-        return { ok: false, error: "hide is currently Windows-only" };
-    }
     if (!Number.isInteger(pid) || pid <= 0) {
         return { ok: false, error: "invalid pid" };
+    }
+    if (process.platform !== "win32") {
+        return { ok: false, error: "hide is currently Windows-only" };
     }
     const scan = await scanPorts();
     const obs = scan.observations.find((o) => o.pid === pid);
