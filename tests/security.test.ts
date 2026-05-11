@@ -256,6 +256,20 @@ test("postinstall messaging does not advertise removed hotkey or extension flows
   assert.doesNotMatch(postinstall, /extension install/i);
 });
 
+test("build-only image packages are not installed during global runtime install", () => {
+  const pkg = JSON.parse(readRepoFile("package.json"));
+  const prodDeps = {
+    ...(pkg.dependencies ?? {}),
+    ...(pkg.optionalDependencies ?? {}),
+    ...(pkg.peerDependencies ?? {}),
+  };
+
+  assert.equal(prodDeps.sharp, undefined);
+  assert.equal(prodDeps["png-to-ico"], undefined);
+  assert.equal(pkg.devDependencies?.sharp, "^0.34.5");
+  assert.equal(pkg.devDependencies?.["png-to-ico"], "^3.0.1");
+});
+
 test("installer and CLI help do not advertise removed extension or hotkey flows", () => {
   for (const path of ["scripts/install.ps1", "src/cli/help.ts"]) {
     const content = readRepoFile(path);
