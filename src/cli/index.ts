@@ -9,6 +9,7 @@ import { evaluateChromeAttach, launchChromeForLane } from "../core/chrome.js";
 import { portpilotHome, profilesDir, registryPath } from "../core/paths.js";
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
 import { installShortcut, shortcutStatus, uninstallShortcut } from "./shortcut.js";
+import { installMcpFor, type McpClient } from "./install-mcp.js";
 import { ParsedArgs, flagBool, flagString, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
 import { formatLanesTable, formatReserveBlock } from "./format.js";
 import { HELP } from "./help.js";
@@ -519,6 +520,79 @@ async function cmdMcp(_ctx: CliContext): Promise<void> {
   await mod.runMcpStdio();
 }
 
+async function cmdInstallMcp(ctx: CliContext): Promise<void> {
+  // Argument shape: paat install-mcp <claude|codex|all|--all>
+  // Default (no positional) is "all" so the simplest invocation Just Works.
+  const VALID: McpClient[] = ["claude", "codex"];
+  const target = ctx.args.positional[0];
+  const allFlag = flagBool(ctx.args, "all");
+
+  let clients: McpClient[];
+  if (!target || target === "all" || allFlag) {
+    clients = VALID;
+  } else if ((VALID as string[]).includes(target)) {
+    clients = [target as McpClient];
+  } else {
+    fail(
+      ctx,
+      `unknown MCP client '${target}'. Try: paat install-mcp <claude|codex|all>`,
+    );
+  }
+
+  interface ResultEntry {
+    client: McpClient;
+    ok: boolean;
+    configPath?: string;
+    backupPath?: string | null;
+    action?: "installed" | "updated" | "already-installed";
+    error?: string;
+  }
+  const results: ResultEntry[] = [];
+
+  for (const c of clients!) {
+    try {
+      const r = await installMcpFor(c);
+      results.push({ ok: true, client: r.client, configPath: r.configPath, backupPath: r.backupPath, action: r.action });
+    } catch (err) {
+      results.push({ ok: false, client: c, error: (err as Error).message });
+    }
+  }
+
+  const wroteAnything = results.some(
+    (r) => r.ok && (r.action === "installed" || r.action === "updated"),
+  );
+  const allOk = results.every((r) => r.ok);
+
+  if (ctx.json) {
+    emit(ctx, { ok: allOk, results });
+    if (!allOk) process.exit(1);
+    return;
+  }
+
+  for (const r of results) {
+    if (!r.ok) {
+      ctx.stderr.write(`x ${r.client}: ${r.error}\n`);
+      continue;
+    }
+    const actionMsg =
+      r.action === "installed"
+        ? "installed"
+        : r.action === "updated"
+          ? "updated (replaced different command/args)"
+          : "already present (no change)";
+    ctx.stdout.write(`+ ${r.client}: ${actionMsg}\n`);
+    ctx.stdout.write(`  config: ${r.configPath}\n`);
+    if (r.backupPath) ctx.stdout.write(`  backup: ${r.backupPath}\n`);
+  }
+
+  if (wroteAnything) {
+    ctx.stdout.write(
+      `\nRestart any open Claude Desktop / Codex Desktop windows to activate the MCP integration.\n`,
+    );
+  }
+  if (!allOk) process.exit(1);
+}
+
 async function cmdAutostart(ctx: CliContext): Promise<void> {
   const sub = ctx.args.positional[0] ?? "status";
   const autostart = await import("./autostart.js");
@@ -590,6 +664,8 @@ async function dispatch(args: ParsedArgs): Promise<void> {
       return cmdDashboard(ctx);
     case "shortcut":
       return cmdShortcut(ctx);
+    case "install-mcp":
+      return cmdInstallMcp(ctx);
     case "autostart":
       return cmdAutostart(ctx);
     case "prune":
