@@ -544,7 +544,8 @@ async function cmdInstallMcp(ctx: CliContext): Promise<void> {
     ok: boolean;
     configPath?: string;
     backupPath?: string | null;
-    action?: "installed" | "updated" | "already-installed";
+    action?: "installed" | "updated" | "already-installed" | "skipped";
+    reason?: string;
     error?: string;
   }
   const results: ResultEntry[] = [];
@@ -552,7 +553,14 @@ async function cmdInstallMcp(ctx: CliContext): Promise<void> {
   for (const c of clients!) {
     try {
       const r = await installMcpFor(c);
-      results.push({ ok: true, client: r.client, configPath: r.configPath, backupPath: r.backupPath, action: r.action });
+      results.push({
+        ok: true,
+        client: r.client,
+        configPath: r.configPath,
+        backupPath: r.backupPath,
+        action: r.action,
+        ...(r.reason ? { reason: r.reason } : {}),
+      });
     } catch (err) {
       results.push({ ok: false, client: c, error: (err as Error).message });
     }
@@ -561,6 +569,8 @@ async function cmdInstallMcp(ctx: CliContext): Promise<void> {
   const wroteAnything = results.some(
     (r) => r.ok && (r.action === "installed" || r.action === "updated"),
   );
+  // "skipped" results are not failures — they just mean the target client
+  // isn't installed on this machine. Only true errors (thrown) count as !ok.
   const allOk = results.every((r) => r.ok);
 
   if (ctx.json) {
@@ -572,6 +582,11 @@ async function cmdInstallMcp(ctx: CliContext): Promise<void> {
   for (const r of results) {
     if (!r.ok) {
       ctx.stderr.write(`x ${r.client}: ${r.error}\n`);
+      continue;
+    }
+    if (r.action === "skipped") {
+      ctx.stdout.write(`- ${r.client}: skipped\n`);
+      if (r.reason) ctx.stdout.write(`  reason: ${r.reason}\n`);
       continue;
     }
     const actionMsg =

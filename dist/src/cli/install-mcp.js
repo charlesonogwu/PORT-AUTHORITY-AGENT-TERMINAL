@@ -294,13 +294,22 @@ export async function installClaudeCodeMcp(opts = {}) {
     const command = opts.command ?? "paat";
     const args = opts.args ?? ["mcp"];
     const run = opts.runner ?? defaultClaudeRunner;
-    // 1. Sanity-check that claude is reachable. If not, give a useful error
-    //    instead of a confusing "claude mcp list exited with code 127."
+    // 1. Sanity-check that claude is reachable. If not, return "skipped" rather
+    //    than throwing — that way `paat install-mcp` (all clients) doesn't fail
+    //    loudly during a postinstall on machines that only use Claude Desktop or
+    //    only Codex. The reason field carries the install hint if the user wants
+    //    to set up Claude Code later.
     const probe = await run(claudeBin, ["--version"]);
     if (!probe.ok) {
-        throw new Error(`'${claudeBin}' is not on PATH. Install Claude Code from ` +
-            `https://docs.claude.com/en/claude-code/quickstart first, then re-run ` +
-            `\`paat install-mcp claude-code\`.`);
+        return {
+            client: "claude-code",
+            configPath: "<claude CLI not installed>",
+            backupPath: null,
+            action: "skipped",
+            reason: `'${claudeBin}' is not on PATH. Install Claude Code from ` +
+                `https://docs.claude.com/en/claude-code/quickstart, then run ` +
+                `\`paat install-mcp claude-code\` to wire it up.`,
+        };
     }
     // 2. Check whether PAAT is already registered — under either the canonical
     //    name OR any legacy name. Legacy entries get migrated (removed) so the
