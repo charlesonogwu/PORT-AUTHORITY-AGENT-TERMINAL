@@ -1,6 +1,6 @@
 {
   "name": "port-authority-agent-terminal-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Windows-first lane coordinator for AI coding agents (Claude, Codex, etc.) — keeps multiple local agents from colliding on dev-server ports, Chrome debug ports, and Chrome user profiles. Includes a CLI, an MCP server, and a live dashboard.",
   "license": "MIT",
   "author": "charlesonogwu",
