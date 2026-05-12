@@ -18,7 +18,7 @@
  *      block is a fixed shape we can append textually; if a paat block
  *      already exists we leave it alone and report "already-installed."
  */
-export type McpClient = "claude" | "codex";
+export type McpClient = "claude" | "claude-code" | "codex";
 export interface InstallMcpOptions {
     /** Override the config file path. Used by tests. */
     configPath?: string;
@@ -57,4 +57,59 @@ export declare function installClaudeMcp(opts?: InstallMcpOptions): Promise<Inst
  * existing entry.
  */
 export declare function installCodexMcp(opts?: InstallMcpOptions): Promise<InstallMcpResult>;
+/**
+ * Result of running a `claude mcp ...` subcommand.
+ * Used by the injectable runner so tests can fake the CLI.
+ */
+export interface ClaudeCliRunResult {
+    ok: boolean;
+    stdout: string;
+    stderr: string;
+    code: number;
+}
+export type ClaudeCliRunner = (claudeBin: string, args: readonly string[]) => Promise<ClaudeCliRunResult>;
+export interface InstallClaudeCodeOptions {
+    /** Override the claude binary name. Defaults to "claude" (resolved via PATH). */
+    claudeBin?: string;
+    /**
+     * MCP scope. user (default) makes PAAT available across every project on this
+     * machine. project writes .mcp.json in the CWD (for team-shared configs).
+     * local stores it in ~/.claude.json scoped to the current project only.
+     */
+    scope?: "user" | "project" | "local";
+    /** The command claude should spawn for the MCP server. Defaults to "paat". */
+    command?: string;
+    /** Args to that command. Defaults to ["mcp"]. */
+    args?: string[];
+    /** Injectable for tests. If omitted we shell out for real via child_process.spawn. */
+    runner?: ClaudeCliRunner;
+}
+/**
+ * Parse a single line of `claude mcp list` output for the paat entry.
+ * The format Claude Code prints is:
+ *   "paat: paat mcp - ✓ Connected"
+ *   "paat: paat mcp - ! Failed to connect"
+ * We only care about: does an entry exist, and what's its command string?
+ */
+export declare function parseExistingPaatLine(listStdout: string): {
+    exists: boolean;
+    command: string | null;
+};
+/**
+ * Install (or update, or no-op) the PAAT MCP server entry in Claude Code's
+ * configuration. Delegates to the `claude` CLI so we don't have to encode
+ * Claude Code's config format ourselves (it can change between releases).
+ *
+ * Failure modes:
+ *   - `claude` not on PATH                -> clear error with install link
+ *   - `claude mcp list` errored           -> propagate stderr
+ *   - `claude mcp add` errored            -> propagate stderr
+ *
+ * Idempotency:
+ *   - Parses `claude mcp list` first.
+ *   - If paat already present with the same command -> "already-installed", no write.
+ *   - If paat already present with a different command -> remove + add ("updated").
+ *   - Otherwise -> add ("installed").
+ */
+export declare function installClaudeCodeMcp(opts?: InstallClaudeCodeOptions): Promise<InstallMcpResult>;
 export declare function installMcpFor(client: McpClient, opts?: InstallMcpOptions): Promise<InstallMcpResult>;
