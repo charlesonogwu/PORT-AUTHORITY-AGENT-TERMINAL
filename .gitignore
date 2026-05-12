@@ -20,6 +20,11 @@ agent-lanes/
 # Environment / secrets
 .env
 .env.local
+# Never commit npm auth tokens that may end up in a local .npmrc. The
+# canonical location for the user's npm token is ~/.npmrc (outside the
+# repo), but adding this guard means even an accidental write to a repo-
+# local .npmrc can never be staged.
+.npmrc
 
 # Editor / OS
 .DS_Store
