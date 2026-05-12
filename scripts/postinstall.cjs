@@ -2,8 +2,12 @@
 /* eslint-disable no-console */
 /**
  * npm postinstall hook — wires up the desktop icon, the Start Menu entry,
- * and the Windows-login autostart for portpilot. Runs automatically after
+ * the Windows-login autostart, AND the MCP integrations (Claude Desktop,
+ * Codex Desktop, Claude Code CLI) for portpilot. Runs automatically after
  * `npm install -g port-authority-agent-terminal-mcp` (or local install).
+ *
+ * Goal: a single `npm install -g` is all the user has to do. They don't
+ * need to also remember `paat install-mcp` afterwards.
  *
  * Why CommonJS (.cjs): npm runs `postinstall` via `node`, not via tsx, and
  * the package's own `dist/` may not be on disk at this point during the
@@ -13,6 +17,8 @@
  * Skip rules:
  *   - Non-Windows: silently skip (paat is Windows-first; nothing to wire).
  *   - PAAT_SKIP_POSTINSTALL=1 in env: skip everything (CI / sandboxed users).
+ *   - PAAT_SKIP_INSTALL_MCP=1 in env: skip ONLY the MCP wire-up step.
+ *     Useful if the user wants the binary but not auto-MCP registration.
  *   - npm_config_global !== "true" AND not invoked from the package root:
  *     skip — running postinstall from a transitive dependency is a footgun.
  *   - Failures: log + exit 0 so a broken postinstall doesn't break npm.
@@ -98,7 +104,23 @@ function main() {
   const autoOk = run(cliJs, ["autostart", "install"]);
   if (!autoOk) warn("autostart install failed — try `paat autostart install` manually.");
 
-  if (shortcutOk && autoOk) {
+  // Auto-wire the MCP integrations so the user doesn't have to remember to
+  // run `paat install-mcp` separately. This writes:
+  //   - %APPDATA%\Claude\claude_desktop_config.json    (Claude Desktop)
+  //   - ~/.codex/config.toml                            (Codex Desktop)
+  //   - ~/.claude.json                                  (Claude Code, via `claude mcp add`)
+  // Skipped clients (e.g. Claude Code when `claude` is not on PATH) print
+  // as "skipped" and don't count as failures.
+  let mcpOk = true;
+  if (process.env.PAAT_SKIP_INSTALL_MCP === "1") {
+    log("Skipping MCP wire-up (PAAT_SKIP_INSTALL_MCP=1).");
+  } else {
+    log("Wiring PAAT into Claude Desktop / Codex Desktop / Claude Code…");
+    mcpOk = run(cliJs, ["install-mcp"]);
+    if (!mcpOk) warn("install-mcp returned a non-zero status — re-run `paat install-mcp` manually.");
+  }
+
+  if (shortcutOk && autoOk && mcpOk) {
     log("Done. portpilot will start when you log in. Open the dashboard with `portpilot` or `paat dashboard`.");
   }
 }

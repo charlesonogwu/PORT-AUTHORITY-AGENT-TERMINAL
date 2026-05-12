@@ -539,12 +539,18 @@ test("installClaudeCodeMcp: replaces an existing canonical entry with a differen
   ]);
 });
 
-test("installClaudeCodeMcp: gives a clear error when `claude` is not on PATH", async () => {
+test("installClaudeCodeMcp: returns action='skipped' when `claude` is not on PATH (not thrown)", async () => {
+  // We DO NOT want this to throw — that would make `paat install-mcp` (all
+  // clients) fail loudly during postinstall on a machine that doesn't have
+  // Claude Code. Returning "skipped" is the right behavior so postinstall
+  // can keep going and wire up the OTHER clients cleanly.
   const { runner } = buildMockRunner([fail("command not found", 127)]);
-  await assert.rejects(
-    () => installClaudeCodeMcp({ runner }),
-    /'claude' is not on PATH.*claude-code\/quickstart/s,
-  );
+  const r = await installClaudeCodeMcp({ runner });
+  assert.equal(r.client, "claude-code");
+  assert.equal(r.action, "skipped");
+  assert.equal(r.backupPath, null);
+  assert.match(r.configPath, /not installed/i);
+  assert.match(r.reason ?? "", /Install Claude Code from/i);
 });
 
 test("installClaudeCodeMcp: propagates `claude mcp list` errors with stderr", async () => {
@@ -604,6 +610,13 @@ test("installClaudeCodeMcp: honors custom claudeBin, scope, command, args option
       "--debug",
     ],
   );
+});
+
+test("installClaudeCodeMcp: 'skipped' result still includes a useful reason field", async () => {
+  const { runner } = buildMockRunner([fail("ENOENT", -1)]);
+  const r = await installClaudeCodeMcp({ runner });
+  assert.equal(r.action, "skipped");
+  assert.ok(r.reason && r.reason.length > 0, "skipped results must carry a reason");
 });
 
 test("MCP_SERVER_NAME constant exports the canonical name", () => {

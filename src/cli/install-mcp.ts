@@ -54,7 +54,8 @@ export interface InstallMcpOptions {
 
 export interface InstallMcpResult {
   client: McpClient;
-  /** Absolute path to the config file that was written. */
+  /** Absolute path to the config file that was written, or a human-readable
+   *  placeholder when no write happened (e.g. "<claude CLI not installed>"). */
   configPath: string;
   /** Absolute path to the .backup-<ts> copy, or null if the file didn't exist before. */
   backupPath: string | null;
@@ -62,8 +63,13 @@ export interface InstallMcpResult {
    * - "installed"          → paat block was added (was absent)
    * - "updated"            → paat block existed with a different command/args, replaced
    * - "already-installed"  → paat block already present and matched exactly; no write
+   * - "skipped"            → the target client isn't installed on this machine
+   *                          (currently only used by claude-code when `claude` is
+   *                          not on PATH; we don't write anything in that case)
    */
-  action: "installed" | "updated" | "already-installed";
+  action: "installed" | "updated" | "already-installed" | "skipped";
+  /** Optional human-readable reason for action="skipped". */
+  reason?: string;
 }
 
 /** Resolves %APPDATA%\Claude\claude_desktop_config.json. Honors APPDATA env when present. */
@@ -386,15 +392,23 @@ export async function installClaudeCodeMcp(opts: InstallClaudeCodeOptions = {}):
   const args = opts.args ?? ["mcp"];
   const run = opts.runner ?? defaultClaudeRunner;
 
-  // 1. Sanity-check that claude is reachable. If not, give a useful error
-  //    instead of a confusing "claude mcp list exited with code 127."
+  // 1. Sanity-check that claude is reachable. If not, return "skipped" rather
+  //    than throwing — that way `paat install-mcp` (all clients) doesn't fail
+  //    loudly during a postinstall on machines that only use Claude Desktop or
+  //    only Codex. The reason field carries the install hint if the user wants
+  //    to set up Claude Code later.
   const probe = await run(claudeBin, ["--version"]);
   if (!probe.ok) {
-    throw new Error(
-      `'${claudeBin}' is not on PATH. Install Claude Code from ` +
-        `https://docs.claude.com/en/claude-code/quickstart first, then re-run ` +
-        `\`paat install-mcp claude-code\`.`,
-    );
+    return {
+      client: "claude-code",
+      configPath: "<claude CLI not installed>",
+      backupPath: null,
+      action: "skipped",
+      reason:
+        `'${claudeBin}' is not on PATH. Install Claude Code from ` +
+        `https://docs.claude.com/en/claude-code/quickstart, then run ` +
+        `\`paat install-mcp claude-code\` to wire it up.`,
+    };
   }
 
   // 2. Check whether PAAT is already registered — under either the canonical
