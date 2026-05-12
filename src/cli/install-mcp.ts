@@ -19,11 +19,12 @@
  *      already exists we leave it alone and report "already-installed."
  */
 
+import { spawn } from "node:child_process";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export type McpClient = "claude" | "codex";
+export type McpClient = "claude" | "claude-code" | "codex";
 
 export interface InstallMcpOptions {
   /** Override the config file path. Used by tests. */
@@ -174,8 +175,196 @@ export async function installCodexMcp(opts: InstallMcpOptions = {}): Promise<Ins
   return { client: "codex", configPath, backupPath, action: "installed" };
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Claude Code (the CLI, not the desktop app)                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Result of running a `claude mcp ...` subcommand.
+ * Used by the injectable runner so tests can fake the CLI.
+ */
+export interface ClaudeCliRunResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  code: number;
+}
+
+export type ClaudeCliRunner = (claudeBin: string, args: readonly string[]) => Promise<ClaudeCliRunResult>;
+
+export interface InstallClaudeCodeOptions {
+  /** Override the claude binary name. Defaults to "claude" (resolved via PATH). */
+  claudeBin?: string;
+  /**
+   * MCP scope. user (default) makes PAAT available across every project on this
+   * machine. project writes .mcp.json in the CWD (for team-shared configs).
+   * local stores it in ~/.claude.json scoped to the current project only.
+   */
+  scope?: "user" | "project" | "local";
+  /** The command claude should spawn for the MCP server. Defaults to "paat". */
+  command?: string;
+  /** Args to that command. Defaults to ["mcp"]. */
+  args?: string[];
+  /** Injectable for tests. If omitted we shell out for real via child_process.spawn. */
+  runner?: ClaudeCliRunner;
+}
+
+/**
+ * Quote a single shell argument so concatenation into a command line is safe.
+ * On Windows we double-quote anything with whitespace or shell metacharacters
+ * and escape internal double quotes by doubling them (cmd.exe convention).
+ * On POSIX we single-quote, escaping any internal single quotes.
+ */
+function quoteShellArg(arg: string): string {
+  if (process.platform === "win32") {
+    if (/[\s&|<>^"]/.test(arg) || arg.length === 0) {
+      return '"' + arg.replace(/"/g, '""') + '"';
+    }
+    return arg;
+  }
+  // POSIX: single-quote everything and escape internal single quotes.
+  return "'" + arg.replace(/'/g, "'\\''") + "'";
+}
+
+/**
+ * Wraps a Claude Code subcommand call. Background:
+ *
+ *   - On Windows, npm-installed binaries are .cmd shims. Per CVE-2024-27980,
+ *     Node ≥18 refuses to spawn a .cmd/.bat file WITHOUT shell:true. So we
+ *     have to use shell:true on Windows.
+ *   - With shell:true, Node's DEP0190 deprecation fires if you pass args
+ *     separately (Node concatenates without escaping → injection risk).
+ *
+ * The fix that satisfies both: build the command line ourselves with
+ * proper shell quoting, then call spawn with the FULL command string
+ * and an empty args array. Node sees no args to "unsafely concatenate"
+ * (we already did it, safely), and the shell still resolves .cmd shims.
+ */
+const defaultClaudeRunner: ClaudeCliRunner = (claudeBin, args) =>
+  new Promise<ClaudeCliRunResult>((resolve) => {
+    const cmdLine = [claudeBin, ...args].map(quoteShellArg).join(" ");
+    const child = spawn(cmdLine, [], {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: true,
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (b: Buffer) => { stdout += b.toString("utf8"); });
+    child.stderr?.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
+    child.on("error", (err) => resolve({ ok: false, stdout, stderr: stderr + String(err), code: -1 }));
+    child.on("close", (code) => resolve({ ok: code === 0, stdout, stderr, code: code ?? -1 }));
+  });
+
+/**
+ * Parse a single line of `claude mcp list` output for the paat entry.
+ * The format Claude Code prints is:
+ *   "paat: paat mcp - ✓ Connected"
+ *   "paat: paat mcp - ! Failed to connect"
+ * We only care about: does an entry exist, and what's its command string?
+ */
+export function parseExistingPaatLine(listStdout: string): { exists: boolean; command: string | null } {
+  for (const line of listStdout.split(/\r?\n/)) {
+    const m = /^paat:\s*(.+?)\s*-\s*[✓✗⚠!✓-]/u.exec(line);
+    if (m && m[1]) return { exists: true, command: m[1].trim() };
+    // Fallback: simpler match if we couldn't extract the command portion.
+    if (/^paat:/.test(line)) return { exists: true, command: null };
+  }
+  return { exists: false, command: null };
+}
+
+/**
+ * Install (or update, or no-op) the PAAT MCP server entry in Claude Code's
+ * configuration. Delegates to the `claude` CLI so we don't have to encode
+ * Claude Code's config format ourselves (it can change between releases).
+ *
+ * Failure modes:
+ *   - `claude` not on PATH                -> clear error with install link
+ *   - `claude mcp list` errored           -> propagate stderr
+ *   - `claude mcp add` errored            -> propagate stderr
+ *
+ * Idempotency:
+ *   - Parses `claude mcp list` first.
+ *   - If paat already present with the same command -> "already-installed", no write.
+ *   - If paat already present with a different command -> remove + add ("updated").
+ *   - Otherwise -> add ("installed").
+ */
+export async function installClaudeCodeMcp(opts: InstallClaudeCodeOptions = {}): Promise<InstallMcpResult> {
+  const claudeBin = opts.claudeBin ?? "claude";
+  const scope = opts.scope ?? "user";
+  const command = opts.command ?? "paat";
+  const args = opts.args ?? ["mcp"];
+  const run = opts.runner ?? defaultClaudeRunner;
+
+  // 1. Sanity-check that claude is reachable. If not, give a useful error
+  //    instead of a confusing "claude mcp list exited with code 127."
+  const probe = await run(claudeBin, ["--version"]);
+  if (!probe.ok) {
+    throw new Error(
+      `'${claudeBin}' is not on PATH. Install Claude Code from ` +
+        `https://docs.claude.com/en/claude-code/quickstart first, then re-run ` +
+        `\`paat install-mcp claude-code\`.`,
+    );
+  }
+
+  // 2. Check whether paat is already registered.
+  const list = await run(claudeBin, ["mcp", "list"]);
+  if (!list.ok) {
+    throw new Error(`\`claude mcp list\` failed (exit ${list.code}): ${list.stderr.trim() || "(no stderr)"}`);
+  }
+  const existing = parseExistingPaatLine(list.stdout);
+  const expectedCommand = [command, ...args].join(" ");
+
+  // The pseudo-config-path we report — Claude Code maintains the real path
+  // itself. For user/local scope this is ~/.claude.json, but we don't write
+  // to it directly, we delegate to the CLI.
+  const reportedPath = `${homedir()}${join("/", ".claude.json")} (managed by claude CLI, scope=${scope})`;
+
+  if (existing.exists && existing.command === expectedCommand) {
+    return { client: "claude-code", configPath: reportedPath, backupPath: null, action: "already-installed" };
+  }
+
+  // 3a. If an entry exists with a different command, remove it first.
+  let action: InstallMcpResult["action"] = "installed";
+  if (existing.exists) {
+    action = "updated";
+    const removed = await run(claudeBin, ["mcp", "remove", "paat", "--scope", scope]);
+    if (!removed.ok) {
+      throw new Error(
+        `\`claude mcp remove paat\` failed before re-adding (exit ${removed.code}): ${removed.stderr.trim() || "(no stderr)"}.\n` +
+          `You may need to remove paat manually with: ${claudeBin} mcp remove paat`,
+      );
+    }
+  }
+
+  // 3b. Add fresh.
+  const addArgs = [
+    "mcp",
+    "add",
+    "--transport",
+    "stdio",
+    "paat",
+    "--scope",
+    scope,
+    "--",
+    command,
+    ...args,
+  ];
+  const added = await run(claudeBin, addArgs);
+  if (!added.ok) {
+    throw new Error(`\`claude mcp add\` failed (exit ${added.code}): ${added.stderr.trim() || "(no stderr)"}`);
+  }
+
+  return { client: "claude-code", configPath: reportedPath, backupPath: null, action };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Dispatcher                                                                */
+/* -------------------------------------------------------------------------- */
+
 export async function installMcpFor(client: McpClient, opts: InstallMcpOptions = {}): Promise<InstallMcpResult> {
   if (client === "claude") return installClaudeMcp(opts);
+  if (client === "claude-code") return installClaudeCodeMcp({});
   if (client === "codex") return installCodexMcp(opts);
-  throw new Error(`unknown MCP client: ${client as string}. Supported: claude, codex.`);
+  throw new Error(`unknown MCP client: ${client as string}. Supported: claude, claude-code, codex.`);
 }

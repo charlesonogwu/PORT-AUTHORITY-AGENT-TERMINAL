@@ -549,9 +549,9 @@ async function cmdMcp(_ctx) {
     await mod.runMcpStdio();
 }
 async function cmdInstallMcp(ctx) {
-    // Argument shape: paat install-mcp <claude|codex|all|--all>
+    // Argument shape: paat install-mcp <claude|claude-code|codex|all|--all>
     // Default (no positional) is "all" so the simplest invocation Just Works.
-    const VALID = ["claude", "codex"];
+    const VALID = ["claude", "claude-code", "codex"];
     const target = ctx.args.positional[0];
     const allFlag = flagBool(ctx.args, "all");
     let clients;
@@ -562,7 +562,7 @@ async function cmdInstallMcp(ctx) {
         clients = [target];
     }
     else {
-        fail(ctx, `unknown MCP client '${target}'. Try: paat install-mcp <claude|codex|all>`);
+        fail(ctx, `unknown MCP client '${target}'. Try: paat install-mcp <claude|claude-code|codex|all>`);
     }
     const results = [];
     for (const c of clients) {

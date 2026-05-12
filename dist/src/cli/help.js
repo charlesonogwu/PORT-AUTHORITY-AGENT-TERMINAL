@@ -45,11 +45,12 @@ COMMANDS:
                   install                                          add a shortcut to the Windows Startup folder
                   uninstall                                        remove the autostart entry
                   status                                           show whether autostart is enabled
-  install-mcp <client>          Wire PAAT into a desktop AI agent's MCP config (no manual JSON edit)
-                  claude                                           %APPDATA%\\Claude\\claude_desktop_config.json
-                  codex                                            ~\\.codex\\config.toml
-                  all (default)                                    both — same as 'install-mcp' with no args
-                  (a timestamped backup is written next to the original before any edit)
+  install-mcp <client>          Wire PAAT into an AI agent's MCP config (no manual JSON edit)
+                  claude                                           Claude Desktop  → %APPDATA%\\Claude\\claude_desktop_config.json
+                  claude-code                                      Claude Code CLI → delegates to \`claude mcp add\` (user scope)
+                  codex                                            Codex Desktop   → ~\\.codex\\config.toml
+                  all (default)                                    all three — same as 'install-mcp' with no args
+                  (Claude / Codex configs get a timestamped backup; claude-code uses Claude Code's own CLI which has its own undo via \`claude mcp remove\`)
   mcp                           Run the MCP server over stdio
   help                          Show this help
 

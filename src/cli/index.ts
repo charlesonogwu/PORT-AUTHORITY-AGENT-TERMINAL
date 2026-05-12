@@ -521,9 +521,9 @@ async function cmdMcp(_ctx: CliContext): Promise<void> {
 }
 
 async function cmdInstallMcp(ctx: CliContext): Promise<void> {
-  // Argument shape: paat install-mcp <claude|codex|all|--all>
+  // Argument shape: paat install-mcp <claude|claude-code|codex|all|--all>
   // Default (no positional) is "all" so the simplest invocation Just Works.
-  const VALID: McpClient[] = ["claude", "codex"];
+  const VALID: McpClient[] = ["claude", "claude-code", "codex"];
   const target = ctx.args.positional[0];
   const allFlag = flagBool(ctx.args, "all");
 
@@ -535,7 +535,7 @@ async function cmdInstallMcp(ctx: CliContext): Promise<void> {
   } else {
     fail(
       ctx,
-      `unknown MCP client '${target}'. Try: paat install-mcp <claude|codex|all>`,
+      `unknown MCP client '${target}'. Try: paat install-mcp <claude|claude-code|codex|all>`,
     );
   }
 
