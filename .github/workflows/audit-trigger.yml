@@ -1,43 +1,52 @@
-# Sends a Telegram notification when a commit lands on main.
-# No secrets touch the file. No secrets touch the logs.
-# Reviewers see only ${{ secrets.X }} references.
+# Triggers the audit pipeline on the Pi when a commit lands on main.
+# Joins the tailnet briefly, SSHes into the Pi, runs the trigger script.
+# No secrets touch the file (only ${{ secrets.X }} references).
+# No public ports on the Pi. Tailnet is ephemeral for this job.
+
 name: notify on push
 
 on:
   push:
     branches: [main]
 
-# Lock GITHUB_TOKEN to read-only metadata. This job doesn't need anything else.
 permissions:
   contents: read
 
 jobs:
-  notify:
+  trigger-audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     steps:
-      - name: send telegram notification
+      - name: join tailnet
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: load ssh key
         env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.WARROOM_CHAT_ID }}
+          PI_SSH_KEY: ${{ secrets.PI_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$PI_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H raspberrypi2 >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: invoke audit trigger on pi
+        env:
           SHA: ${{ github.sha }}
           AUTHOR: ${{ github.actor }}
-          REPO: ${{ github.event.repository.name }}
+          REPO: ${{ github.event.repository.full_name }}
+          MSG_SUBJECT_RAW: ${{ github.event.head_commit.message }}
           BRANCH: ${{ github.ref_name }}
           COMMIT_URL: ${{ github.event.head_commit.url }}
-          MSG_SUBJECT_RAW: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
-          MSG_SUBJECT=$(printf '%s' "$MSG_SUBJECT_RAW" | head -n1 | head -c 200 | tr -d '\000-\037')
-          TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          read -r -d '' TEXT <<INNER || true
-          🔔 [audit-trigger] commit ${SHA} by ${AUTHOR} on ${REPO}
 
-          subject: ${MSG_SUBJECT}
-          branch: ${BRANCH}
-          url: ${COMMIT_URL}
-          ts: ${TS}
+          # Sanitise commit subject: first line, 200 char cap, strip control chars
+          SUBJECT=$(printf '%s' "$MSG_SUBJECT_RAW" | head -n1 | head -c 200 | tr -d '\000-\037')
 
-          start phase 0 of the review pipeline.
-          INNER
-          curl --fail --silent --show-error -X POST             "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"             --data-urlencode "chat_id=${CHAT_ID}"             --data-urlencode "text=${TEXT}"             --data-urlencode "disable_web_page_preview=true"             -o /dev/null
+          # SSH into the Pi over Tailscale, run the trigger script. Args quoted to survive shell parsing.
+          ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 penner@raspberrypi2 \
+            "~/scripts/trigger-audit.sh '$SHA' '$AUTHOR' '$REPO' '$SUBJECT' '$BRANCH' '$COMMIT_URL'"
