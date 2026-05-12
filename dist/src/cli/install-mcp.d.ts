@@ -19,6 +19,21 @@
  *      already exists we leave it alone and report "already-installed."
  */
 export type McpClient = "claude" | "claude-code" | "codex";
+/**
+ * Canonical MCP server name we register everywhere. This is what users see
+ * in Claude Code's /mcp view, Claude Desktop's MCP server list, and in any
+ * tool prefixes the agent generates (e.g. `port-authority-agent-terminal:
+ * reserve_lane`). We use kebab-case to match the npm package name and to
+ * avoid shell-quoting headaches.
+ */
+export declare const MCP_SERVER_NAME = "port-authority-agent-terminal";
+/**
+ * Older names we've registered under in past versions. When the installer
+ * finds an entry under one of these, it removes it as part of migrating to
+ * the canonical MCP_SERVER_NAME above. This guarantees a user who upgrades
+ * never ends up with duplicate entries in their MCP list.
+ */
+export declare const LEGACY_MCP_SERVER_NAMES: readonly ["paat"];
 export interface InstallMcpOptions {
     /** Override the config file path. Used by tests. */
     configPath?: string;
@@ -85,11 +100,18 @@ export interface InstallClaudeCodeOptions {
     runner?: ClaudeCliRunner;
 }
 /**
- * Parse a single line of `claude mcp list` output for the paat entry.
- * The format Claude Code prints is:
- *   "paat: paat mcp - ✓ Connected"
- *   "paat: paat mcp - ! Failed to connect"
- * We only care about: does an entry exist, and what's its command string?
+ * Parse `claude mcp list` output looking for a specific server name. Format:
+ *   "<name>: <command> - ✓ Connected"
+ *   "<name>: <command> - ! Failed to connect"
+ * Returns whether it exists and (best-effort) the command string.
+ */
+export declare function parseMcpListLine(listStdout: string, name: string): {
+    exists: boolean;
+    command: string | null;
+};
+/**
+ * Backwards-compatible alias retained for tests still calling the old name.
+ * Equivalent to parseMcpListLine(stdout, "paat").
  */
 export declare function parseExistingPaatLine(listStdout: string): {
     exists: boolean;

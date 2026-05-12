@@ -26,6 +26,23 @@ import { dirname, join } from "node:path";
 
 export type McpClient = "claude" | "claude-code" | "codex";
 
+/**
+ * Canonical MCP server name we register everywhere. This is what users see
+ * in Claude Code's /mcp view, Claude Desktop's MCP server list, and in any
+ * tool prefixes the agent generates (e.g. `port-authority-agent-terminal:
+ * reserve_lane`). We use kebab-case to match the npm package name and to
+ * avoid shell-quoting headaches.
+ */
+export const MCP_SERVER_NAME = "port-authority-agent-terminal";
+
+/**
+ * Older names we've registered under in past versions. When the installer
+ * finds an entry under one of these, it removes it as part of migrating to
+ * the canonical MCP_SERVER_NAME above. This guarantees a user who upgrades
+ * never ends up with duplicate entries in their MCP list.
+ */
+export const LEGACY_MCP_SERVER_NAMES = ["paat"] as const;
+
 export interface InstallMcpOptions {
   /** Override the config file path. Used by tests. */
   configPath?: string;
@@ -110,13 +127,35 @@ export async function installClaudeMcp(opts: InstallMcpOptions = {}): Promise<In
   }
 
   const mcpServers = (existing.mcpServers as Record<string, unknown> | undefined) ?? {};
-  const existingBlock = mcpServers.paat as { command?: string; args?: string[] } | undefined;
+  const existingBlock = mcpServers[MCP_SERVER_NAME] as { command?: string; args?: string[] } | undefined;
   const newBlock = { command, args };
 
+  // Migration: if an old PAAT entry exists under a legacy name (e.g. "paat"),
+  // delete it now so the user doesn't end up with duplicate entries in
+  // their MCP list after upgrading.
+  let migratedLegacy = false;
+  for (const legacyName of LEGACY_MCP_SERVER_NAMES) {
+    // Defensive guard: skip if a future LEGACY_MCP_SERVER_NAMES entry ever
+    // duplicates the canonical name. Cast to string so TS doesn't flag the
+    // comparison as impossible given today's literal types.
+    if ((legacyName as string) === (MCP_SERVER_NAME as string)) continue; // safety: never delete the current name
+    if (legacyName in mcpServers) {
+      delete mcpServers[legacyName];
+      migratedLegacy = true;
+    }
+  }
+
   let action: InstallMcpResult["action"];
-  if (existingBlock === undefined) {
+  if (migratedLegacy) {
+    // Any time we delete a legacy entry, the resulting write is meaningful
+    // regardless of whether the canonical entry was already correct.
+    action = "updated";
+  } else if (existingBlock === undefined) {
     action = "installed";
-  } else if (existingBlock.command === command && JSON.stringify(existingBlock.args ?? []) === JSON.stringify(args)) {
+  } else if (
+    existingBlock.command === command &&
+    JSON.stringify(existingBlock.args ?? []) === JSON.stringify(args)
+  ) {
     action = "already-installed";
   } else {
     action = "updated";
@@ -126,7 +165,7 @@ export async function installClaudeMcp(opts: InstallMcpOptions = {}): Promise<In
     return { client: "claude", configPath, backupPath, action };
   }
 
-  mcpServers.paat = newBlock;
+  mcpServers[MCP_SERVER_NAME] = newBlock;
   existing.mcpServers = mcpServers;
   await writeFile(configPath, JSON.stringify(existing, null, 2) + "\n", "utf8");
 
@@ -154,25 +193,64 @@ export async function installCodexMcp(opts: InstallMcpOptions = {}): Promise<Ins
     await copyFile(configPath, backupPath);
   }
 
-  // Detect an existing [mcp_servers.paat] section anywhere in the file. We
-  // require the section header to start the line (after optional whitespace)
-  // so we don't false-match it inside a string value.
-  const sectionRegex = /^[ \t]*\[mcp_servers\.paat\]/m;
-  if (raw !== null && sectionRegex.test(raw)) {
+  // Helper: detect a [mcp_servers.<name>] section header (start-of-line, after
+  // optional whitespace). We require the header to begin its line so we don't
+  // false-match the literal text `[mcp_servers.foo]` appearing inside a string.
+  const sectionHeaderRegex = (name: string): RegExp =>
+    new RegExp(`^[ \\t]*\\[mcp_servers\\.${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]`, "m");
+
+  // 1. Cut any legacy [mcp_servers.<legacy>] section out of the file before
+  //    writing the new one. We carve out the header line PLUS every
+  //    subsequent line that isn't another section header / EOF, so the
+  //    migrated config doesn't keep dead key/value pairs hanging around.
+  let working = raw ?? "";
+  for (const legacyName of LEGACY_MCP_SERVER_NAMES) {
+    // Defensive guard: skip if a future LEGACY_MCP_SERVER_NAMES entry ever
+    // duplicates the canonical name. Cast to string so TS doesn't flag the
+    // comparison as impossible given today's literal types.
+    if ((legacyName as string) === (MCP_SERVER_NAME as string)) continue;
+    const escaped = legacyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const sectionBlockRegex = new RegExp(
+      // The legacy section header line
+      `^[ \\t]*\\[mcp_servers\\.${escaped}\\][^\\n]*\\n` +
+        // Plus subsequent lines that are NOT a new section header
+        `(?:^(?!\\s*\\[)[^\\n]*\\n?)*`,
+      "gm",
+    );
+    working = working.replace(sectionBlockRegex, "");
+  }
+  // Collapse any 3+ consecutive blank lines we may have created.
+  working = working.replace(/\n{3,}/g, "\n\n");
+
+  // 2. If the canonical section is already present and unchanged, exit early.
+  //    (Note: we don't try to parse + diff existing TOML values — too fragile
+  //    without a real TOML parser. We treat "header exists" as "installed".)
+  if (sectionHeaderRegex(MCP_SERVER_NAME).test(working)) {
+    // If we cut out a legacy section above, that's still a write — re-emit.
+    if (working !== (raw ?? "")) {
+      await writeFile(configPath, working, "utf8");
+      return { client: "codex", configPath, backupPath, action: "updated" };
+    }
     return { client: "codex", configPath, backupPath, action: "already-installed" };
   }
 
-  // TOML inline-array syntax happens to be a subset of JSON, so JSON.stringify
-  // on the args produces a valid TOML right-hand side.
+  // 3. Append the new section. TOML inline-array syntax happens to be a
+  //    subset of JSON, so JSON.stringify on the args produces a valid TOML
+  //    right-hand side.
   const argsToml = JSON.stringify(args);
-  const block = `[mcp_servers.paat]\ncommand = ${JSON.stringify(command)}\nargs = ${argsToml}\n`;
+  const block = `[mcp_servers.${MCP_SERVER_NAME}]\ncommand = ${JSON.stringify(command)}\nargs = ${argsToml}\n`;
 
-  const prefix = raw ?? "";
+  const prefix = working;
   const needsBlankLine = prefix.length > 0 && !prefix.endsWith("\n\n");
   const sep = prefix.length === 0 ? "" : prefix.endsWith("\n") ? (needsBlankLine ? "\n" : "") : "\n\n";
   await writeFile(configPath, prefix + sep + block, "utf8");
 
-  return { client: "codex", configPath, backupPath, action: "installed" };
+  return {
+    client: "codex",
+    configPath,
+    backupPath,
+    action: working !== (raw ?? "") ? "updated" : "installed",
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -257,20 +335,32 @@ const defaultClaudeRunner: ClaudeCliRunner = (claudeBin, args) =>
   });
 
 /**
- * Parse a single line of `claude mcp list` output for the paat entry.
- * The format Claude Code prints is:
- *   "paat: paat mcp - ✓ Connected"
- *   "paat: paat mcp - ! Failed to connect"
- * We only care about: does an entry exist, and what's its command string?
+ * Parse `claude mcp list` output looking for a specific server name. Format:
+ *   "<name>: <command> - ✓ Connected"
+ *   "<name>: <command> - ! Failed to connect"
+ * Returns whether it exists and (best-effort) the command string.
  */
-export function parseExistingPaatLine(listStdout: string): { exists: boolean; command: string | null } {
+export function parseMcpListLine(
+  listStdout: string,
+  name: string,
+): { exists: boolean; command: string | null } {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const fullRegex = new RegExp(`^${escaped}:\\s*(.+?)\\s*-\\s*[✓✗⚠!✓-]`, "u");
+  const headRegex = new RegExp(`^${escaped}:`);
   for (const line of listStdout.split(/\r?\n/)) {
-    const m = /^paat:\s*(.+?)\s*-\s*[✓✗⚠!✓-]/u.exec(line);
+    const m = fullRegex.exec(line);
     if (m && m[1]) return { exists: true, command: m[1].trim() };
-    // Fallback: simpler match if we couldn't extract the command portion.
-    if (/^paat:/.test(line)) return { exists: true, command: null };
+    if (headRegex.test(line)) return { exists: true, command: null };
   }
   return { exists: false, command: null };
+}
+
+/**
+ * Backwards-compatible alias retained for tests still calling the old name.
+ * Equivalent to parseMcpListLine(stdout, "paat").
+ */
+export function parseExistingPaatLine(listStdout: string): { exists: boolean; command: string | null } {
+  return parseMcpListLine(listStdout, "paat");
 }
 
 /**
@@ -307,43 +397,73 @@ export async function installClaudeCodeMcp(opts: InstallClaudeCodeOptions = {}):
     );
   }
 
-  // 2. Check whether paat is already registered.
+  // 2. Check whether PAAT is already registered — under either the canonical
+  //    name OR any legacy name. Legacy entries get migrated (removed) so the
+  //    user doesn't end up with duplicate rows in their /mcp view.
   const list = await run(claudeBin, ["mcp", "list"]);
   if (!list.ok) {
     throw new Error(`\`claude mcp list\` failed (exit ${list.code}): ${list.stderr.trim() || "(no stderr)"}`);
   }
-  const existing = parseExistingPaatLine(list.stdout);
   const expectedCommand = [command, ...args].join(" ");
-
-  // The pseudo-config-path we report — Claude Code maintains the real path
-  // itself. For user/local scope this is ~/.claude.json, but we don't write
-  // to it directly, we delegate to the CLI.
   const reportedPath = `${homedir()}${join("/", ".claude.json")} (managed by claude CLI, scope=${scope})`;
 
-  if (existing.exists && existing.command === expectedCommand) {
-    return { client: "claude-code", configPath: reportedPath, backupPath: null, action: "already-installed" };
+  // 2a. Migrate any legacy entries first (regardless of whether the new name
+  //     is present). After this loop, only the canonical entry should remain
+  //     for our project.
+  let migratedLegacy = false;
+  for (const legacyName of LEGACY_MCP_SERVER_NAMES) {
+    // Defensive guard: skip if a future LEGACY_MCP_SERVER_NAMES entry ever
+    // duplicates the canonical name. Cast to string so TS doesn't flag the
+    // comparison as impossible given today's literal types.
+    if ((legacyName as string) === (MCP_SERVER_NAME as string)) continue;
+    const legacy = parseMcpListLine(list.stdout, legacyName);
+    if (!legacy.exists) continue;
+    const removed = await run(claudeBin, ["mcp", "remove", legacyName, "--scope", scope]);
+    if (!removed.ok) {
+      // Migration is best-effort — if remove fails (e.g. wrong scope), we log
+      // it via the thrown error rather than silently leaving the duplicate.
+      throw new Error(
+        `\`claude mcp remove ${legacyName}\` failed during migration (exit ${removed.code}): ` +
+          `${removed.stderr.trim() || "(no stderr)"}.\n` +
+          `Run \`${claudeBin} mcp remove ${legacyName}\` manually, then re-run \`paat install-mcp claude-code\`.`,
+      );
+    }
+    migratedLegacy = true;
   }
 
-  // 3a. If an entry exists with a different command, remove it first.
-  let action: InstallMcpResult["action"] = "installed";
+  // 2b. Now check the canonical name.
+  const existing = parseMcpListLine(list.stdout, MCP_SERVER_NAME);
+  if (existing.exists && existing.command === expectedCommand && !migratedLegacy) {
+    return {
+      client: "claude-code",
+      configPath: reportedPath,
+      backupPath: null,
+      action: "already-installed",
+    };
+  }
+
+  // 3a. If the canonical entry exists with a different command, remove it
+  //     first so we can re-add with the right one.
+  let action: InstallMcpResult["action"] = migratedLegacy ? "updated" : "installed";
   if (existing.exists) {
     action = "updated";
-    const removed = await run(claudeBin, ["mcp", "remove", "paat", "--scope", scope]);
+    const removed = await run(claudeBin, ["mcp", "remove", MCP_SERVER_NAME, "--scope", scope]);
     if (!removed.ok) {
       throw new Error(
-        `\`claude mcp remove paat\` failed before re-adding (exit ${removed.code}): ${removed.stderr.trim() || "(no stderr)"}.\n` +
-          `You may need to remove paat manually with: ${claudeBin} mcp remove paat`,
+        `\`claude mcp remove ${MCP_SERVER_NAME}\` failed before re-adding (exit ${removed.code}): ` +
+          `${removed.stderr.trim() || "(no stderr)"}.\n` +
+          `You may need to remove it manually with: ${claudeBin} mcp remove ${MCP_SERVER_NAME}`,
       );
     }
   }
 
-  // 3b. Add fresh.
+  // 3b. Add fresh under the canonical name.
   const addArgs = [
     "mcp",
     "add",
     "--transport",
     "stdio",
-    "paat",
+    MCP_SERVER_NAME,
     "--scope",
     scope,
     "--",
