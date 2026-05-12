@@ -270,6 +270,16 @@ test("build-only image packages are not installed during global runtime install"
   assert.equal(pkg.devDependencies?.["png-to-ico"], "^3.0.1");
 });
 
+test("runtime install uses stable MCP and zod package metadata", () => {
+  const pkg = JSON.parse(readRepoFile("package.json"));
+
+  assert.equal(pkg.dependencies?.["@modelcontextprotocol/sdk"], "1.17.5");
+  assert.equal(pkg.dependencies?.zod, "3.24.4");
+  assert.equal(pkg.dependencies?.["zod-to-json-schema"], "3.24.1");
+  assert.equal(pkg.overrides?.zod, "3.24.4");
+  assert.equal(pkg.overrides?.["zod-to-json-schema"], "3.24.1");
+});
+
 test("installer and CLI help do not advertise removed extension or hotkey flows", () => {
   for (const path of ["scripts/install.ps1", "src/cli/help.ts"]) {
     const content = readRepoFile(path);

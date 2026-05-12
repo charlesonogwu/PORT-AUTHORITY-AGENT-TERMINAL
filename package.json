@@ -1,7 +1,7 @@
 {
   "name": "port-authority-agent-terminal-mcp",
   "version": "0.1.2",
-  "description": "Windows-first lane coordinator for AI coding agents (Claude, Codex, etc.) — keeps multiple local agents from colliding on dev-server ports, Chrome debug ports, and Chrome user profiles. Includes a CLI, an MCP server, and a live dashboard.",
+  "description": "Windows-first lane coordinator for AI coding agents (Claude, Codex, etc.) \u2014 keeps multiple local agents from colliding on dev-server ports, Chrome debug ports, and Chrome user profiles. Includes a CLI, an MCP server, and a live dashboard.",
   "license": "MIT",
   "author": "charlesonogwu",
   "homepage": "https://github.com/charlesonogwu/port-authority-agent-terminal#readme",
@@ -83,6 +83,12 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4"
+    "@modelcontextprotocol/sdk": "1.17.5",
+    "zod": "3.24.4",
+    "zod-to-json-schema": "3.24.1"
+  },
+  "overrides": {
+    "zod": "3.24.4",
+    "zod-to-json-schema": "3.24.1"
   }
 }
