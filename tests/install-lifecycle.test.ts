@@ -42,3 +42,14 @@ test("postinstall lifecycle exits successfully if the helper script is absent", 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("postinstall MCP registration remains opt-in", () => {
+  const source = readFileSync(join(repoRoot, "scripts", "postinstall.cjs"), "utf8");
+
+  assert.match(source, /PAAT_INSTALL_MCP === "1"/);
+  assert.match(source, /Skipping MCP wire-up by default/);
+
+  const optIn = source.indexOf('process.env.PAAT_INSTALL_MCP === "1"');
+  const installMcp = source.indexOf('run(cliJs, ["install-mcp"])');
+  assert.ok(optIn >= 0 && installMcp > optIn, "install-mcp must be guarded by the opt-in env var");
+});

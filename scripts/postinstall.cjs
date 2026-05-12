@@ -17,8 +17,10 @@
  * Skip rules:
  *   - Non-Windows: silently skip (paat is Windows-first; nothing to wire).
  *   - PAAT_SKIP_POSTINSTALL=1 in env: skip everything (CI / sandboxed users).
+ *   - PAAT_INSTALL_MCP=1 in env: opt in to MCP wire-up during install.
+ *     By default npm install does not modify AI client MCP configs.
  *   - PAAT_SKIP_INSTALL_MCP=1 in env: skip ONLY the MCP wire-up step.
- *     Useful if the user wants the binary but not auto-MCP registration.
+ *     Useful for explicit defense-in-depth even when PAAT_INSTALL_MCP=1.
  *   - npm_config_global !== "true" AND not invoked from the package root:
  *     skip — running postinstall from a transitive dependency is a footgun.
  *   - Failures: log + exit 0 so a broken postinstall doesn't break npm.
@@ -104,20 +106,25 @@ function main() {
   const autoOk = run(cliJs, ["autostart", "install"]);
   if (!autoOk) warn("autostart install failed — try `paat autostart install` manually.");
 
-  // Auto-wire the MCP integrations so the user doesn't have to remember to
-  // run `paat install-mcp` separately. This writes:
+  // Optionally wire MCP integrations. This writes:
   //   - %APPDATA%\Claude\claude_desktop_config.json    (Claude Desktop)
   //   - ~/.codex/config.toml                            (Codex Desktop)
   //   - ~/.claude.json                                  (Claude Code, via `claude mcp add`)
   // Skipped clients (e.g. Claude Code when `claude` is not on PATH) print
   // as "skipped" and don't count as failures.
+  //
+  // This is opt-in because npm postinstall runs during package installation;
+  // installing a CLI should not silently grant it MCP access in unrelated AI
+  // clients. Users can run `paat install-mcp` later, or set PAAT_INSTALL_MCP=1.
   let mcpOk = true;
   if (process.env.PAAT_SKIP_INSTALL_MCP === "1") {
     log("Skipping MCP wire-up (PAAT_SKIP_INSTALL_MCP=1).");
-  } else {
+  } else if (process.env.PAAT_INSTALL_MCP === "1") {
     log("Wiring PAAT into Claude Desktop / Codex Desktop / Claude Code…");
     mcpOk = run(cliJs, ["install-mcp"]);
     if (!mcpOk) warn("install-mcp returned a non-zero status — re-run `paat install-mcp` manually.");
+  } else {
+    log("Skipping MCP wire-up by default. Run `paat install-mcp` or set PAAT_INSTALL_MCP=1 to opt in.");
   }
 
   if (shortcutOk && autoOk && mcpOk) {
