@@ -77,6 +77,63 @@ function findCli() {
   return null;
 }
 
+/**
+ * Locate the bundled bin/paat-launcher.exe inside the installed package, then
+ * copy it to a stable location at %LOCALAPPDATA%\PAAT\paat-launcher.exe so the
+ * Desktop / Start Menu shortcuts can point at it. We avoid pointing the
+ * shortcuts at the npm-install location directly because that path changes
+ * per global vs local install and per Node version.
+ *
+ * Returns the destination path on success, or null if either the source .exe
+ * isn't bundled (shouldn't happen for a published package) or the copy failed.
+ */
+function installLauncherExe() {
+  const here = __dirname;
+  const sourceCandidates = [
+    path.join(here, "..", "bin", "paat-launcher.exe"),
+    path.join(here, "..", "..", "port-authority-agent-terminal-mcp", "bin", "paat-launcher.exe"),
+  ];
+  let source = null;
+  for (const c of sourceCandidates) {
+    if (fs.existsSync(c)) {
+      source = c;
+      break;
+    }
+  }
+  if (!source) {
+    warn("could not find bundled bin/paat-launcher.exe — shortcuts will fall back to the PowerShell launcher.");
+    return null;
+  }
+
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) {
+    warn("LOCALAPPDATA env var not set — cannot install launcher .exe.");
+    return null;
+  }
+  const destDir = path.join(localAppData, "PAAT");
+  const destPath = path.join(destDir, "paat-launcher.exe");
+
+  try {
+    fs.mkdirSync(destDir, { recursive: true });
+    // Try to delete an existing copy first — Windows refuses to overwrite a
+    // .exe that's currently running. On failure (because the launcher IS
+    // running), the copyFileSync will throw EBUSY, which we catch below.
+    if (fs.existsSync(destPath)) {
+      try { fs.rmSync(destPath, { force: true }); } catch { /* ignore — handled below */ }
+    }
+    fs.copyFileSync(source, destPath);
+    return destPath;
+  } catch (err) {
+    if (err && err.code === "EBUSY") {
+      warn("paat-launcher.exe is currently running — close it before upgrading. Using the previously-installed copy.");
+      // The old .exe is still in place and still works; this isn't fatal.
+      return destPath;
+    }
+    warn("failed to install launcher .exe: " + (err && err.message ? err.message : String(err)));
+    return null;
+  }
+}
+
 function run(cliJs, args) {
   const r = spawnSync(process.execPath, [cliJs, ...args], { stdio: "inherit", windowsHide: true });
   return r.status === 0;
@@ -94,6 +151,14 @@ function main() {
     warn("could not locate dist/src/cli/index.js — skipping shortcut + autostart wiring.");
     warn("run `paat shortcut install` and `paat autostart install` manually after build.");
     return;
+  }
+
+  // Stage the native launcher .exe into %LOCALAPPDATA%\PAAT\ FIRST, so that
+  // `paat shortcut install` can find it and point the .lnk at it directly
+  // (no PowerShell middleman).
+  const launcherExe = installLauncherExe();
+  if (launcherExe) {
+    log(`Installed native launcher: ${launcherExe}`);
   }
 
   log("Setting up Windows shortcuts…");
