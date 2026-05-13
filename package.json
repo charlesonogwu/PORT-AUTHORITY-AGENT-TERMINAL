@@ -44,6 +44,7 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "dev": "tsx src/cli/index.ts",
     "prepare": "node scripts/prepare.cjs",
+    "prepack": "node scripts/prepack.cjs",
     "postinstall": "node -e \"try{require('./scripts/postinstall.cjs')}catch(e){if(e&&e.code==='MODULE_NOT_FOUND'&&String(e.message).includes('scripts/postinstall.cjs')){console.warn('[paat postinstall] skipped missing helper: '+e.message);process.exit(0)}throw e}\"",
     "test": "tsc -p tsconfig.json && node --test --test-reporter=spec dist/tests/*.test.js",
     "lint": "tsc -p tsconfig.json --noEmit",
