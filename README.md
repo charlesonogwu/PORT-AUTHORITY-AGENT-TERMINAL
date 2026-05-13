@@ -24,17 +24,17 @@ running with **its own** profile, never a sibling agent's.
 
 ## Quick install (Windows)
 
-**Prereqs:** Node.js ≥ 20 (which gives you `npm`) and `git` on PATH. Get Node from <https://nodejs.org/>; get Git from <https://git-scm.com/>.
+**Prereqs:** Node.js ≥ 20 (which gives you `npm`). Get it from <https://nodejs.org/>.
 
-### Recommended — works in Command Prompt, PowerShell, anywhere
+### Recommended — install from npm registry (fastest, most reliable)
 
 ```
-npm install -g github:charlesonogwu/port-authority-agent-terminal
+npm install -g port-authority-agent-terminal-mcp
 ```
 
-One line. Single command. ~60 seconds. The package's `prepare` script auto-builds the React dashboard + TypeScript on install, so you don't need a separate build step.
+Downloads a pre-built tarball. **No build step on your machine.** Completes in ~5 seconds. Works in Command Prompt, PowerShell, anywhere.
 
-When it's done you'll have **three CLI aliases** (all the same binary), a desktop shortcut to the dashboard, and Start Menu entries:
+When it's done you'll have **three CLI aliases** (all the same binary), a desktop shortcut to the dashboard, Start Menu entries, and the MCP server auto-wired into Claude Desktop / Codex Desktop / Claude Code if any of those are installed:
 
 ```
 paat              # the short one you'll actually type
@@ -43,6 +43,18 @@ portpilot         # legacy alias
 ```
 
 Open the dashboard with `paat dashboard` or click the new desktop icon → goes to <http://127.0.0.1:7321/>.
+
+**Upgrading?** Same command — npm picks up the latest version. To bump to a specific version: `npm install -g port-authority-agent-terminal-mcp@0.1.3`.
+
+### Alternative — install straight from GitHub source
+
+If you want the bleeding edge from `main` (including commits that haven't been released to npm yet), or to test a feature branch, install from git instead:
+
+```
+npm install -g github:charlesonogwu/port-authority-agent-terminal
+```
+
+This clones the repo to a temp dir, builds the dashboard + TypeScript on your machine, then installs the result. Slower (~60 seconds) and requires `git` on PATH. Useful for development, **not recommended for everyday use** — prefer the npm registry path above.
 
 ### Alternative — PowerShell installer with extra niceties
 
