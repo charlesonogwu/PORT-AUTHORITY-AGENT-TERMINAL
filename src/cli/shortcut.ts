@@ -3,10 +3,15 @@
  *
  * Today this only implements Windows (the only platform the user asked for).
  * macOS .app and Linux .desktop builds are pluggable behind the same CLI.
+ *
+ * v0.1.4 cutover: the shortcut now points DIRECTLY at a native Go-built
+ * paat-launcher.exe (bundled in the package at bin/paat-launcher.exe) instead
+ * of running a PowerShell script through powershell.exe. Single launcher,
+ * real .exe, no PowerShell flash. The old launch-dashboard.ps1 is gone.
  */
 
 import { spawn } from "node:child_process";
-import { access, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +19,15 @@ import { portpilotHome } from "../core/paths.js";
 
 export const DEFAULT_DASHBOARD_PORT = 7321;
 export const SHORTCUT_FILENAME = "portpilot.lnk";
-export const LAUNCHER_FILENAME = "launch-dashboard.ps1";
+/**
+ * Name of the legacy PowerShell launcher script created by versions ≤ 0.1.3.
+ * We delete it on install/uninstall if found, so users upgrading from an
+ * older version end up with a clean ~/.portpilot directory.
+ */
+export const LEGACY_LAUNCHER_FILENAME = "launch-dashboard.ps1";
+
+/** Filename of the native Go-built launcher .exe bundled in bin/. */
+export const LAUNCHER_EXE_FILENAME = "paat-launcher.exe";
 
 export interface ShortcutPaths {
   shortcut: string;
@@ -28,10 +41,11 @@ export interface ShortcutPaths {
 export function shortcutPaths(): ShortcutPaths {
   const desktop =
     process.env.USERPROFILE ? join(process.env.USERPROFILE, "Desktop") : join(homedir(), "Desktop");
+  const localAppData = process.env.LOCALAPPDATA ?? portpilotHome();
   return {
     desktop,
     shortcut: join(desktop, SHORTCUT_FILENAME),
-    launcher: join(portpilotHome(), LAUNCHER_FILENAME),
+    launcher: join(localAppData, "PAAT", LAUNCHER_EXE_FILENAME),
     home: portpilotHome(),
   };
 }
@@ -58,32 +72,97 @@ async function resolveDesktopFolder(): Promise<string> {
   });
 }
 
-/** Resolve the absolute path of dist/src/cli/index.js so the launcher can call
- *  it directly without depending on PATH. */
-function cliEntryPath(): string {
-  return fileURLToPath(import.meta.url).replace(/[\\/]shortcut\.(?:js|ts)$/, "/index.js");
-}
-
-function nodeExe(): string {
-  return process.execPath;
-}
-
 /** PowerShell single-quote: escapes embedded single quotes by doubling them. */
 function psSingle(s: string): string {
   return `'${s.replace(/'/g, "''")}'`;
 }
 
-/** Generates the launch-dashboard.ps1 contents, baking in absolute paths so
- *  the user's PATH does not matter at click-time.
+/**
+ * Resolve the source bin/paat-launcher.exe inside the installed package.
+ * Works both in production (npm-global install) and in dev mode (local
+ * checkout where the .exe was just built by `npm run build:launcher`).
  *
- *  Single-instance guarantees this script enforces:
- *    1. Named mutex around the whole launch flow. Concurrent shortcut
- *       clicks block until the first finishes, so two fast clicks can't
- *       both decide "no chrome yet, spawn one" and double-up.
- *    2. After spawning chrome, we hold the mutex until chrome's main
- *       window handle becomes observable (or 8s timeout). The next click
- *       then sees the just-opened window and focuses it instead of
- *       spawning another.
+ * Returns the absolute source path, or null if the .exe isn't there.
+ */
+async function resolveBundledLauncherExe(): Promise<string | null> {
+  const here = fileURLToPath(import.meta.url);
+  const candidates = [
+    // dist/src/cli/shortcut.js → ../../../bin/paat-launcher.exe (running from dist)
+    here.replace(/[\\/]dist[\\/]src[\\/]cli[\\/]shortcut\.(?:js|ts)$/, "/bin/" + LAUNCHER_EXE_FILENAME),
+    // src/cli/shortcut.ts → ../../bin/paat-launcher.exe (dev mode via tsx)
+    here.replace(/[\\/]src[\\/]cli[\\/]shortcut\.(?:js|ts)$/, "/bin/" + LAUNCHER_EXE_FILENAME),
+  ];
+  for (const c of candidates) {
+    try {
+      await access(c);
+      return c;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+/**
+ * Stage the bundled paat-launcher.exe into %LOCALAPPDATA%\PAAT\ so the .lnk
+ * has a stable target path that doesn't change between npm versions.
+ * Returns the destination path on success, throws otherwise.
+ *
+ * If a previous copy is "locked" (the .exe is currently running because the
+ * user double-clicked the shortcut), we keep the previously-installed copy
+ * instead of failing — the old version works fine, the upgrade just lags
+ * until the next time the user closes + reopens.
+ */
+async function stageLauncherExe(): Promise<string> {
+  const source = await resolveBundledLauncherExe();
+  if (!source) {
+    throw new Error(
+      `bundled ${LAUNCHER_EXE_FILENAME} not found in package. ` +
+        `Reinstall via npm, or run \`npm run build:launcher\` in a local dev checkout.`,
+    );
+  }
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) {
+    throw new Error("LOCALAPPDATA env var not set — cannot determine install dir for launcher .exe.");
+  }
+  const destDir = join(localAppData, "PAAT");
+  const destPath = join(destDir, LAUNCHER_EXE_FILENAME);
+  await mkdir(destDir, { recursive: true });
+  try {
+    // Remove an existing copy first so copyFile doesn't fail on Windows when
+    // the destination is read-only (it shouldn't be, but be defensive).
+    await rm(destPath, { force: true });
+  } catch {
+    /* ignore */
+  }
+  try {
+    await copyFile(source, destPath);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EBUSY") {
+      // The .exe is currently running — keep the existing copy. The old
+      // version still works; the user will pick up the new one next launch.
+      return destPath;
+    }
+    throw err;
+  }
+  return destPath;
+}
+
+/**
+ * Legacy PowerShell launcher script generator. Retained only as an exported
+ * symbol so older test snapshots / external callers don't break, but no
+ * production code path calls it anymore — the .lnk now points at the
+ * native bin/paat-launcher.exe instead. This will be removed in v0.2.
+ *
+ * @deprecated Use the native Go launcher (bin/paat-launcher.exe). Do not
+ *             generate, write, or rely on this PowerShell script.
+ *
+ * Historical context (kept for grep-ability):
+ *  - Named mutex for single-instance behavior
+ *  - healthz probe + orphan chrome kill
+ *  - Find or spawn Chrome --app= window pointed at the dashboard
+ * All of that lives in cmd/paat-launcher/main.go now.
  *    3. Detection only requires "any chrome.exe with our --user-data-dir";
  *       it doesn't require a main window yet. That handles the gap between
  *       chrome process start and first paint without false negatives.
@@ -287,45 +366,56 @@ function runPowerShell(script: string): Promise<RunResult> {
   });
 }
 
-/** Install the desktop shortcut + launcher script. Idempotent (overwrites). */
+/** Install the desktop shortcut + native launcher .exe. Idempotent (overwrites). */
 export async function installShortcut(opts: { port?: number; iconLocation?: string } = {}): Promise<ShortcutPaths> {
   if (process.platform !== "win32") {
     throw new Error("portpilot shortcut is currently Windows-only.");
   }
-  const port = opts.port ?? DEFAULT_DASHBOARD_PORT;
+  // `port` is no longer consumed at install time — the .exe targets 7321
+  // internally — but we keep the option in the API for back-compat.
+  void (opts.port ?? DEFAULT_DASHBOARD_PORT);
+
   // Always resolve the canonical Desktop folder via Windows API. Static path
   // guessing fails when the user has OneDrive Desktop redirection.
   const desktop = await resolveDesktopFolder();
   const paths: ShortcutPaths = {
     desktop,
     shortcut: join(desktop, SHORTCUT_FILENAME),
-    launcher: join(portpilotHome(), LAUNCHER_FILENAME),
+    // `launcher` is now the path to the native .exe, not a .ps1 script.
+    launcher: join(process.env.LOCALAPPDATA ?? portpilotHome(), "PAAT", LAUNCHER_EXE_FILENAME),
     home: portpilotHome(),
   };
 
-  // 1. Write the launcher script.
-  await mkdir(dirname(paths.launcher), { recursive: true });
-  const launcher = buildLauncherScript({ node: nodeExe(), cliJs: cliEntryPath(), port });
-  await writeFile(paths.launcher, launcher, "utf8");
+  // 1. Stage the native paat-launcher.exe into %LOCALAPPDATA%\PAAT\. This is
+  //    what the .lnk will point at, so it has to exist before we create the
+  //    shortcut.
+  const launcherExe = await stageLauncherExe();
+  paths.launcher = launcherExe;
 
-  // 1b. Resolve the icon to point at. Priority:
+  // 1b. Delete the legacy launch-dashboard.ps1 if it exists from a previous
+  //     install — keeps the user's ~/.portpilot directory tidy.
+  try {
+    await rm(join(portpilotHome(), LEGACY_LAUNCHER_FILENAME), { force: true });
+  } catch {
+    /* ignore */
+  }
+
+  // 1c. Resolve the icon to point at. Priority:
   //   (a) caller override
   //   (b) bundled paat.ico shipped with the package (assets/paat.ico)
   //   (c) generic Windows globe glyph (legacy fallback)
   const iconLocation = opts.iconLocation ?? (await resolveBundledIcon()) ?? "C:\\Windows\\System32\\imageres.dll,109";
 
-  // 2. Create the .lnk via WScript.Shell COM. The shortcut points at
-  //    powershell.exe and runs the launcher with execution policy bypass
-  //    and a hidden window. We also stamp an AppUserModelID so multiple
-  //    dashboard windows group correctly under one taskbar icon.
-  const psArgs = `-ExecutionPolicy Bypass -WindowStyle Hidden -File "${paths.launcher}"`;
+  // 2. Create the .lnk via WScript.Shell COM, pointing DIRECTLY at the
+  //    native .exe. No PowerShell middleman, no execution-policy dance,
+  //    no console window flash.
   const aumid = "PortAuthority.AgentTerminal";
   const psScript = [
     `$WshShell = New-Object -ComObject WScript.Shell`,
     `$Shortcut = $WshShell.CreateShortcut(${psSingle(paths.shortcut)})`,
-    `$Shortcut.TargetPath = 'powershell.exe'`,
-    `$Shortcut.Arguments = ${psSingle(psArgs)}`,
-    `$Shortcut.WorkingDirectory = ${psSingle(paths.home)}`,
+    `$Shortcut.TargetPath = ${psSingle(launcherExe)}`,
+    `$Shortcut.Arguments = ''`,
+    `$Shortcut.WorkingDirectory = ${psSingle(dirname(launcherExe))}`,
     `$Shortcut.IconLocation = ${psSingle(iconLocation)}`,
     `$Shortcut.Description = 'Open the Port Authority Agent Terminal dashboard'`,
     `$Shortcut.Save()`,
@@ -347,7 +437,7 @@ export async function installShortcut(opts: { port?: number; iconLocation?: stri
   // 3. Mirror the same .lnk into the user's Start Menu so Windows Search
   //    picks it up when they type "paat" / "port authority" / "agent terminal".
   //    The Desktop-only shortcut is indexed less reliably than the Start Menu.
-  await installStartMenuShortcut({ paths, iconLocation, port, aumid });
+  await installStartMenuShortcut({ paths, iconLocation, launcherExe, aumid });
 
   return paths;
 }
@@ -395,7 +485,7 @@ async function startMenuFolder(): Promise<string> {
 async function installStartMenuShortcut(args: {
   paths: ShortcutPaths;
   iconLocation: string;
-  port: number;
+  launcherExe: string;
   aumid: string;
 }): Promise<void> {
   const programs = await startMenuFolder();
@@ -403,13 +493,12 @@ async function installStartMenuShortcut(args: {
   const subfolder = join(programs, "Port Authority Agent Terminal");
   await mkdir(subfolder, { recursive: true });
   const startMenuLnk = join(subfolder, "Port Authority Agent Terminal.lnk");
-  const psArgs = `-ExecutionPolicy Bypass -WindowStyle Hidden -File "${args.paths.launcher}"`;
   const psScript = [
     `$WshShell = New-Object -ComObject WScript.Shell`,
     `$Shortcut = $WshShell.CreateShortcut(${psSingle(startMenuLnk)})`,
-    `$Shortcut.TargetPath = 'powershell.exe'`,
-    `$Shortcut.Arguments = ${psSingle(psArgs)}`,
-    `$Shortcut.WorkingDirectory = ${psSingle(args.paths.home)}`,
+    `$Shortcut.TargetPath = ${psSingle(args.launcherExe)}`,
+    `$Shortcut.Arguments = ''`,
+    `$Shortcut.WorkingDirectory = ${psSingle(dirname(args.launcherExe))}`,
     `$Shortcut.IconLocation = ${psSingle(args.iconLocation)}`,
     `$Shortcut.Description = 'Open the Port Authority Agent Terminal dashboard'`,
     `$Shortcut.Save()`,
@@ -417,15 +506,17 @@ async function installStartMenuShortcut(args: {
   await runPowerShell(psScript);
 }
 
-/** Remove the desktop shortcut + launcher script + Start Menu folder. */
+/** Remove the desktop shortcut, native launcher .exe, the legacy .ps1, and Start Menu folder. */
 export async function uninstallShortcut(): Promise<{ removedShortcut: boolean; removedLauncher: boolean }> {
   const desktop = await resolveDesktopFolder();
   const shortcut = join(desktop, SHORTCUT_FILENAME);
-  const launcher = join(portpilotHome(), LAUNCHER_FILENAME);
+  const launcherExe = join(process.env.LOCALAPPDATA ?? portpilotHome(), "PAAT", LAUNCHER_EXE_FILENAME);
+  const legacyPs1 = join(portpilotHome(), LEGACY_LAUNCHER_FILENAME);
   let removedShortcut = false;
   let removedLauncher = false;
   try { await rm(shortcut, { force: true }); removedShortcut = true; } catch { /* ignore */ }
-  try { await rm(launcher, { force: true }); removedLauncher = true; } catch { /* ignore */ }
+  try { await rm(launcherExe, { force: true }); removedLauncher = true; } catch { /* ignore — may be in use */ }
+  try { await rm(legacyPs1, { force: true }); } catch { /* ignore — may not exist on fresh installs */ }
   // Also clean up the static-guess location in case a previous version
   // wrote one there.
   try { await rm(shortcutPaths().shortcut, { force: true }); } catch { /* ignore */ }
@@ -450,7 +541,7 @@ export async function shortcutStatus(): Promise<{
 }> {
   const desktop = await resolveDesktopFolder();
   const shortcut = join(desktop, SHORTCUT_FILENAME);
-  const launcher = join(portpilotHome(), LAUNCHER_FILENAME);
+  const launcher = join(process.env.LOCALAPPDATA ?? portpilotHome(), "PAAT", LAUNCHER_EXE_FILENAME);
   const programs = await startMenuFolder();
   const startMenu = programs
     ? join(programs, "Port Authority Agent Terminal", "Port Authority Agent Terminal.lnk")
