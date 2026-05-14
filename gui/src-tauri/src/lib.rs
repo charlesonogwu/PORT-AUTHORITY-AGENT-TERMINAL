@@ -6,6 +6,7 @@
 // `paat <subcommand> --json` so the CLI remains the single source of truth
 // for mutations. See docs/superpowers/plans/2026-05-13-tauri-migration.md.
 
+mod cli;
 mod commands;
 mod paths;
 
