@@ -492,56 +492,41 @@ async function cmdShortcut(ctx) {
     fail(ctx, `unknown 'shortcut' subcommand: ${sub}. Try: install, uninstall, status`, 1);
 }
 /**
- * The dashboard exposes process metadata + POST /api/{kill,focus,hide}.
- * Binding it to anything other than loopback turns those endpoints into
- * a remote attack surface, so we require an explicit --allow-remote flag
- * to opt into a non-loopback bind. This is defense-in-depth on top of
- * the server's own host argument.
+ * `paat dashboard` — spawn the native Tauri dashboard binary.
+ *
+ * As of v0.2.0 the dashboard is a real Tauri app (WebView2 / WKWebView),
+ * not an Express server + Chrome --app=. No port binding, no localhost,
+ * no remote-attack-surface concerns. The legacy --port / --host /
+ * --allow-remote flags are accepted but ignored (with a warning) so we
+ * don't break scripts upgrading from v0.1.x.
  */
-function isLoopbackHost(host) {
-    const h = host.trim().toLowerCase();
-    return (h === "127.0.0.1" ||
-        h === "::1" ||
-        h === "localhost" ||
-        h === "[::1]");
-}
 async function cmdDashboard(ctx) {
-    const port = Number(flagString(ctx.args, "port") ?? "7321");
-    const noOpen = flagBool(ctx.args, "no-open");
-    const host = flagString(ctx.args, "host") ?? "127.0.0.1";
-    const allowRemote = flagBool(ctx.args, "allow-remote", false);
-    if (!Number.isInteger(port) || port <= 0)
-        fail(ctx, `invalid --port: ${port}`, 1);
-    if (!isLoopbackHost(host) && !allowRemote) {
-        fail(ctx, `refusing to bind dashboard to non-loopback host '${host}'. The dashboard ` +
-            `exposes process metadata and POST endpoints (kill, focus, hide); binding it ` +
-            `remotely is a real attack surface. Pass --allow-remote if you understand and ` +
-            `accept that risk (e.g. on a trusted internal LAN).`, 1);
+    const legacyPort = flagString(ctx.args, "port");
+    const legacyHost = flagString(ctx.args, "host");
+    const legacyAllowRemote = flagBool(ctx.args, "allow-remote", false);
+    if (legacyPort || legacyHost || legacyAllowRemote) {
+        ctx.stderr.write("[paat] note: --port / --host / --allow-remote are no-ops since v0.2.0. " +
+            "The dashboard is now a native Tauri app — there's no HTTP server to bind.\n");
     }
-    const { startDashboardServer, openInBrowser } = await import("../dashboard/server.js");
-    let handle;
-    try {
-        handle = await startDashboardServer({ port, host });
-    }
-    catch (err) {
-        fail(ctx, `could not bind dashboard to ${host}:${port}: ${err.message}`, 1);
+    const { launchDashboard } = await import("../dashboard/launch.js");
+    const result = await launchDashboard();
+    if (!result.ok) {
+        if (ctx.json) {
+            emit(ctx, { ok: false, error: result.error });
+            process.exit(1);
+        }
+        fail(ctx, result.error ?? "failed to launch dashboard", 1);
     }
     if (ctx.json) {
-        emit(ctx, { ok: true, url: handle.url, port: handle.port });
+        emit(ctx, { ok: true, binary: result.binary, pid: result.pid });
     }
     else {
-        ctx.stdout.write(`portpilot dashboard listening at ${handle.url}\n`);
-        ctx.stdout.write(`Press Ctrl+C to stop.\n`);
+        ctx.stdout.write(`portpilot dashboard launched (pid ${result.pid}).\n`);
+        ctx.stdout.write(`binary: ${result.binary}\n`);
     }
-    if (!noOpen)
-        openInBrowser(handle.url);
-    // Keep alive until interrupted
-    process.on("SIGINT", () => {
-        ctx.stdout.write("\nshutting down dashboard…\n");
-        handle.close().finally(() => process.exit(0));
-    });
-    // Park forever
-    await new Promise(() => { });
+    // The child is detached + unref'd, so we exit immediately and the GUI
+    // keeps running. This matches the behavior users expect from a desktop
+    // app launcher (no terminal session held open).
 }
 async function cmdMcp(_ctx) {
     // Lazy import to avoid pulling MCP into every CLI invocation.

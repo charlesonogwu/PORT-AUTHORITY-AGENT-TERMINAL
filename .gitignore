@@ -10,6 +10,15 @@ dashboard-ui/portpilot-dashboard/node_modules/
 # Dependencies
 node_modules/
 
+# Tauri build outputs (gui/) — bin/paat-dashboard.exe is what we ship,
+# the intermediate compile artifacts stay out of git. Cargo.lock IS
+# committed because paat-dashboard is a binary (reproducible builds).
+gui/src-tauri/target/
+gui/dist/
+gui/node_modules/
+gui/src-tauri/gen/
+
+
 # Per-machine state (never committed)
 .portpilot/
 agent-lanes/
@@ -52,3 +61,8 @@ logs/
 
 # Chrome extension build artefacts
 chrome-extension/icons/*.bak
+
+# tsc -b output for Vite config (regenerated each build)
+gui/vite.config.d.ts
+gui/vite.config.js
+gui/*.tsbuildinfo

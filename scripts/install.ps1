@@ -106,12 +106,10 @@ else {
       if ($LASTEXITCODE -ne 0) { Write-Err "npm install failed."; exit 1 }
 
       Write-Host ""
-      Write-Step "Installing dashboard UI dependencies"
-      & npm --prefix "dashboard-ui/portpilot-dashboard" install --no-audit --no-fund --ignore-scripts
-      if ($LASTEXITCODE -ne 0) { Write-Err "dashboard-ui npm install failed."; exit 1 }
-
-      Write-Host ""
-      Write-Step "Building (server + React dashboard)"
+      Write-Step "Building (CLI + Tauri dashboard)"
+      # build:dashboard runs cargo tauri build under the hood; it's a no-op
+      # if the toolchain is missing and the committed bin/paat-dashboard.exe
+      # acts as the source of truth in that case.
       & npm run build
       if ($LASTEXITCODE -ne 0) { Write-Err "npm run build failed."; exit 1 }
 

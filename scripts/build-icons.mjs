@@ -2,18 +2,22 @@
 /**
  * Generate the program icon set from `assets/paat-banner.png`.
  *
- * Outputs:
- *   assets/paat.ico             — multi-resolution Windows icon (16/32/48/64/128/256)
- *   assets/paat-256.png         — square PNG at 256x256 (used by README, OS shells)
- *   assets/paat-favicon-32.png  — 32x32 PNG for the dashboard <link rel="icon">
- *   dashboard-ui/portpilot-dashboard/public/favicon.ico  — same .ico for the in-app window
+ * Outputs (all committed to git):
+ *   assets/paat.ico                  — multi-resolution Windows icon (16/32/48/64/128/256)
+ *   assets/paat-256.png              — square PNG at 256x256 (README, OS shells)
+ *   assets/paat-favicon-32.png       — 32x32 PNG (legacy alias)
+ *   gui/src-tauri/icons/icon.ico     — Windows .ico baked into the Tauri shell
+ *   gui/src-tauri/icons/icon.png     — 1024x1024 PNG (cross-platform Tauri icon)
+ *   gui/src-tauri/icons/32x32.png    — small Tauri icon (taskbar / dock)
+ *   gui/src-tauri/icons/128x128.png  — medium Tauri icon
+ *   gui/src-tauri/icons/128x128@2x.png — retina Tauri icon
  *
  * The source banner is wide (≈1672×941), so we square-crop it before scaling.
  * The default crop is centered on the front-robot silhouette, which is the
  * most recognisable element down to 16×16. Override with env vars when
  * iterating: PAAT_CROP_LEFT, PAAT_CROP_TOP, PAAT_CROP_SIZE.
  *
- * IMPORTANT: All four output files are checked into git. End users running
+ * IMPORTANT: All output files are checked into git. End users running
  * `npm install -g github:...` do NOT need to regenerate them — sharp +
  * png-to-ico are dev-only conveniences for iterating on the source PNG.
  * If every output file is already present we exit before importing sharp,
@@ -23,7 +27,7 @@
  * the output files before running `npm run build:icons`.
  */
 import { existsSync } from "node:fs";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,14 +38,16 @@ const ICO_SIZES = [16, 24, 32, 48, 64, 128, 256];
 const PNG_OUT_256 = join(REPO_ROOT, "assets", "paat-256.png");
 const PNG_OUT_FAV = join(REPO_ROOT, "assets", "paat-favicon-32.png");
 const ICO_OUT = join(REPO_ROOT, "assets", "paat.ico");
-const DASHBOARD_PUBLIC = join(
-  REPO_ROOT,
-  "dashboard-ui",
-  "portpilot-dashboard",
-  "public",
-);
-const DASHBOARD_FAVICON = join(DASHBOARD_PUBLIC, "favicon.ico");
-const DASHBOARD_FAVICON_PNG = join(DASHBOARD_PUBLIC, "paat-icon.png");
+
+// Tauri-shell icon outputs. Tauri reads these from `gui/src-tauri/icons/`
+// at build time and bakes them into the .exe / .app / .deb. The set of
+// filenames mirrors `tauri.conf.json`'s bundle.icon array.
+const TAURI_ICONS_DIR = join(REPO_ROOT, "gui", "src-tauri", "icons");
+const TAURI_ICO = join(TAURI_ICONS_DIR, "icon.ico");
+const TAURI_PNG_LARGE = join(TAURI_ICONS_DIR, "icon.png");
+const TAURI_PNG_32 = join(TAURI_ICONS_DIR, "32x32.png");
+const TAURI_PNG_128 = join(TAURI_ICONS_DIR, "128x128.png");
+const TAURI_PNG_128_2X = join(TAURI_ICONS_DIR, "128x128@2x.png");
 
 /** Background colour used to letterbox non-square banners onto a square
  *  canvas. Default is fully transparent so a source PNG with alpha keeps
@@ -85,7 +91,7 @@ async function squareLetterbox(sharp, size, bg) {
 }
 
 async function main() {
-  // End users get all four icon outputs from git — no need to invoke sharp
+  // End users get all icon outputs from git — no need to invoke sharp
   // unless someone is iterating on the source PNG. This skip is what makes
   // `npm install -g github:...` work on machines where sharp's native
   // binary fails to install (corp networks, unsupported arches, --ignore-
@@ -94,8 +100,11 @@ async function main() {
     existsSync(ICO_OUT) &&
     existsSync(PNG_OUT_256) &&
     existsSync(PNG_OUT_FAV) &&
-    existsSync(DASHBOARD_FAVICON) &&
-    existsSync(DASHBOARD_FAVICON_PNG);
+    existsSync(TAURI_ICO) &&
+    existsSync(TAURI_PNG_LARGE) &&
+    existsSync(TAURI_PNG_32) &&
+    existsSync(TAURI_PNG_128) &&
+    existsSync(TAURI_PNG_128_2X);
   if (allOutputsExist && process.env.PAAT_FORCE_ICONS !== "1") {
     console.log(
       "[build-icons] all icon outputs already exist — skipping (set PAAT_FORCE_ICONS=1 to rebuild)",
@@ -138,36 +147,30 @@ async function main() {
   await writeFile(PNG_OUT_FAV, png32);
   console.log(`[build-icons] wrote ${PNG_OUT_FAV}`);
 
-  // 5. Mirror into dashboard-ui/public so Vite copies it into the inlined HTML.
-  await mkdir(DASHBOARD_PUBLIC, { recursive: true });
-  await writeFile(DASHBOARD_FAVICON, icoBuffer);
-  await writeFile(DASHBOARD_FAVICON_PNG, png256);
-  console.log(`[build-icons] wrote ${DASHBOARD_FAVICON}`);
-  console.log(`[build-icons] wrote ${DASHBOARD_FAVICON_PNG}`);
+  // 4. Tauri-shell icons. Tauri picks these up from gui/src-tauri/icons/
+  //    via tauri.conf.json's bundle.icon array and bakes them into the
+  //    .exe (Windows resources) and .app (macOS Resources/AppIcon.icns).
+  await mkdir(TAURI_ICONS_DIR, { recursive: true });
+  await writeFile(TAURI_ICO, icoBuffer);
+  console.log(`[build-icons] wrote ${TAURI_ICO}`);
 
-  // 6. Inject the favicon as a base64 data URI directly into index.html.
-  //    The dashboard ships as a single inlined HTML file (vite-plugin-singlefile),
-  //    so external <link rel="icon" href="/favicon.ico"> would be a 404 at runtime.
-  //    We swap the data: URI in place to keep everything self-contained.
-  const indexHtmlPath = join(REPO_ROOT, "dashboard-ui", "portpilot-dashboard", "index.html");
-  const html = await readFile(indexHtmlPath, "utf8");
-  const dataUri = `data:image/png;base64,${png32.toString("base64")}`;
-  const linkRegex = /<link\s+rel="icon"[^>]*\/?>/i;
-  const newLink = `<link rel="icon" type="image/png" href="${dataUri}" />`;
-  const updated = linkRegex.test(html)
-    ? html.replace(linkRegex, newLink)
-    : html.replace(/<head>/i, `<head>\n    ${newLink}`);
-  if (updated !== html) {
-    await writeFile(indexHtmlPath, updated, "utf8");
-    console.log(`[build-icons] updated favicon data URI in ${indexHtmlPath}`);
-  } else {
-    console.log(`[build-icons] favicon data URI in index.html already up to date`);
-  }
+  const png1024 = await squareLetterbox(sharp, 1024, bg);
+  await writeFile(TAURI_PNG_LARGE, png1024);
+  console.log(`[build-icons] wrote ${TAURI_PNG_LARGE}`);
+
+  const png128 = await squareLetterbox(sharp, 128, bg);
+  await writeFile(TAURI_PNG_128, png128);
+  console.log(`[build-icons] wrote ${TAURI_PNG_128}`);
+
+  const png256Tauri = await squareLetterbox(sharp, 256, bg);
+  await writeFile(TAURI_PNG_128_2X, png256Tauri);
+  console.log(`[build-icons] wrote ${TAURI_PNG_128_2X}`);
+
+  await writeFile(TAURI_PNG_32, png32);
+  console.log(`[build-icons] wrote ${TAURI_PNG_32}`);
 }
 
 main().catch((err) => {
   console.error("[build-icons] failed:", err);
   process.exit(1);
 });
-
-void readFile; // satisfy lint: keep readFile import for future use
