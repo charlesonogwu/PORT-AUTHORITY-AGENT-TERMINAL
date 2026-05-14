@@ -3,16 +3,16 @@
  *
  * Mechanism: drop a `.lnk` shortcut into the per-user Startup folder
  * (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`). Windows runs
- * everything in there at login. The shortcut points DIRECTLY at the native
- * paat-launcher.exe (no PowerShell, no script — same change as the desktop
- * shortcut in v0.1.4) so the dashboard boots silently and quickly.
+ * everything in there at login. The shortcut points DIRECTLY at the Tauri
+ * paat-dashboard.exe (no PowerShell, no Express server, no localhost) so
+ * the dashboard boots silently.
  *
  * Why a shortcut and not a Run-key registry entry:
  *   - Shortcuts are introspectable and easy to remove (drag to recycle bin).
  *   - The user sees them in Task Manager → Startup tab with a friendly name.
  *   - We avoid touching HKCU\...\Run, which AV vendors flag aggressively.
  *
- * The launcher .exe is staged into %LOCALAPPDATA%\PAAT\ by
+ * The dashboard .exe is staged into %LOCALAPPDATA%\PAAT\ by
  * `paat shortcut install`. If it's missing when `installAutostart()` runs,
  * we delegate to `installShortcut()` first so the .exe gets staged.
  */
@@ -23,12 +23,11 @@ export interface AutostartPaths {
     launcher: string;
 }
 /**
- * Install the autostart entry. Idempotent — re-run to refresh the launcher
- * path (e.g. after upgrading Node or moving the install).
+ * Install the autostart entry. Idempotent — re-run to refresh.
  *
- * If the launcher script doesn't exist yet (i.e. `paat shortcut install`
+ * If the dashboard .exe doesn't exist yet (i.e. `paat shortcut install`
  * hasn't been run), this calls `installShortcut()` first as a side-effect
- * so the launcher gets generated.
+ * so the .exe gets staged.
  */
 export declare function installAutostart(): Promise<AutostartPaths>;
 export declare function uninstallAutostart(): Promise<{

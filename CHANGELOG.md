@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] — Tauri dashboard, cross-platform
+
+### Added
+
+- **Native Tauri dashboard**. The dashboard is now a real desktop app
+  (WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux) shipped as
+  `paat-dashboard.exe` (Windows) / `paat-dashboard` (macOS, Linux). The
+  React UI talks to the lane registry via Tauri's IPC bridge — no HTTP
+  server, no localhost port, no remote attack surface.
+- **macOS support**. `npm install -g port-authority-agent-terminal-mcp` now
+  works on macOS. The CLI + MCP integrations are fully cross-platform. The
+  GUI builds from source on first install if Rust is available; Windows
+  ships a prebuilt `.exe` and macOS users get a clear "install Rust then
+  reinstall" message if the toolchain is missing.
+- **Single-instance plugin** (`tauri-plugin-single-instance`): clicking
+  the dashboard shortcut twice now focuses the existing window instead of
+  spawning a duplicate — handled server-side by Tauri, no PowerShell mutex.
+- `scripts/build-dashboard-tauri.cjs`: runs `cargo tauri build` from `gui/`
+  and copies the output to `bin/`. Cross-platform; soft-fails when the
+  Rust toolchain is missing (committed binary is the source of truth).
+
+### Changed
+
+- `paat dashboard` now spawns the Tauri binary directly via
+  `src/dashboard/launch.ts`. The Express HTTP server, port-binding flags
+  (`--port`, `--host`, `--allow-remote`), and Chrome `--app=` middleman are
+  gone. Legacy flags are accepted-but-ignored with a deprecation warning.
+- `paat shortcut install` and `paat autostart install` now point the `.lnk`
+  at `paat-dashboard.exe` instead of `paat-launcher.exe`. The old Go
+  launcher is gone.
+- Build pipeline: `npm run build` now invokes the Tauri build script
+  instead of the legacy `dashboard-ui/portpilot-dashboard` Vite project.
+- npm package now ships `gui/` source so macOS users can build the binary
+  via the postinstall hook.
+
+### Removed
+
+- `src/dashboard/server.ts` (Express server).
+- `src/ui/dashboard.ts` (legacy inlined HTML).
+- `dashboard-ui/` (legacy Vite project).
+- `cmd/paat-launcher/` + `bin/paat-launcher.exe` (legacy Go launcher).
+- `scripts/build-launcher.cjs`, `scripts/sync-dashboard-html.mjs`.
+- `tests/server-config.test.ts`, `tests/server-cors.test.ts`.
+
+### Security
+
+- The dashboard no longer binds to a local TCP port, eliminating the
+  category of attacks where another process on the same machine could
+  reach the dashboard's `/api/kill`, `/api/focus`, or `/api/hide`
+  endpoints. Window control is now in-process via Tauri IPC.
+
+---
+
+## [0.1.x] — Windows-first, Express + Go launcher
+
 ### Added
 
 - This file.

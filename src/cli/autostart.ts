@@ -3,16 +3,16 @@
  *
  * Mechanism: drop a `.lnk` shortcut into the per-user Startup folder
  * (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`). Windows runs
- * everything in there at login. The shortcut points DIRECTLY at the native
- * paat-launcher.exe (no PowerShell, no script — same change as the desktop
- * shortcut in v0.1.4) so the dashboard boots silently and quickly.
+ * everything in there at login. The shortcut points DIRECTLY at the Tauri
+ * paat-dashboard.exe (no PowerShell, no Express server, no localhost) so
+ * the dashboard boots silently.
  *
  * Why a shortcut and not a Run-key registry entry:
  *   - Shortcuts are introspectable and easy to remove (drag to recycle bin).
  *   - The user sees them in Task Manager → Startup tab with a friendly name.
  *   - We avoid touching HKCU\...\Run, which AV vendors flag aggressively.
  *
- * The launcher .exe is staged into %LOCALAPPDATA%\PAAT\ by
+ * The dashboard .exe is staged into %LOCALAPPDATA%\PAAT\ by
  * `paat shortcut install`. If it's missing when `installAutostart()` runs,
  * we delegate to `installShortcut()` first so the .exe gets staged.
  */
@@ -21,8 +21,8 @@ import { spawn } from "node:child_process";
 import { access, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { portpilotHome } from "../core/paths.js";
-import { installShortcut, LAUNCHER_EXE_FILENAME } from "./shortcut.js";
+import { stagedBinaryPath } from "../dashboard/launch.js";
+import { installShortcut } from "./shortcut.js";
 
 export const AUTOSTART_FILENAME = "Port Authority Agent Terminal.lnk";
 
@@ -68,58 +68,46 @@ async function resolveStartupFolder(): Promise<string> {
 
 async function autostartPaths(): Promise<AutostartPaths> {
   const startup = await resolveStartupFolder();
-  // The launcher lives at %LOCALAPPDATA%\PAAT\paat-launcher.exe — same
-  // location shortcut.ts stages it to. Fall back to portpilotHome() when
-  // LOCALAPPDATA isn't set (e.g. on macOS / non-Windows for type-checking).
-  const launcherDir = process.env.LOCALAPPDATA ?? portpilotHome();
   return {
     startup,
     shortcut: startup ? join(startup, AUTOSTART_FILENAME) : "",
-    launcher: join(launcherDir, "PAAT", LAUNCHER_EXE_FILENAME),
+    launcher: stagedBinaryPath(),
   };
 }
 
-/**
- * Locate the bundled `assets/paat.ico` — same lookup pattern shortcut.ts
- * uses, kept local so we don't add a new export there.
- */
+/** Locate the bundled paat.ico — same lookup pattern as shortcut.ts. */
 async function resolveBundledIcon(): Promise<string> {
   const here = fileURLToPath(import.meta.url);
   const candidates = [
-    // dist/src/cli/autostart.js → ../../../assets/paat.ico (when running from dist)
     join(dirname(here), "..", "..", "..", "assets", "paat.ico"),
-    // src/cli/autostart.ts → ../../assets/paat.ico (dev / tsx)
     join(dirname(here), "..", "..", "assets", "paat.ico"),
   ];
   for (const c of candidates) {
-    try {
-      await access(c);
-      return c;
-    } catch { /* try next */ }
+    try { await access(c); return c; } catch { /* try next */ }
   }
   return "C:\\Windows\\System32\\imageres.dll,109";
 }
 
 /**
- * Install the autostart entry. Idempotent — re-run to refresh the launcher
- * path (e.g. after upgrading Node or moving the install).
+ * Install the autostart entry. Idempotent — re-run to refresh.
  *
- * If the launcher script doesn't exist yet (i.e. `paat shortcut install`
+ * If the dashboard .exe doesn't exist yet (i.e. `paat shortcut install`
  * hasn't been run), this calls `installShortcut()` first as a side-effect
- * so the launcher gets generated.
+ * so the .exe gets staged.
  */
 export async function installAutostart(): Promise<AutostartPaths> {
   if (process.platform !== "win32") {
-    throw new Error("paat autostart is currently Windows-only.");
+    throw new Error(
+      "paat autostart is currently Windows-only. " +
+        "On macOS, add the dashboard to System Settings → General → Login Items, " +
+        "or invoke `paat dashboard` from your shell's startup script.",
+    );
   }
   const paths = await autostartPaths();
   if (!paths.startup) {
     throw new Error("could not resolve %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup");
   }
 
-  // Ensure the launcher .exe has been staged to %LOCALAPPDATA%\PAAT\ by
-  // calling installShortcut() — it copies the bundled bin/paat-launcher.exe
-  // into place AND creates the desktop shortcut as a side effect (idempotent).
   let launcherExists = false;
   try { await access(paths.launcher); launcherExists = true; } catch { /* missing */ }
   if (!launcherExists) {
@@ -127,9 +115,8 @@ export async function installAutostart(): Promise<AutostartPaths> {
   }
 
   const iconLocation = await resolveBundledIcon();
-  // .lnk now points DIRECTLY at the native paat-launcher.exe. The .exe is
-  // a GUI-subsystem build, so it never flashes a console window. No more
-  // PowerShell middleman.
+  // .lnk points DIRECTLY at the Tauri paat-dashboard.exe. The .exe is built
+  // with windows_subsystem = "windows", so it never flashes a console.
   const psScript = [
     `$WshShell = New-Object -ComObject WScript.Shell`,
     `$Shortcut = $WshShell.CreateShortcut(${psSingle(paths.shortcut)})`,
@@ -138,8 +125,7 @@ export async function installAutostart(): Promise<AutostartPaths> {
     `$Shortcut.WorkingDirectory = ${psSingle(dirname(paths.launcher))}`,
     `$Shortcut.IconLocation = ${psSingle(iconLocation)}`,
     `$Shortcut.Description = 'Auto-start the Port Authority Agent Terminal dashboard at login (paat autostart)'`,
-    // 7 = "minimized" — kept for back-compat; the .exe doesn't show a
-    // window anyway since it's compiled with -H windowsgui.
+    // 7 = "minimized" — back-compat noise since the .exe is GUI-subsystem.
     `$Shortcut.WindowStyle = 7`,
     `$Shortcut.Save()`,
   ].join("\n");
