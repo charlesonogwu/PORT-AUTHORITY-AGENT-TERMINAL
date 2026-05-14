@@ -20,7 +20,8 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import type { DashboardSnapshot, KillResult, LiveSession } from "@/types"
+import type { DashboardSnapshot, LiveSession } from "@/types"
+import { focusChrome, getSnapshot, hideChrome, killChrome } from "@/api/client"
 import { cn } from "@/lib/utils"
 
 const POLL_MS = 2_000
@@ -121,8 +122,9 @@ function useSnapshot(intervalMs = POLL_MS) {
     let cancelled = false
     const fetchOnce = async () => {
       try {
-        const r = await fetch("/api/snapshot", { cache: "no-store" })
-        const j = (await r.json()) as DashboardSnapshot
+        // Tauri IPC — replaces fetch('/api/snapshot') from the old localhost
+        // HTTP server. Returns the same DashboardSnapshot shape.
+        const j = await getSnapshot()
         if (cancelled) return
         setSnap(j)
         setError(null)
@@ -599,14 +601,9 @@ function FocusButton({ pid }: { pid: number }) {
     setBusy(true)
     setError(null)
     try {
-      const r = await fetch("/api/focus", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pid }),
-      })
-      const data = (await r.json()) as { ok: boolean; error?: string }
+      const data = await focusChrome(pid)
       if (!data.ok) {
-        setError(data.error ?? `HTTP ${r.status}`)
+        setError(data.error ?? "focus failed")
       } else {
         setShownAt(Date.now())
       }
@@ -679,12 +676,7 @@ function HideAllButton({ sessions }: { sessions: LiveSession[] }) {
     const responses = await Promise.all(
       sessions.map(async (s) => {
         try {
-          const r = await fetch("/api/hide", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ pid: s.pid }),
-          })
-          const data = (await r.json()) as { ok: boolean }
+          const data = await hideChrome(s.pid)
           return data.ok
         } catch {
           return false
@@ -780,12 +772,7 @@ function KillAllButton({
     const responses = await Promise.all(
       sessions.map(async (s) => {
         try {
-          const r = await fetch("/api/kill", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ pid: s.pid }),
-          })
-          const data = (await r.json()) as { ok: boolean }
+          const data = await killChrome(s.pid)
           return data.ok
         } catch {
           return false
@@ -854,14 +841,9 @@ function HideButton({ pid }: { pid: number }) {
     setBusy(true)
     setError(null)
     try {
-      const r = await fetch("/api/hide", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pid }),
-      })
-      const data = (await r.json()) as { ok: boolean; error?: string }
+      const data = await hideChrome(pid)
       if (!data.ok) {
-        setError(data.error ?? `HTTP ${r.status}`)
+        setError(data.error ?? "hide failed")
       } else {
         setHiddenAt(Date.now())
       }
@@ -925,12 +907,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
     setBusy(true)
     setError(null)
     try {
-      const r = await fetch("/api/kill", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pid }),
-      })
-      const data = (await r.json()) as KillResult
+      const data = await killChrome(pid)
       if (!data.ok) {
         setError(data.error ?? "unknown error")
         setBusy(false)
