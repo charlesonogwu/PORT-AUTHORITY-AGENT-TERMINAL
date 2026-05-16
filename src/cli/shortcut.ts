@@ -125,6 +125,45 @@ async function stageDashboardBinary(): Promise<string> {
   return destPath;
 }
 
+/**
+ * Stage the bundled paat.ico next to the dashboard binary so the shortcut's
+ * IconLocation has a stable path that survives npm's cleanup of its temp
+ * git-clone directory.
+ *
+ * 0.2.0 BUG (fixed here in 0.2.1): the previous code pointed the .lnk's
+ * IconLocation at `<package-root>/assets/paat.ico`. During a github install,
+ * <package-root> is `%LOCALAPPDATA%\npm-cache\_cacache\tmp\git-cloneXXXX\`,
+ * which npm DELETES after install finishes. Result: Windows can't find the
+ * icon → falls back to the generic blank-document icon on the shortcut.
+ *
+ * Returns the staged path on success, or null if the source .ico couldn't be
+ * located. The fallback case is handled by the caller, which uses
+ * imageres.dll as a last-resort generic icon.
+ */
+async function stageIcon(): Promise<string | null> {
+  const source = await resolveBundledIcon();
+  if (!source) return null;
+  const destDir = stagedBinaryDir();
+  const destPath = join(destDir, "paat.ico");
+  await mkdir(destDir, { recursive: true });
+  try { await rm(destPath, { force: true }); } catch { /* ignore */ }
+  try {
+    await copyFile(source, destPath);
+  } catch {
+    // Best-effort: if we can't copy (e.g. EBUSY because it's in use), and
+    // a previous copy still exists, use that. Otherwise fall back to the
+    // source path even though it may go stale.
+    if (await fileExists(destPath)) return destPath;
+    return source;
+  }
+  return destPath;
+}
+
+/** Helper: returns true iff path exists and is accessible. */
+async function fileExists(p: string): Promise<boolean> {
+  try { await access(p); return true; } catch { return false; }
+}
+
 interface RunResult { ok: boolean; stderr: string; }
 
 function runPowerShell(script: string): Promise<RunResult> {
@@ -181,9 +220,14 @@ export async function installShortcut(opts: { port?: number; iconLocation?: stri
     }
   } catch { /* ignore — may be locked */ }
 
-  // 1c. Resolve the icon. Priority: caller override → bundled paat.ico → fallback.
+  // 1c. Resolve the icon. Priority:
+  //   (a) caller override
+  //   (b) the bundled paat.ico, COPIED into %LOCALAPPDATA%\PAAT\ so the path
+  //       baked into the .lnk survives npm cleaning up its temp clone dir
+  //       (0.2.0 bug: shortcut icon path pointed at npm-cache/_cacache/tmp/)
+  //   (c) Windows globe glyph fallback
   const iconLocation =
-    opts.iconLocation ?? (await resolveBundledIcon()) ?? "C:\\Windows\\System32\\imageres.dll,109";
+    opts.iconLocation ?? (await stageIcon()) ?? "C:\\Windows\\System32\\imageres.dll,109";
 
   // 2. Create the .lnk via WScript.Shell COM, pointing DIRECTLY at the
   //    Tauri .exe. No PowerShell middleman, no execution-policy dance,

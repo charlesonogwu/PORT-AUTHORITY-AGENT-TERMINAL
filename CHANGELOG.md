@@ -11,6 +11,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.1] — desktop shortcut icon fix
+
+### Fixed
+
+- **Desktop shortcut showed a blank-document icon after a `npm install -g
+  github:...#v0.2.0`.** The 0.2.0 installer baked `<package-root>/assets/
+  paat.ico` into the .lnk's `IconLocation`, but for github installs the
+  package root is `%LOCALAPPDATA%\npm-cache\_cacache\tmp\git-cloneXXXX\`,
+  which npm deletes right after install finishes. Windows then couldn't
+  find the icon and fell back to the generic document glyph.
+- `installShortcut()` now stages `paat.ico` into `%LOCALAPPDATA%\PAAT\`
+  next to the dashboard binary, and the .lnk's `IconLocation` points at
+  that stable path.
+- `installAutostart()` looks up the same staged path so the Start Menu /
+  Login Item shortcut also picks up the correct icon.
+- The Tauri window itself was always working in 0.2.0 — it just looked
+  unresponsive briefly during the first port scan, which Windows surfaces
+  as "Not Responding" in the title bar. No code change needed for that;
+  the perception will fix itself when the underlying icon stops looking
+  broken.
+
+### Notes
+
+No changes to the Tauri binary, no .exe rebuild required for end users.
+Re-running `npm install -g github:charlesonogwu/port-authority-agent-terminal#v0.2.1`
+re-runs the postinstall, which re-creates the shortcut with the stable
+icon path.
+
+---
+
 ## [0.2.0] — Tauri dashboard, cross-platform
 
 ### Added

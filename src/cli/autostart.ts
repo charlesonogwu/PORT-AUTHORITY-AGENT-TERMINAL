@@ -75,8 +75,30 @@ async function autostartPaths(): Promise<AutostartPaths> {
   };
 }
 
-/** Locate the bundled paat.ico — same lookup pattern as shortcut.ts. */
+/**
+ * Resolve the icon for the autostart .lnk.
+ *
+ * Priority:
+ *  (a) %LOCALAPPDATA%\PAAT\paat.ico — staged by installShortcut() before us.
+ *      This path is stable; it survives npm cleaning up its temp clone dir.
+ *  (b) <package-root>/assets/paat.ico — direct from the npm install location.
+ *      Only reliable in dev mode (local checkout); for npm-from-github
+ *      installs this lives under npm-cache/_cacache/tmp/git-cloneXXXX/ and
+ *      gets deleted right after the install finishes. (This was the 0.2.0
+ *      bug.)
+ *  (c) Windows globe glyph fallback.
+ *
+ * installAutostart() already calls installShortcut() first when the binary
+ * isn't staged, so by the time we get here option (a) almost always exists.
+ * Options (b) and (c) are defense-in-depth.
+ */
 async function resolveBundledIcon(): Promise<string> {
+  // (a) Staged-next-to-binary path — stable across npm reinstalls.
+  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    const staged = join(process.env.LOCALAPPDATA, "PAAT", "paat.ico");
+    try { await access(staged); return staged; } catch { /* fall through */ }
+  }
+  // (b) In-package candidates (dev-checkout fallback).
   const here = fileURLToPath(import.meta.url);
   const candidates = [
     join(dirname(here), "..", "..", "..", "assets", "paat.ico"),
@@ -85,6 +107,7 @@ async function resolveBundledIcon(): Promise<string> {
   for (const c of candidates) {
     try { await access(c); return c; } catch { /* try next */ }
   }
+  // (c) Last-resort generic icon.
   return "C:\\Windows\\System32\\imageres.dll,109";
 }
 
