@@ -497,6 +497,30 @@ async function cmdDashboard(ctx: CliContext): Promise<void> {
   // app launcher (no terminal session held open).
 }
 
+/**
+ * `paat dashboard-snapshot --json` — print the full DashboardSnapshot the
+ * React UI consumes via Tauri IPC. This is the shape the old Express
+ * `/api/snapshot` endpoint returned: summary counters, liveSessions array
+ * (with agent inference + Chrome metadata), conflicts, registryHealth, etc.
+ *
+ * Why a separate command from `paat status`:
+ *   `paat status --json` returns the raw lane registry + port scan results.
+ *   It's a different, simpler shape designed for terminal use. The dashboard
+ *   needs the richer `buildSnapshot()` output (~10x the data) but humans
+ *   reading `paat status` don't.
+ *
+ * Used by:
+ *   gui/src-tauri/src/commands/snapshot.rs (shell-out target for the
+ *   `get_snapshot` Tauri command the React UI invokes every 2 seconds).
+ */
+async function cmdDashboardSnapshot(ctx: CliContext): Promise<void> {
+  const { buildSnapshot } = await import("../dashboard/snapshot.js");
+  const snap = await buildSnapshot();
+  // Always JSON — this command exists for machine consumers (the Tauri shell)
+  // and there's no reasonable human-readable fallback for ~3KB of nested data.
+  ctx.stdout.write(JSON.stringify(snap) + "\n");
+}
+
 async function cmdMcp(_ctx: CliContext): Promise<void> {
   // Lazy import to avoid pulling MCP into every CLI invocation.
   const mod = await import("../mcp/server.js");
@@ -660,6 +684,8 @@ async function dispatch(args: ParsedArgs): Promise<void> {
       return cmdConfig(ctx);
     case "dashboard":
       return cmdDashboard(ctx);
+    case "dashboard-snapshot":
+      return cmdDashboardSnapshot(ctx);
     case "shortcut":
       return cmdShortcut(ctx);
     case "install-mcp":
