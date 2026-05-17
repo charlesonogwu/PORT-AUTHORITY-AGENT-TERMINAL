@@ -10,8 +10,8 @@
 // Linux:   wmctrl if installed; otherwise a soft error. Linux WM diversity
 //   makes a universal solution impractical and PAAT is Windows+macOS-first.
 
+use crate::cli::quiet_command;
 use serde_json::{json, Value};
-use std::process::Command;
 
 #[tauri::command]
 pub fn focus_chrome(pid: u32) -> Result<Value, String> {
@@ -73,7 +73,7 @@ public static extern bool SetForegroundWindow(System.IntPtr hWnd);
         sw = sw_cmd,
         fg = if do_foreground { "true" } else { "false" }
     );
-    let output = Command::new("powershell.exe")
+    let output = quiet_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .map_err(|e| format!("failed to spawn powershell: {}", e))?;
@@ -102,7 +102,7 @@ fn run_window_action(pid: u32, action: WindowAction) -> Result<(), String> {
             pid
         ),
     };
-    let output = Command::new("osascript")
+    let output = quiet_command("osascript")
         .args(["-e", &script])
         .output()
         .map_err(|e| format!("failed to spawn osascript: {}", e))?;
@@ -121,7 +121,7 @@ fn run_window_action(pid: u32, action: WindowAction) -> Result<(), String> {
         WindowAction::Focus => &["-a"],
         WindowAction::Hide => &["-b", "add,hidden"],
     };
-    let mut cmd = Command::new("wmctrl");
+    let mut cmd = quiet_command("wmctrl");
     cmd.args(["-i", "-x", "-p", &pid.to_string()]);
     cmd.args(action_args);
     let output = cmd

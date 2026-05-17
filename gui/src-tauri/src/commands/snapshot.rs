@@ -25,23 +25,35 @@
 use crate::cli::run_cli_json;
 use serde_json::{json, Value};
 
+/// 0.2.3 fix: async + spawn_blocking. Previously this was a sync
+/// `pub fn`, which Tauri runs on the **main UI thread**. Every 3-second
+/// poll then blocked the message pump for ~500-1000 ms (cost of spawning
+/// Node + reading lanes.json + scanning ports). If the user happened to
+/// be dragging the window during that interval, Windows showed "Not
+/// Responding" in the title bar. Making the command async + offloading the
+/// blocking subprocess to a worker thread via tauri's async_runtime keeps
+/// the UI thread free to pump WM_* messages even while the snapshot is
+/// being computed.
 #[tauri::command]
-pub fn get_snapshot() -> Result<Value, String> {
-    match run_cli_json(&["dashboard-snapshot"]) {
-        Ok(v) => Ok(v),
-        Err(e) => Ok(json!({
-            "ok": false,
-            "generatedAt": "",
-            "scanSource": "empty",
-            "scanErrors": [e.clone()],
-            "home": "",
-            "registryPath": "",
-            "config": {},
-            "summary": { "liveSessions": 0, "distinctAgents": 0, "conflicts": 0 },
-            "liveSessions": [],
-            "registryHealth": { "portpilot": { "exists": false, "lockHealthy": false } },
-            "conflicts": [],
-            "warnings": [format!("paat CLI unavailable: {}", e)]
-        })),
-    }
+pub async fn get_snapshot() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| run_cli_json(&["dashboard-snapshot"]))
+        .await
+        .map_err(|e| format!("snapshot worker join failed: {}", e))
+        .and_then(|res| match res {
+            Ok(v) => Ok(v),
+            Err(e) => Ok(json!({
+                "ok": false,
+                "generatedAt": "",
+                "scanSource": "empty",
+                "scanErrors": [e.clone()],
+                "home": "",
+                "registryPath": "",
+                "config": {},
+                "summary": { "liveSessions": 0, "distinctAgents": 0, "conflicts": 0 },
+                "liveSessions": [],
+                "registryHealth": { "portpilot": { "exists": false, "lockHealthy": false } },
+                "conflicts": [],
+                "warnings": [format!("paat CLI unavailable: {}", e)]
+            })),
+        })
 }
