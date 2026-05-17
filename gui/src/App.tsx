@@ -24,7 +24,13 @@ import type { DashboardSnapshot, LiveSession } from "@/types"
 import { focusChrome, getSnapshot, hideChrome, killChrome } from "@/api/client"
 import { cn } from "@/lib/utils"
 
-const POLL_MS = 2_000
+// 3-second poll cadence balances "live feel" with subprocess cost. Each
+// poll spawns `paat dashboard-snapshot --json` (Node, ~500ms cold start on
+// Windows) so 2s was burning ~25-50% of every poll interval on process
+// spawn alone. 3s keeps the dashboard feeling current while halving that
+// background churn. The poll also auto-pauses when the window is hidden
+// (see useSnapshot) so the cost only applies when the user is looking.
+const POLL_MS = 3_000
 const KILL_CONFIRM_MS = 3_000
 
 /* -------------------------------------------------------------------------- */
@@ -117,27 +123,79 @@ function useSnapshot(intervalMs = POLL_MS) {
   const [snap, setSnap] = useState<DashboardSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
+  // Keep the previous serialized snapshot in a ref so we can dedupe identical
+  // payloads without storing them in state (which would itself cause a re-
+  // render). When `paat dashboard-snapshot` returns the same data two polls
+  // in a row — common when nothing changed — we skip setSnap entirely.
+  const lastSerializedRef = useRef<string>("")
 
   useEffect(() => {
     let cancelled = false
+    let intervalId: number | undefined
+
     const fetchOnce = async () => {
       try {
-        // Tauri IPC — replaces fetch('/api/snapshot') from the old localhost
-        // HTTP server. Returns the same DashboardSnapshot shape.
         const j = await getSnapshot()
         if (cancelled) return
-        setSnap(j)
+        // Cheap re-render dedup: stringify-compare against the previous
+        // payload. The snapshot is ~3 KB of plain JSON so the cost of
+        // JSON.stringify (microseconds) is dwarfed by the cost of a wasted
+        // React reconciliation across the lane list. If unchanged, we still
+        // clear `error` (server is healthy now) but don't churn the tree.
+        const serialized = JSON.stringify(j)
+        if (serialized !== lastSerializedRef.current) {
+          lastSerializedRef.current = serialized
+          setSnap(j)
+        }
         setError(null)
       } catch (err) {
         if (cancelled) return
         setError((err as Error).message)
       }
     }
-    fetchOnce()
-    const id = setInterval(fetchOnce, intervalMs)
+
+    const startInterval = () => {
+      if (intervalId != null) return
+      intervalId = window.setInterval(fetchOnce, intervalMs)
+    }
+    const stopInterval = () => {
+      if (intervalId == null) return
+      window.clearInterval(intervalId)
+      intervalId = undefined
+    }
+
+    // Pause polling when the window is hidden (minimized, on another desktop,
+    // or the user switched workspaces). Spawning `paat dashboard-snapshot`
+    // every few seconds for a window the user can't see is pure CPU/IPC
+    // waste and was a real source of the "sluggish on restore" symptom —
+    // when the window came back, the WebView2 thread was mid-IPC and the
+    // queue of in-flight snapshots had to drain before user interactions
+    // could be serviced. WebView2 fires document.visibilitychange on Tauri
+    // window minimize/restore the same way browser tabs do.
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stopInterval()
+      } else {
+        // Re-sync immediately on restore so the user doesn't have to wait
+        // a full poll cycle to see fresh data, then resume the regular
+        // cadence.
+        fetchOnce()
+        startInterval()
+      }
+    }
+
+    // Initial fetch + cadence (only if visible — uncommon to mount hidden,
+    // but defensive).
+    if (!document.hidden) {
+      fetchOnce()
+      startInterval()
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
     return () => {
       cancelled = true
-      clearInterval(id)
+      stopInterval()
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
   }, [intervalMs, tick])
 

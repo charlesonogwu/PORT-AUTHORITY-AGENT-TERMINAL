@@ -33,7 +33,36 @@ export declare const MCP_SERVER_NAME = "port-authority-agent-terminal";
  * the canonical MCP_SERVER_NAME above. This guarantees a user who upgrades
  * never ends up with duplicate entries in their MCP list.
  */
-export declare const LEGACY_MCP_SERVER_NAMES: readonly ["paat"];
+export declare const LEGACY_MCP_SERVER_NAMES: readonly ["paat", "portpilot", "port-authority"];
+/**
+ * Compute the default { command, args } pair we register with MCP hosts.
+ *
+ * Why this exists (Windows root cause):
+ *   Until v0.2.2 we wrote `command: "paat"` and let the host resolve it
+ *   through PATH. That works on macOS/Linux but breaks on Windows: Electron
+ *   apps (Claude Desktop, Codex Desktop) spawn subprocesses with shell:false,
+ *   and on Windows that means `paat` resolves to the .cmd shim only if the
+ *   spawner explicitly appends .cmd or runs through cmd.exe. They don't.
+ *   Result: every Windows install showed "Server disconnected" in Claude
+ *   Desktop until the user hand-edited the config to use node.exe directly.
+ *
+ * Fix: always write the absolute node.exe path + absolute path to our
+ * compiled CLI script. This works on every host on every platform and has
+ * no PATH lookup ambiguity.
+ *
+ *   command: process.execPath        — the node.exe that's running us right now
+ *   args:    [<abs path to index.js>, "mcp"]
+ *
+ * Trade-off: if the user later moves Node or replaces it with a different
+ * version, the entries we wrote point at the old node.exe. Re-running
+ * `paat install-mcp` rewrites them. Acceptable: most users don't move Node
+ * frequently, and our postinstall hook re-runs install-mcp on every upgrade
+ * anyway, so it self-heals across `npm install -g` cycles.
+ */
+export declare function defaultMcpCommand(): {
+    command: string;
+    args: string[];
+};
 export interface InstallMcpOptions {
     /** Override the config file path. Used by tests. */
     configPath?: string;

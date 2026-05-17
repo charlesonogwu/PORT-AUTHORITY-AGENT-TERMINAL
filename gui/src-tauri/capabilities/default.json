@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Grants the main window permission to call standard Tauri core APIs (window, event, app show/hide). Custom commands registered via tauri::generate_handler! don't require explicit permissions in this file — Tauri 2 allows them by default. This capability is defense-in-depth and primarily exists so future plugin additions (if we add fs/shell/etc.) have a place to declare their permissions.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

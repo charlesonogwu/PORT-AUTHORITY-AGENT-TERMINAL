@@ -14,7 +14,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `devtools` enables F12 + right-click → Inspect Element in release builds.
+# v0.2.0/0.2.1 shipped without this so when the React UI failed to mount the
+# user saw a blank white window with no way to see what went wrong. v0.2.2
+# enables it permanently for easier user-side debugging.
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

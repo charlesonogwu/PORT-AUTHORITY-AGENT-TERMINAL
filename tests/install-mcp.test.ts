@@ -45,7 +45,7 @@ test("install-mcp claude: creates a new config when none exists", async () => {
   const dir = freshTempDir();
   try {
     const configPath = join(dir, "claude_desktop_config.json");
-    const r = await installClaudeMcp({ configPath });
+    const r = await installClaudeMcp({ configPath, command: "paat", args: ["mcp"] });
 
     assert.equal(r.action, "installed");
     assert.equal(r.backupPath, null, "no backup should be made when the file did not exist");
@@ -81,7 +81,7 @@ test("install-mcp claude: migrates a legacy `paat` entry to the canonical name (
       ),
     );
 
-    const r = await installClaudeMcp({ configPath });
+    const r = await installClaudeMcp({ configPath, command: "paat", args: ["mcp"] });
     // Migration counts as a real write, not a no-op.
     assert.equal(r.action, "updated");
 
@@ -115,7 +115,7 @@ test("install-mcp claude: merges into existing config without clobbering other s
       ),
     );
 
-    const r = await installClaudeMcp({ configPath });
+    const r = await installClaudeMcp({ configPath, command: "paat", args: ["mcp"] });
     assert.equal(r.action, "installed");
     assert.ok(r.backupPath, "should have created a backup");
     assert.equal(existsSync(r.backupPath!), true, "backup file should be on disk");
@@ -143,10 +143,10 @@ test("install-mcp claude: is idempotent — no change on second run", async () =
   try {
     const configPath = join(dir, "claude_desktop_config.json");
 
-    await installClaudeMcp({ configPath });
+    await installClaudeMcp({ configPath, command: "paat", args: ["mcp"] });
     const first = readFileSync(configPath, "utf8");
 
-    const r = await installClaudeMcp({ configPath });
+    const r = await installClaudeMcp({ configPath, command: "paat", args: ["mcp"] });
     assert.equal(r.action, "already-installed");
 
     const second = readFileSync(configPath, "utf8");
@@ -167,7 +167,7 @@ test("install-mcp claude: replaces an existing canonical block with different ar
       }),
     );
 
-    const r = await installClaudeMcp({ configPath });
+    const r = await installClaudeMcp({ configPath, command: "paat", args: ["mcp"] });
     assert.equal(r.action, "updated");
 
     const written = JSON.parse(readFileSync(configPath, "utf8")) as {
@@ -186,7 +186,7 @@ test("install-mcp claude: refuses to silently rewrite a malformed JSON config", 
     writeFileSync(configPath, "{ this is not valid json ");
 
     await assert.rejects(
-      () => installClaudeMcp({ configPath }),
+      () => installClaudeMcp({ configPath, command: "paat", args: ["mcp"] }),
       /could not parse existing Claude Desktop config/,
     );
   } finally {
@@ -201,7 +201,7 @@ test("install-mcp claude: refuses a non-object root (e.g. an array)", async () =
     writeFileSync(configPath, JSON.stringify([1, 2, 3]));
 
     await assert.rejects(
-      () => installClaudeMcp({ configPath }),
+      () => installClaudeMcp({ configPath, command: "paat", args: ["mcp"] }),
       /could not parse existing Claude Desktop config/,
     );
   } finally {
@@ -239,7 +239,7 @@ test("install-mcp codex: creates a new config when none exists", async () => {
   const dir = freshTempDir();
   try {
     const configPath = join(dir, "config.toml");
-    const r = await installCodexMcp({ configPath });
+    const r = await installCodexMcp({ configPath, command: "paat", args: ["mcp"] });
 
     assert.equal(r.action, "installed");
     assert.equal(r.backupPath, null);
@@ -268,7 +268,7 @@ test("install-mcp codex: migrates a legacy [mcp_servers.paat] section to the new
       "args = [\"mcp\"]\n";
     writeFileSync(configPath, original);
 
-    const r = await installCodexMcp({ configPath });
+    const r = await installCodexMcp({ configPath, command: "paat", args: ["mcp"] });
     assert.equal(r.action, "updated");
 
     const written = readFileSync(configPath, "utf8");
@@ -292,7 +292,7 @@ test("install-mcp codex: appends to existing config preserving other servers", a
       "args = []\n";
     writeFileSync(configPath, original);
 
-    const r = await installCodexMcp({ configPath });
+    const r = await installCodexMcp({ configPath, command: "paat", args: ["mcp"] });
     assert.equal(r.action, "installed");
     assert.ok(r.backupPath);
     assert.equal(existsSync(r.backupPath!), true);
@@ -316,7 +316,7 @@ test("install-mcp codex: is idempotent when the canonical block already exists",
     );
     const before = readFileSync(configPath, "utf8");
 
-    const r = await installCodexMcp({ configPath });
+    const r = await installCodexMcp({ configPath, command: "paat", args: ["mcp"] });
     assert.equal(r.action, "already-installed");
 
     const after = readFileSync(configPath, "utf8");
@@ -337,7 +337,7 @@ test("install-mcp codex: ignores section names mentioned inside string values", 
       `[user]\nnote = "see [mcp_servers.${EXPECTED_NAME}] for syntax"\n`,
     );
 
-    const r = await installCodexMcp({ configPath });
+    const r = await installCodexMcp({ configPath, command: "paat", args: ["mcp"] });
     assert.equal(
       r.action,
       "installed",
@@ -457,7 +457,7 @@ test("installClaudeCodeMcp: fresh install when PAAT absent under any name", asyn
     ok(`Added stdio MCP server ${EXPECTED_NAME}`),              // mcp add
   ]);
 
-  const r = await installClaudeCodeMcp({ runner });
+  const r = await installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] });
 
   assert.equal(r.action, "installed");
   assert.equal(r.client, "claude-code");
@@ -489,7 +489,7 @@ test("installClaudeCodeMcp: migrates a legacy `paat` entry to the canonical name
     ok("Added"),                         // mcp add port-authority-agent-terminal
   ]);
 
-  const r = await installClaudeCodeMcp({ runner });
+  const r = await installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] });
 
   assert.equal(r.action, "updated");
   // Verify the migration sequence: remove old name, then add new name.
@@ -509,7 +509,7 @@ test("installClaudeCodeMcp: idempotent when canonical name already registered wi
     ok(`${EXPECTED_NAME}: paat mcp - ✓ Connected`),
   ]);
 
-  const r = await installClaudeCodeMcp({ runner });
+  const r = await installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] });
 
   assert.equal(r.action, "already-installed");
   assert.equal(calls.length, 2, "should NOT call mcp add when already installed");
@@ -523,7 +523,7 @@ test("installClaudeCodeMcp: replaces an existing canonical entry with a differen
     ok(`Added stdio MCP server ${EXPECTED_NAME}`),             // mcp add
   ]);
 
-  const r = await installClaudeCodeMcp({ runner });
+  const r = await installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] });
 
   assert.equal(r.action, "updated");
   assert.equal(calls.length, 4);
@@ -545,7 +545,7 @@ test("installClaudeCodeMcp: returns action='skipped' when `claude` is not on PAT
   // Claude Code. Returning "skipped" is the right behavior so postinstall
   // can keep going and wire up the OTHER clients cleanly.
   const { runner } = buildMockRunner([fail("command not found", 127)]);
-  const r = await installClaudeCodeMcp({ runner });
+  const r = await installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] });
   assert.equal(r.client, "claude-code");
   assert.equal(r.action, "skipped");
   assert.equal(r.backupPath, null);
@@ -559,7 +559,7 @@ test("installClaudeCodeMcp: propagates `claude mcp list` errors with stderr", as
     fail("network error connecting to mcp registry", 2),
   ]);
   await assert.rejects(
-    () => installClaudeCodeMcp({ runner }),
+    () => installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] }),
     /claude mcp list. failed.*network error connecting/s,
   );
 });
@@ -571,7 +571,7 @@ test("installClaudeCodeMcp: propagates `claude mcp add` errors with stderr", asy
     fail("permission denied writing ~/.claude.json", 1),
   ]);
   await assert.rejects(
-    () => installClaudeCodeMcp({ runner }),
+    () => installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] }),
     /claude mcp add. failed.*permission denied/s,
   );
 });
@@ -614,7 +614,7 @@ test("installClaudeCodeMcp: honors custom claudeBin, scope, command, args option
 
 test("installClaudeCodeMcp: 'skipped' result still includes a useful reason field", async () => {
   const { runner } = buildMockRunner([fail("ENOENT", -1)]);
-  const r = await installClaudeCodeMcp({ runner });
+  const r = await installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] });
   assert.equal(r.action, "skipped");
   assert.ok(r.reason && r.reason.length > 0, "skipped results must carry a reason");
 });

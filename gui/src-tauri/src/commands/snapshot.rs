@@ -1,31 +1,59 @@
-// get_snapshot — Phase 6 real implementation. Shells out to `paat status --json`
-// to get the live snapshot (lanes + observations + warnings + scan errors).
+// get_snapshot — shells out to `paat dashboard-snapshot --json` to get the
+// full DashboardSnapshot shape the React UI consumes. This is the same data
+// the old Express `/api/snapshot` endpoint returned.
 //
-// We delegate to the Node CLI rather than re-implementing port scanning in
-// Rust because:
-//  - the scan logic is already well-tested on the Node side,
-//  - keeping a single source of truth means the dashboard + MCP server +
-//    CLI all see identical results,
-//  - port scanning is I/O bound, so the subprocess overhead is negligible.
+// 0.2.0/0.2.1 BUG (fixed here in 0.2.2): we previously shelled out to
+// `paat status --json`, but that returns a simpler shape (just lanes + scan
+// results) — no `summary` object, no `liveSessions` array, no `conflicts`.
+// The React UI tried to read `snap.summary.liveSessions` → undefined →
+// TypeError → blank white window. The fix is a new dedicated subcommand
+// that calls buildSnapshot() and returns the rich shape.
+//
+// We delegate to the Node CLI rather than re-implementing the snapshot
+// logic in Rust because:
+//  - the scan + agent-inference + conflict-detection logic is already well-
+//    tested on the Node side,
+//  - keeping a single source of truth means the dashboard + MCP server see
+//    identical results,
+//  - I/O bound work makes the subprocess overhead negligible.
 //
 // If the CLI can't be found (npm install missing or broken PATH), we return
-// a shape the UI can still render — empty arrays plus a warning string so the
-// dashboard surfaces the install issue instead of going blank.
+// the bare DashboardSnapshot skeleton the UI knows how to render — empty
+// arrays + zeroed summary + a warning string so the dashboard surfaces the
+// install issue instead of going blank.
 
 use crate::cli::run_cli_json;
 use serde_json::{json, Value};
 
+/// 0.2.3 fix: async + spawn_blocking. Previously this was a sync
+/// `pub fn`, which Tauri runs on the **main UI thread**. Every 3-second
+/// poll then blocked the message pump for ~500-1000 ms (cost of spawning
+/// Node + reading lanes.json + scanning ports). If the user happened to
+/// be dragging the window during that interval, Windows showed "Not
+/// Responding" in the title bar. Making the command async + offloading the
+/// blocking subprocess to a worker thread via tauri's async_runtime keeps
+/// the UI thread free to pump WM_* messages even while the snapshot is
+/// being computed.
 #[tauri::command]
-pub fn get_snapshot() -> Result<Value, String> {
-    match run_cli_json(&["status"]) {
-        Ok(v) => Ok(v),
-        Err(e) => Ok(json!({
-            "ok": false,
-            "lanes": [],
-            "observations": [],
-            "warnings": [format!("paat CLI unavailable: {}", e)],
-            "scanSource": "error",
-            "scanErrors": [e]
-        })),
-    }
+pub async fn get_snapshot() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| run_cli_json(&["dashboard-snapshot"]))
+        .await
+        .map_err(|e| format!("snapshot worker join failed: {}", e))
+        .and_then(|res| match res {
+            Ok(v) => Ok(v),
+            Err(e) => Ok(json!({
+                "ok": false,
+                "generatedAt": "",
+                "scanSource": "empty",
+                "scanErrors": [e.clone()],
+                "home": "",
+                "registryPath": "",
+                "config": {},
+                "summary": { "liveSessions": 0, "distinctAgents": 0, "conflicts": 0 },
+                "liveSessions": [],
+                "registryHealth": { "portpilot": { "exists": false, "lockHealthy": false } },
+                "conflicts": [],
+                "warnings": [format!("paat CLI unavailable: {}", e)]
+            })),
+        })
 }

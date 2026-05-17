@@ -7,18 +7,22 @@
 // time a user clicks Kill we already know the PID is one of ours. If the
 // PID has already exited the OS-level kill is a no-op and we return ok.
 
+use crate::cli::quiet_command;
 use serde_json::{json, Value};
-use std::process::Command;
 
 #[tauri::command]
 pub fn kill_chrome(pid: u32) -> Result<Value, String> {
+    // quiet_command() suppresses the brief CMD-window flash that
+    // std::process::Command::new("taskkill.exe") would otherwise pop on
+    // Windows. Same fix applied across cli.rs and focus.rs in 0.2.3.
     let result = if cfg!(target_os = "windows") {
-        Command::new("taskkill.exe")
+        quiet_command("taskkill.exe")
             .args(["/F", "/PID", &pid.to_string()])
             .output()
     } else {
-        // macOS + Linux: SIGKILL is universal.
-        Command::new("kill")
+        // macOS + Linux: SIGKILL is universal. (CREATE_NO_WINDOW is a no-op
+        // here since quiet_command only sets it under #[cfg(windows)].)
+        quiet_command("kill")
             .args(["-9", &pid.to_string()])
             .output()
     };

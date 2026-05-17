@@ -23,6 +23,7 @@ import { spawn } from "node:child_process";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type McpClient = "claude" | "claude-code" | "codex";
 
@@ -41,7 +42,45 @@ export const MCP_SERVER_NAME = "port-authority-agent-terminal";
  * the canonical MCP_SERVER_NAME above. This guarantees a user who upgrades
  * never ends up with duplicate entries in their MCP list.
  */
-export const LEGACY_MCP_SERVER_NAMES = ["paat"] as const;
+export const LEGACY_MCP_SERVER_NAMES = ["paat", "portpilot", "port-authority"] as const;
+
+/**
+ * Compute the default { command, args } pair we register with MCP hosts.
+ *
+ * Why this exists (Windows root cause):
+ *   Until v0.2.2 we wrote `command: "paat"` and let the host resolve it
+ *   through PATH. That works on macOS/Linux but breaks on Windows: Electron
+ *   apps (Claude Desktop, Codex Desktop) spawn subprocesses with shell:false,
+ *   and on Windows that means `paat` resolves to the .cmd shim only if the
+ *   spawner explicitly appends .cmd or runs through cmd.exe. They don't.
+ *   Result: every Windows install showed "Server disconnected" in Claude
+ *   Desktop until the user hand-edited the config to use node.exe directly.
+ *
+ * Fix: always write the absolute node.exe path + absolute path to our
+ * compiled CLI script. This works on every host on every platform and has
+ * no PATH lookup ambiguity.
+ *
+ *   command: process.execPath        — the node.exe that's running us right now
+ *   args:    [<abs path to index.js>, "mcp"]
+ *
+ * Trade-off: if the user later moves Node or replaces it with a different
+ * version, the entries we wrote point at the old node.exe. Re-running
+ * `paat install-mcp` rewrites them. Acceptable: most users don't move Node
+ * frequently, and our postinstall hook re-runs install-mcp on every upgrade
+ * anyway, so it self-heals across `npm install -g` cycles.
+ */
+export function defaultMcpCommand(): { command: string; args: string[] } {
+  // Resolve <pkg>/dist/src/cli/index.js relative to this file. Works whether
+  // we're running from dist (production) or src (dev mode via tsx).
+  const here = fileURLToPath(import.meta.url);
+  // install-mcp.ts sits at dist/src/cli/install-mcp.js — its sibling is the
+  // CLI entry. Same in src mode.
+  const cliJs = here.replace(/install-mcp\.(?:js|ts)$/, "index.js");
+  return {
+    command: process.execPath, // absolute path to node.exe / node binary
+    args: [cliJs, "mcp"],
+  };
+}
 
 export interface InstallMcpOptions {
   /** Override the config file path. Used by tests. */
@@ -104,8 +143,12 @@ async function readIfExists(path: string): Promise<string | null> {
  */
 export async function installClaudeMcp(opts: InstallMcpOptions = {}): Promise<InstallMcpResult> {
   const configPath = opts.configPath ?? claudeConfigPath();
-  const command = opts.command ?? "paat";
-  const args = opts.args ?? ["mcp"];
+  // See defaultMcpCommand() — uses node.exe + absolute script path instead
+  // of bare "paat" so Electron-based MCP hosts (Claude Desktop, Codex) can
+  // spawn it on Windows where shell:false breaks .cmd-shim resolution.
+  const __defaults = defaultMcpCommand();
+  const command = opts.command ?? __defaults.command;
+  const args = opts.args ?? __defaults.args;
 
   await mkdir(dirname(configPath), { recursive: true });
 
@@ -187,8 +230,12 @@ export async function installClaudeMcp(opts: InstallMcpOptions = {}): Promise<In
  */
 export async function installCodexMcp(opts: InstallMcpOptions = {}): Promise<InstallMcpResult> {
   const configPath = opts.configPath ?? codexConfigPath();
-  const command = opts.command ?? "paat";
-  const args = opts.args ?? ["mcp"];
+  // See defaultMcpCommand() — uses node.exe + absolute script path instead
+  // of bare "paat" so Electron-based MCP hosts (Claude Desktop, Codex) can
+  // spawn it on Windows where shell:false breaks .cmd-shim resolution.
+  const __defaults = defaultMcpCommand();
+  const command = opts.command ?? __defaults.command;
+  const args = opts.args ?? __defaults.args;
 
   await mkdir(dirname(configPath), { recursive: true });
   const raw = await readIfExists(configPath);
@@ -388,8 +435,12 @@ export function parseExistingPaatLine(listStdout: string): { exists: boolean; co
 export async function installClaudeCodeMcp(opts: InstallClaudeCodeOptions = {}): Promise<InstallMcpResult> {
   const claudeBin = opts.claudeBin ?? "claude";
   const scope = opts.scope ?? "user";
-  const command = opts.command ?? "paat";
-  const args = opts.args ?? ["mcp"];
+  // See defaultMcpCommand() — uses node.exe + absolute script path instead
+  // of bare "paat" so Electron-based MCP hosts (Claude Desktop, Codex) can
+  // spawn it on Windows where shell:false breaks .cmd-shim resolution.
+  const __defaults = defaultMcpCommand();
+  const command = opts.command ?? __defaults.command;
+  const args = opts.args ?? __defaults.args;
   const run = opts.runner ?? defaultClaudeRunner;
 
   // 1. Sanity-check that claude is reachable. If not, return "skipped" rather
