@@ -195,19 +195,19 @@ A multi-agent scenario the project is designed to handle:
 
 ```text
 Codex working in:
-  C:\Users\<you>\Downloads\vend-site
+  C:\Users\<you>\Downloads\landing-page
   → app port 3000, Chrome debug 9322,
-    profile  C:\Users\<you>\.portpilot\profiles\codex-vend-site
+    profile  C:\Users\<you>\.portpilot\profiles\codex-landing-page
 
 Claude working in:
-  C:\Users\<you>\Downloads\vendingbids
+  C:\Users\<you>\Downloads\crm-dashboard
   → app port 3001, Chrome debug 9323,
-    profile  C:\Users\<you>\.portpilot\profiles\claude-vendingbids
+    profile  C:\Users\<you>\.portpilot\profiles\claude-crm-dashboard
 
 Cursor working in:
-  C:\Users\<you>\Downloads\research
+  C:\Users\<you>\Downloads\blog-redesign
   → no app server, Chrome debug 9324,
-    profile  C:\Users\<you>\.portpilot\profiles\cursor-research
+    profile  C:\Users\<you>\.portpilot\profiles\cursor-blog-redesign
 ```
 
 Each agent calls `paat check` before every Chrome step. If Codex's terminal
@@ -223,9 +223,9 @@ Claude's session.
 ├── lanes.json              # registry — single source of intent
 ├── lanes.json.lock         # exclusive lock for read-modify-write
 └── profiles/
-    ├── codex-vend-site/
-    ├── claude-vendingbids/
-    └── cursor-research/
+    ├── codex-landing-page/
+    ├── claude-crm-dashboard/
+    └── cursor-blog-redesign/
 ```
 
 Override the location with `PORTPILOT_HOME=<path>`.
