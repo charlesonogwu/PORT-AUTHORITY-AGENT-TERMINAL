@@ -1,17 +1,16 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 /**
- * npm postinstall hook — wires up the desktop integration AND the MCP
- * integrations (Claude Desktop, Codex Desktop, Claude Code CLI) for
- * portpilot. Runs automatically after `npm install -g
- * port-authority-agent-terminal-mcp` (or local install).
- *
- * Goal: a single `npm install -g` is all the user has to do. They don't
- * need to remember `paat install-mcp` afterwards.
+ * npm postinstall hook — stages the dashboard binary for portpilot.
+ * Runs automatically after `npm install -g port-authority-agent-terminal-mcp`
+ * (or local install), but does not modify MCP client configs or enable
+ * login autostart unless the user explicitly opts in with environment flags.
  *
  * Per-platform behavior:
- *   Windows: stage bin/paat-dashboard.exe → %LOCALAPPDATA%\PAAT\, install
- *            desktop shortcut + Start Menu entry + login autostart.
+ *   Windows: stage bin/paat-dashboard.exe → %LOCALAPPDATA%\PAAT\.
+ *            Desktop shortcut / Start Menu entries are created only when
+ *            PAAT_INSTALL_SHORTCUTS=1 is set, and login autostart only when
+ *            PAAT_INSTALL_AUTOSTART=1 is set.
  *   macOS:   if bin/paat-dashboard-darwin-<arch> is bundled, stage it to
  *            ~/.portpilot/bin/paat-dashboard. If missing AND cargo is on
  *            PATH, build from source via scripts/build-dashboard-tauri.cjs.
@@ -25,7 +24,9 @@
  *
  * Skip rules:
  *   - PAAT_SKIP_POSTINSTALL=1: skip everything (CI / sandboxed users).
- *   - PAAT_SKIP_INSTALL_MCP=1: skip ONLY the MCP wire-up step.
+ *   - PAAT_INSTALL_MCP=1: opt in to MCP wire-up during postinstall.
+ *   - PAAT_INSTALL_SHORTCUTS=1: opt in to Windows shortcut creation.
+ *   - PAAT_INSTALL_AUTOSTART=1: opt in to Windows login autostart.
  *   - PAAT_PREPARE_RUNNING=1: nested install during prepare — skip.
  *   - npm_config_global !== "true" AND not invoked from package root:
  *     skip — running postinstall from a transitive dep is a footgun.
@@ -201,31 +202,39 @@ function main() {
     log(`Installed dashboard binary: ${dashboardBin}`);
   }
 
-  // Windows-only: install desktop shortcut + autostart. macOS/Linux users
+  // Windows-only: optional desktop shortcut + optional autostart. macOS/Linux users
   // get the CLI binary via npm's `bin` entries; GUI shortcuts on those
   // platforms require .app / .desktop machinery we haven't built yet.
   if (process.platform === "win32") {
-    log("Setting up Windows shortcuts…");
-    const shortcutOk = run(cliJs, ["shortcut", "install"]);
-    if (!shortcutOk) warn("shortcut install failed — try `paat shortcut install` manually.");
+    if (process.env.PAAT_INSTALL_SHORTCUTS === "1") {
+      log("Setting up Windows shortcuts (PAAT_INSTALL_SHORTCUTS=1)…");
+      const shortcutOk = run(cliJs, ["shortcut", "install"]);
+      if (!shortcutOk) warn("shortcut install failed — try `paat shortcut install` manually.");
+    } else {
+      log("Skipping Windows shortcuts. Run `paat shortcut install` or set PAAT_INSTALL_SHORTCUTS=1 to opt in.");
+    }
 
-    log("Enabling Windows-login autostart…");
-    const autoOk = run(cliJs, ["autostart", "install"]);
-    if (!autoOk) warn("autostart install failed — try `paat autostart install` manually.");
+    if (process.env.PAAT_INSTALL_AUTOSTART === "1") {
+      log("Enabling Windows-login autostart (PAAT_INSTALL_AUTOSTART=1)…");
+      const autoOk = run(cliJs, ["autostart", "install"]);
+      if (!autoOk) warn("autostart install failed — try `paat autostart install` manually.");
+    } else {
+      log("Skipping Windows-login autostart. Run `paat autostart install` or set PAAT_INSTALL_AUTOSTART=1 to opt in.");
+    }
   } else {
     log(`Skipping desktop shortcut + autostart on ${process.platform} (not implemented).`);
     log(`Run \`paat dashboard\` from your terminal to open the GUI.`);
   }
 
-  // Auto-wire MCP integrations so the user doesn't have to remember
-  // `paat install-mcp` separately.
+  // MCP integrations modify unrelated application config files. Keep them
+  // explicit by default; allow postinstall opt-in for managed deployments.
   let mcpOk = true;
-  if (process.env.PAAT_SKIP_INSTALL_MCP === "1") {
-    log("Skipping MCP wire-up (PAAT_SKIP_INSTALL_MCP=1).");
-  } else {
-    log("Wiring PAAT into Claude Desktop / Codex Desktop / Claude Code…");
+  if (process.env.PAAT_INSTALL_MCP === "1") {
+    log("Wiring PAAT into Claude Desktop / Codex Desktop / Claude Code (PAAT_INSTALL_MCP=1)…");
     mcpOk = run(cliJs, ["install-mcp"]);
     if (!mcpOk) warn("install-mcp returned a non-zero status — re-run `paat install-mcp` manually.");
+  } else {
+    log("Skipping MCP wire-up. Run `paat install-mcp` or set PAAT_INSTALL_MCP=1 to opt in.");
   }
 
   if (mcpOk) {

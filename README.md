@@ -34,7 +34,7 @@ npm install -g port-authority-agent-terminal-mcp
 
 Downloads a pre-built tarball. **No build step on your machine.** Completes in ~5 seconds. Works in Command Prompt, PowerShell, anywhere.
 
-When it's done you'll have **three CLI aliases** (all the same binary), a desktop shortcut to the dashboard, Start Menu entries, and the MCP server auto-wired into Claude Desktop / Codex Desktop / Claude Code if any of those are installed:
+When it's done you'll have **three CLI aliases** (all the same binary). Desktop shortcuts, login autostart, and MCP wiring are explicit opt-in steps so package installation does not silently modify other app configs:
 
 ```
 paat              # the short one you'll actually type
@@ -42,7 +42,7 @@ port-authority    # the readable one for scripts
 portpilot         # legacy alias
 ```
 
-Open the dashboard with `paat dashboard` or click the new desktop icon → goes to <http://127.0.0.1:7321/>.
+Open the dashboard with `paat dashboard` → goes to <http://127.0.0.1:7321/>. To add integrations later, run `paat shortcut install`, `paat autostart install`, or `paat install-mcp`.
 
 **Upgrading?** Same command — npm picks up the latest version. To bump to a specific version: `npm install -g port-authority-agent-terminal-mcp@0.1.3`.
 

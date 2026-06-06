@@ -256,6 +256,16 @@ test("postinstall messaging does not advertise removed hotkey or extension flows
   assert.doesNotMatch(postinstall, /extension install/i);
 });
 
+test("postinstall does not auto-wire MCP or login autostart by default", () => {
+  const postinstall = readRepoFile("scripts/postinstall.cjs");
+
+  assert.match(postinstall, /PAAT_INSTALL_MCP === "1"/);
+  assert.match(postinstall, /PAAT_INSTALL_AUTOSTART === "1"/);
+  assert.match(postinstall, /PAAT_INSTALL_SHORTCUTS === "1"/);
+  assert.doesNotMatch(postinstall, /PAAT_SKIP_INSTALL_MCP/);
+  assert.doesNotMatch(postinstall, /Auto-wire MCP integrations/);
+});
+
 test("build-only image packages are not installed during global runtime install", () => {
   const pkg = JSON.parse(readRepoFile("package.json"));
   const prodDeps = {
