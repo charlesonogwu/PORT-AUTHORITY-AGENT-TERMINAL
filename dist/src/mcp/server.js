@@ -4,7 +4,8 @@ import { z } from "zod";
 import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
 import { findLane, listLanes, markStaleLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { hasSonar, scanPorts } from "../core/scanner.js";
-import { evaluateChromeAttach, launchChromeForLane } from "../core/chrome.js";
+import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
+import { loadConfig } from "../core/config.js";
 import { portpilotHome, profilesDir } from "../core/paths.js";
 import { isStale, normalizeCwd, nowIso } from "../core/lane.js";
 /**
@@ -29,7 +30,14 @@ export function buildMcpServer() {
             "Idempotent: if a Chrome with the matching profile is already running on the lane's debug port, " +
             "this returns the existing session instead of launching a duplicate. " +
             "Prefer this single tool over composing reserve_lane + launch_chrome_lane manually unless you " +
-            "need granular control.",
+            "need granular control. " +
+            "VISIBILITY: pass mode='background' to launch a REAL (headed) Chrome that renders fully off-screen " +
+            "and never steals focus — best for non-interactive CDP automation that only reads/clicks. " +
+            "mode='headless' opens no window at all (lower footprint, but many sites like eBay block it). " +
+            "mode='visible' (default) shows the window for manual steps (login, captcha). " +
+            "BACKGROUND CONTRACT: when a lane is in background mode, your CDP client must NOT call " +
+            "Page.bringToFront() and must NOT call Browser.setWindowBounds with on-screen coordinates — both " +
+            "re-raise the window onto the user's desktop and defeat the off-screen placement.",
         inputSchema: {
             cwd: z.string().min(1).describe("Project working directory (absolute path)."),
             url: z
@@ -42,7 +50,15 @@ export function buildMcpServer() {
                 .describe('Pass ONLY the LLM provider name: "claude", "codex", "gemini", "cursor", "windsurf", "copilot", "chatgpt", "openhands", or "aider". DO NOT add prefixes, suffixes, batch numbers, or per-task identifiers — for example "codex-test-alpha", "agent-random-1", and "batch2-agent-3" are all WRONG. If you need to distinguish multiple parallel sessions of the same agent, put that distinction in the `sessionId` field, not here. Server normalizes anyway: any custom suffix is stripped from this field and auto-promoted to sessionId.'),
             task: z.string().optional().describe("Short description of what you're doing."),
             sessionId: z.string().optional().describe("Optional parallel-session id when an agent runs multiple Chromes in the same project."),
-            headless: z.boolean().optional().default(false).describe("Pass --headless=new on launch."),
+            mode: z
+                .enum(["visible", "background", "headless"])
+                .optional()
+                .describe("Launch visibility. 'visible' (default) = normal window; 'background' = real headed Chrome rendered off-screen, never steals focus; 'headless' = no window (--headless=new). Overrides the PORTPILOT_CHROME_MODE env var and the config default. Omit to use the machine default."),
+            headless: z
+                .boolean()
+                .optional()
+                .default(false)
+                .describe("DEPRECATED — prefer mode='headless'. Kept for back-compat: when true and `mode` is unset, launches headless."),
         },
     }, async (args) => {
         const owner = (args.owner ?? "agent").toString().trim() || "agent";
@@ -73,16 +89,20 @@ export function buildMcpServer() {
                 message: "Chrome was already running with this lane's profile. Reusing it.",
             });
         }
-        // Launch
-        const extraArgs = args.headless ? ["--headless=new"] : [];
+        // Resolve launch mode: explicit `mode` wins, else the legacy `headless`
+        // boolean maps to "headless", else env var / config / "visible".
+        const cfg = await loadConfig();
+        const headlessFallback = args.headless ? "headless" : undefined;
+        const mode = resolveChromeMode(args.mode ?? headlessFallback, cfg.chromeMode);
         const launch = await launchChromeForLane(lane, {
-            extraArgs,
+            mode,
             ...(args.url ? { initialUrl: args.url } : {}),
         });
         await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
         return jsonResult({
             ok: true,
             launched: true,
+            mode,
             lane: { ...lane, status: "active" },
             pid: launch.pid,
             dashboardUrl: "http://127.0.0.1:7321/",
@@ -201,13 +221,21 @@ export function buildMcpServer() {
             "live entry. Refuses to launch when the port is held by a foreign Chrome instance (different profile) or " +
             "a non-Chrome process — prevents one agent from accidentally driving another agent's browser. " +
             "Set dryRun=true to return the launch command without executing. Most callers should use the 'open' tool " +
-            "instead, which combines reserve_lane + launch_chrome_lane in one call.",
+            "instead, which combines reserve_lane + launch_chrome_lane in one call. " +
+            "VISIBILITY: mode='background' launches a real headed Chrome off-screen that never steals focus (best for " +
+            "non-interactive CDP automation); mode='headless' opens no window (blocked by some sites); mode='visible' " +
+            "(default) is a normal window. In background mode, the CDP client must not call Page.bringToFront() or " +
+            "Browser.setWindowBounds with on-screen coordinates.",
         inputSchema: {
             owner: z.string().min(1),
             cwd: z.string().min(1),
             sessionId: z.string().optional(),
             dryRun: z.boolean().optional().default(false),
             binaryPath: z.string().optional(),
+            mode: z
+                .enum(["visible", "background", "headless"])
+                .optional()
+                .describe("Launch visibility. 'visible' (default) = normal window; 'background' = real headed Chrome off-screen, no focus steal; 'headless' = no window. Overrides PORTPILOT_CHROME_MODE and the config default. Omit to use the machine default."),
         },
     }, async (args) => {
         const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}) });
@@ -220,9 +248,11 @@ export function buildMcpServer() {
         if (result.verdict.kind === "safe-attach") {
             return jsonResult({ ok: true, attached: true, lane, message: "Chrome already running with the matching profile; attach instead of launching." });
         }
-        const launch = await launchChromeForLane(lane, { dryRun: args.dryRun, binaryPath: args.binaryPath });
+        const cfg = await loadConfig();
+        const mode = resolveChromeMode(args.mode, cfg.chromeMode);
+        const launch = await launchChromeForLane(lane, { dryRun: args.dryRun, binaryPath: args.binaryPath, mode });
         await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
-        return jsonResult({ ok: true, launched: !args.dryRun, lane, command: { binary: launch.binary, args: launch.args }, pid: launch.pid });
+        return jsonResult({ ok: true, launched: !args.dryRun, mode, lane, command: { binary: launch.binary, args: launch.args }, pid: launch.pid });
     });
     server.registerTool("scan_ports", {
         title: "Scan listening ports",

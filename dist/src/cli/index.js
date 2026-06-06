@@ -5,7 +5,7 @@ import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
 import { isStale, normalizeCwd, nowIso } from "../core/lane.js";
 import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { scanPorts, hasSonar } from "../core/scanner.js";
-import { evaluateChromeAttach, launchChromeForLane } from "../core/chrome.js";
+import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
 import { portpilotHome, profilesDir, registryPath } from "../core/paths.js";
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
 import { installShortcut, shortcutStatus, uninstallShortcut } from "./shortcut.js";
@@ -297,15 +297,18 @@ async function cmdLaunchChrome(ctx) {
     }
     const dryRun = flagBool(ctx.args, "dry-run");
     const bin = flagString(ctx.args, "bin");
-    const launch = await launchChromeForLane(lane, { dryRun, binaryPath: bin });
+    // --mode wins, then PORTPILOT_CHROME_MODE env, then config, then "visible".
+    const cfg = await loadConfig();
+    const mode = resolveChromeMode(flagString(ctx.args, "mode"), cfg.chromeMode);
+    const launch = await launchChromeForLane(lane, { dryRun, binaryPath: bin, mode });
     await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
     if (ctx.json)
-        emit(ctx, { ok: true, launched: !dryRun, lane, command: { binary: launch.binary, args: launch.args }, pid: launch.pid });
+        emit(ctx, { ok: true, launched: !dryRun, mode, lane, command: { binary: launch.binary, args: launch.args }, pid: launch.pid });
     else {
         if (dryRun)
-            ctx.stdout.write(`Would launch: ${launch.binary} ${launch.args.join(" ")}\n`);
+            ctx.stdout.write(`Would launch (${mode}): ${launch.binary} ${launch.args.join(" ")}\n`);
         else
-            ctx.stdout.write(`Launched ${launch.binary} (pid=${launch.pid ?? "?"})\nDebug port: ${lane.chromeDebugPort}\nProfile:    ${lane.chromeProfileDir}\n`);
+            ctx.stdout.write(`Launched ${launch.binary} (pid=${launch.pid ?? "?"}, mode=${mode})\nDebug port: ${lane.chromeDebugPort}\nProfile:    ${lane.chromeProfileDir}\n`);
     }
 }
 async function cmdConfig(ctx) {

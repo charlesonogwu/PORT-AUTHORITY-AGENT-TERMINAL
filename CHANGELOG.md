@@ -11,6 +11,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] — background Chrome launch mode
+
+### Added
+
+- **`background` Chrome launch mode** for non-intrusive automation. A real
+  *headed* Chrome is launched fully off-screen
+  (`--window-position=-32000,-32000 --window-size=1280,1000`) so it never
+  appears on the visible desktop and never steals focus, while keeping
+  cookies, extensions, and anti-bot fingerprint identical to a normal
+  browser (unlike `headless`, which many sites block). Ideal for CDP
+  read/click automation that needs no human.
+- A **`mode` parameter** (`visible` | `background` | `headless`) on both the
+  `open` and `launch_chrome_lane` MCP tools, and a `--mode` flag on
+  `paat launch-chrome`.
+- A **machine-wide default**: set `chromeMode` in `~/.portpilot/config.json`
+  or the `PORTPILOT_CHROME_MODE` env var. Precedence is
+  **per-call `mode` > `PORTPILOT_CHROME_MODE` > config `chromeMode` >
+  `visible`**, so an agent can still force a `visible` window for a login
+  step even when the global default is `background`.
+- README section documenting the modes, the global default, and the CDP
+  client contract for background mode (do not call `Page.bringToFront()` or
+  `Browser.setWindowBounds` with on-screen coordinates).
+
+### Changed
+
+- The `open` tool's `headless: boolean` is now **deprecated** in favour of
+  `mode: "headless"`. It still works: when `headless` is `true` and `mode`
+  is unset, the launch is headless. Pre-existing callers are unaffected.
+
+### Notes
+
+- Hybrid strategy on Windows: Chrome is spawned directly (so the returned
+  pid is the real Chrome pid the dashboard + Kill button use), relying on
+  the off-screen flags plus the Windows foreground lock — no `start /min`
+  shim that would hand back a short-lived launcher pid.
+- `visible` mode is byte-for-byte unchanged (regression-guarded by tests).
+
+---
+
 ## [0.2.1] — desktop shortcut icon fix
 
 ### Fixed

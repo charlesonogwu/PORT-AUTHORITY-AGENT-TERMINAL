@@ -25,6 +25,13 @@ COMMANDS:
   launch-chrome --owner <n> --cwd <p>
                                 Launch Chrome bound to the lane's debug port + profile
                   [--session <id>] [--dry-run] [--bin <path>]
+                  [--mode visible|background|headless]
+                       visible    (default) normal window on the active desktop
+                       background  real headed Chrome rendered off-screen; never
+                                   steals focus — ideal for non-interactive CDP
+                       headless    no window at all (--headless=new); some sites block it
+                       (override globally via PORTPILOT_CHROME_MODE env or the
+                        chromeMode field in ~/.portpilot/config.json)
   config <subcommand>           Manage ~/.portpilot/config.json
                   show                       (default) print current config
                   recommend                  show RAM-based recommendation

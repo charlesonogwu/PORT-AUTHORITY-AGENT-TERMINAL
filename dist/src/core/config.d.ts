@@ -1,4 +1,5 @@
 import { PortRange } from "./lane.js";
+import type { ChromeLaunchMode } from "./chrome.js";
 /**
  * Optional, machine-local configuration. When the file is absent, callers
  * fall back to built-in defaults — all behaviour is unchanged.
@@ -27,6 +28,13 @@ export interface PortpilotConfig {
      * `warning` field describing the situation but still allocates.
      */
     warnAtActiveLanes?: number;
+    /**
+     * Default Chrome launch visibility for every lane on this machine
+     * ("visible" | "background" | "headless"). A per-call `mode` and the
+     * PORTPILOT_CHROME_MODE env var both override this. Omit (or "visible") to
+     * keep the historical headed-on-the-active-desktop behaviour.
+     */
+    chromeMode?: ChromeLaunchMode;
 }
 export declare const CONFIG_VERSION: 1;
 export declare const DEFAULT_CONFIG: PortpilotConfig;

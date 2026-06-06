@@ -49,12 +49,58 @@ export declare function extractUserDataDir(commandLine: string | undefined): str
  * for port `0` so callers can branch cleanly.
  */
 export declare function evaluateChromeAttach(lane: Lane, observations: PortObservation[]): ChromeAttachVerdict;
+/**
+ * Chrome launch visibility mode.
+ *
+ *   - "visible"    — normal headed Chrome on the active desktop (default;
+ *                    unchanged historical behaviour). Use for tasks that need
+ *                    a human (login, captcha).
+ *   - "background" — a REAL headed Chrome that renders fully off-screen and
+ *                    never appears on the visible desktop. Cookies, extensions
+ *                    and anti-bot fingerprint stay identical to a normal
+ *                    browser (unlike headless, which many sites block), but no
+ *                    window disturbs the user. Ideal for non-interactive CDP
+ *                    automation.
+ *   - "headless"   — `--headless=new`; no window at all. Lowest footprint, but
+ *                    many sites (eBay, etc.) detect and block headless Chrome.
+ */
+export type ChromeLaunchMode = "visible" | "background" | "headless";
+export declare const DEFAULT_CHROME_MODE: ChromeLaunchMode;
+/**
+ * Flags that push a headed Chrome window fully off the visible desktop.
+ * -32000 is the position Windows itself parks minimized windows at, so it is
+ * guaranteed to sit outside every real monitor on any multi-monitor layout.
+ * The explicit size keeps the off-screen viewport big enough that responsive
+ * layouts and lazy-loaded content render as they would on a normal display.
+ */
+export declare const OFFSCREEN_WINDOW_ARGS: readonly string[];
+/** Coerce an arbitrary value into a ChromeLaunchMode, or undefined if it is
+ *  not one of the three recognised modes (case-insensitive, trimmed). */
+export declare function normalizeChromeMode(value: unknown): ChromeLaunchMode | undefined;
+/**
+ * Resolve the effective launch mode using the precedence:
+ *
+ *   per-call argument  >  PORTPILOT_CHROME_MODE env var  >  config  >  visible
+ *
+ * The env var lets a user flip every launch on a machine to background mode
+ * without touching config, and a per-call `mode` always wins so an agent can
+ * still force a visible window for a login step even when the global default
+ * is background. `envMode` is injectable for tests.
+ */
+export declare function resolveChromeMode(perCall?: unknown, configMode?: unknown, envMode?: string | undefined): ChromeLaunchMode;
+/** The extra Chrome flags implied by a launch mode. */
+export declare function modeLaunchArgs(mode: ChromeLaunchMode): string[];
 export interface LaunchChromeOptions {
     detached?: boolean;
     extraArgs?: string[];
     binaryPath?: string;
     /** When true, skip launching and just return the resolved command + args. */
     dryRun?: boolean;
+    /**
+     * Launch visibility. Defaults to "visible". See ChromeLaunchMode. The mode's
+     * flags are injected ahead of `extraArgs` (and always before `initialUrl`).
+     */
+    mode?: ChromeLaunchMode;
     /**
      * Optional URL to open as the first tab. Passed as the trailing positional
      * argument to chrome.exe so Chrome navigates immediately on startup —
@@ -108,10 +154,18 @@ export interface LaunchResult {
     binary: string;
     args: string[];
     spawned: boolean;
+    /** The visibility mode the lane was launched with. */
+    mode: ChromeLaunchMode;
 }
 /**
  * Launch Chrome for the lane. Caller must ensure `evaluateChromeAttach`
  * returned `safe-free` first. We do not enforce that here because callers may
  * have already decided to attach to a `safe-attach` instance instead.
+ *
+ * Hybrid background strategy: we spawn Chrome directly (so the returned pid is
+ * the real Chrome pid the dashboard + kill button can use) and rely on the
+ * off-screen `--window-position` flags plus Windows' foreground lock to keep
+ * the window invisible and non-activating. No `cmd /c start /min` shim — that
+ * would hand us the shim's short-lived pid instead of Chrome's.
  */
 export declare function launchChromeForLane(lane: Lane, opts?: LaunchChromeOptions): Promise<LaunchResult>;

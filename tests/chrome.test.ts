@@ -1,6 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateChromeAttach, extractUserDataDir, isChromeProcess, buildLaunchPlan } from "../src/core/chrome.js";
+import {
+  evaluateChromeAttach,
+  extractUserDataDir,
+  isChromeProcess,
+  buildLaunchPlan,
+  modeLaunchArgs,
+  normalizeChromeMode,
+  resolveChromeMode,
+  OFFSCREEN_WINDOW_ARGS,
+} from "../src/core/chrome.js";
 import { Lane, nowIso } from "../src/core/lane.js";
 import { PortObservation } from "../src/core/scanner.js";
 
@@ -154,4 +163,65 @@ test("buildLaunchPlan does not include URL slot when initialUrl is empty/missing
   const plan = buildLaunchPlan(laneWith(), { binaryPath: "/usr/bin/chrome" });
   // last arg should be one of the boolean flags, not a URL
   assert.match(plan.args[plan.args.length - 1]!, /^--/);
+});
+
+/* ── Launch modes ─────────────────────────────────────────────────────── */
+
+test("normalizeChromeMode accepts the three modes case-insensitively, rejects junk", () => {
+  assert.equal(normalizeChromeMode("visible"), "visible");
+  assert.equal(normalizeChromeMode("Background"), "background");
+  assert.equal(normalizeChromeMode("  HEADLESS  "), "headless");
+  assert.equal(normalizeChromeMode("invisible"), undefined);
+  assert.equal(normalizeChromeMode(""), undefined);
+  assert.equal(normalizeChromeMode(undefined), undefined);
+  assert.equal(normalizeChromeMode(42), undefined);
+});
+
+test("modeLaunchArgs maps each mode to the right Chrome flags", () => {
+  assert.deepEqual(modeLaunchArgs("visible"), []);
+  assert.deepEqual(modeLaunchArgs("headless"), ["--headless=new"]);
+  assert.deepEqual(modeLaunchArgs("background"), [...OFFSCREEN_WINDOW_ARGS]);
+  // off-screen flags must actually push the window off the desktop
+  assert.ok(modeLaunchArgs("background").some((a) => a.includes("--window-position=-32000,-32000")));
+});
+
+test("resolveChromeMode precedence: per-call > env > config > visible", () => {
+  // per-call beats everything
+  assert.equal(resolveChromeMode("visible", "background", "headless"), "visible");
+  // env beats config when no per-call
+  assert.equal(resolveChromeMode(undefined, "visible", "background"), "background");
+  // config used when no per-call and no env
+  assert.equal(resolveChromeMode(undefined, "headless", undefined), "headless");
+  // default when nothing supplied
+  assert.equal(resolveChromeMode(undefined, undefined, undefined), "visible");
+  // junk values are ignored and fall through
+  assert.equal(resolveChromeMode("nonsense", undefined, "background"), "background");
+});
+
+test("buildLaunchPlan injects off-screen flags for background mode, URL still last", () => {
+  const plan = buildLaunchPlan(laneWith(), {
+    binaryPath: "/usr/bin/chrome",
+    mode: "background",
+    initialUrl: "https://example.com",
+  });
+  assert.ok(plan.args.includes("--window-position=-32000,-32000"));
+  assert.ok(plan.args.includes("--window-size=1280,1000"));
+  // required base flags are still present
+  assert.ok(plan.args.includes("--remote-debugging-port=9322"));
+  // URL must remain the trailing positional arg
+  assert.equal(plan.args[plan.args.length - 1], "https://example.com");
+});
+
+test("buildLaunchPlan injects --headless=new for headless mode", () => {
+  const plan = buildLaunchPlan(laneWith(), { binaryPath: "/usr/bin/chrome", mode: "headless" });
+  assert.ok(plan.args.includes("--headless=new"));
+  assert.ok(!plan.args.includes("--window-position=-32000,-32000"));
+});
+
+test("buildLaunchPlan visible mode is unchanged (no mode flags) — regression guard", () => {
+  const visible = buildLaunchPlan(laneWith(), { binaryPath: "/usr/bin/chrome", mode: "visible" });
+  const omitted = buildLaunchPlan(laneWith(), { binaryPath: "/usr/bin/chrome" });
+  assert.deepEqual(visible.args, omitted.args);
+  assert.ok(!visible.args.some((a) => a.includes("--headless")));
+  assert.ok(!visible.args.some((a) => a.includes("--window-position")));
 });
