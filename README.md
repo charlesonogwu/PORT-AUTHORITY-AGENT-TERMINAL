@@ -161,6 +161,40 @@ A natural-language prompt that just works once both desktops are wired:
 The agent picks up that "via PAAT" → calls `open` → the session shows up on
 the live dashboard within 2 seconds.
 
+## Chrome launch modes
+
+Both `open` and `launch_chrome_lane` (and the `paat launch-chrome` CLI) take a
+`mode` that controls whether Chrome's window is visible:
+
+| Mode | Window | Use it for |
+|---|---|---|
+| `visible` *(default)* | Normal window on your active desktop | Manual steps — logging in, solving a captcha |
+| `background` | **Real headed Chrome rendered fully off-screen** (`--window-position=-32000,-32000`). Never appears on a monitor, never steals focus. | Non-interactive CDP automation that only reads/clicks. Cookies, extensions, and anti-bot fingerprint are identical to a normal browser. |
+| `headless` | No window at all (`--headless=new`) | Lowest footprint — but many sites (eBay, etc.) detect and block headless Chrome. |
+
+**Set it once, machine-wide.** Precedence is **per-call `mode` > `PORTPILOT_CHROME_MODE` env var > `chromeMode` in `~/.portpilot/config.json` > `visible`**:
+
+```jsonc
+// ~/.portpilot/config.json
+{ "version": 1, "chromeMode": "background" }
+```
+
+```powershell
+# or just for this shell / this run:
+$env:PORTPILOT_CHROME_MODE = "background"
+```
+
+```bash
+# or per call:
+paat launch-chrome --owner claude --cwd "C:\path\to\proj" --mode background
+```
+
+**CDP client contract for `background` mode:** to keep the window off-screen,
+your DevTools-Protocol client must **not** call `Page.bringToFront()` and must
+**not** call `Browser.setWindowBounds` with on-screen coordinates — both
+re-raise the window onto the user's desktop and defeat the off-screen
+placement. Read and click freely; just don't re-home the window.
+
 ## Safety contract
 
 | Verdict from `check_lane` | Meaning |

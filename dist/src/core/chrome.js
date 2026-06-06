@@ -66,6 +66,56 @@ export function evaluateChromeAttach(lane, observations) {
     }
     return { kind: "unsafe-foreign-chrome", port, observation: obs, foundProfile: found };
 }
+export const DEFAULT_CHROME_MODE = "visible";
+/**
+ * Flags that push a headed Chrome window fully off the visible desktop.
+ * -32000 is the position Windows itself parks minimized windows at, so it is
+ * guaranteed to sit outside every real monitor on any multi-monitor layout.
+ * The explicit size keeps the off-screen viewport big enough that responsive
+ * layouts and lazy-loaded content render as they would on a normal display.
+ */
+export const OFFSCREEN_WINDOW_ARGS = [
+    "--window-position=-32000,-32000",
+    "--window-size=1280,1000",
+];
+/** Coerce an arbitrary value into a ChromeLaunchMode, or undefined if it is
+ *  not one of the three recognised modes (case-insensitive, trimmed). */
+export function normalizeChromeMode(value) {
+    if (typeof value !== "string")
+        return undefined;
+    const v = value.trim().toLowerCase();
+    if (v === "visible" || v === "background" || v === "headless")
+        return v;
+    return undefined;
+}
+/**
+ * Resolve the effective launch mode using the precedence:
+ *
+ *   per-call argument  >  PORTPILOT_CHROME_MODE env var  >  config  >  visible
+ *
+ * The env var lets a user flip every launch on a machine to background mode
+ * without touching config, and a per-call `mode` always wins so an agent can
+ * still force a visible window for a login step even when the global default
+ * is background. `envMode` is injectable for tests.
+ */
+export function resolveChromeMode(perCall, configMode, envMode = process.env.PORTPILOT_CHROME_MODE) {
+    return (normalizeChromeMode(perCall) ??
+        normalizeChromeMode(envMode) ??
+        normalizeChromeMode(configMode) ??
+        DEFAULT_CHROME_MODE);
+}
+/** The extra Chrome flags implied by a launch mode. */
+export function modeLaunchArgs(mode) {
+    switch (mode) {
+        case "headless":
+            return ["--headless=new"];
+        case "background":
+            return [...OFFSCREEN_WINDOW_ARGS];
+        case "visible":
+        default:
+            return [];
+    }
+}
 const DEFAULT_CHROME_BINARIES = {
     win32: [
         "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
@@ -171,11 +221,15 @@ export function buildLaunchPlan(lane, opts = {}) {
         throw new Error("Lane has no chromeDebugPort assigned");
     }
     const binary = resolveChromeBinary(opts.binaryPath);
+    const mode = opts.mode ?? DEFAULT_CHROME_MODE;
     const args = [
         `--remote-debugging-port=${lane.chromeDebugPort}`,
         `--user-data-dir=${lane.chromeProfileDir}`,
         "--no-first-run",
         "--no-default-browser-check",
+        // Mode flags (off-screen for background, --headless=new for headless,
+        // nothing for visible) go before any caller extraArgs and the URL.
+        ...modeLaunchArgs(mode),
     ];
     if (opts.extraArgs)
         args.push(...opts.extraArgs);
@@ -195,22 +249,32 @@ export function buildLaunchPlan(lane, opts = {}) {
  * Launch Chrome for the lane. Caller must ensure `evaluateChromeAttach`
  * returned `safe-free` first. We do not enforce that here because callers may
  * have already decided to attach to a `safe-attach` instance instead.
+ *
+ * Hybrid background strategy: we spawn Chrome directly (so the returned pid is
+ * the real Chrome pid the dashboard + kill button can use) and rely on the
+ * off-screen `--window-position` flags plus Windows' foreground lock to keep
+ * the window invisible and non-activating. No `cmd /c start /min` shim — that
+ * would hand us the shim's short-lived pid instead of Chrome's.
  */
 export async function launchChromeForLane(lane, opts = {}) {
+    const mode = opts.mode ?? DEFAULT_CHROME_MODE;
     const plan = buildLaunchPlan(lane, opts);
     await mkdir(plan.profileDir, { recursive: true });
     if (opts.dryRun) {
-        return { binary: plan.binary, args: plan.args, spawned: false };
+        return { binary: plan.binary, args: plan.args, spawned: false, mode };
     }
     const detached = opts.detached !== false;
     const child = spawn(plan.binary, plan.args, {
         detached,
         stdio: "ignore",
-        windowsHide: false,
+        // For non-visible modes there is never a console we want, so hide it.
+        // (windowsHide only affects the console window, never Chrome's GUI — the
+        // off-screen flags handle the GUI for background mode.)
+        windowsHide: mode !== "visible",
         shell: false,
     });
     if (detached)
         child.unref();
-    return { pid: child.pid, binary: plan.binary, args: plan.args, spawned: true };
+    return { pid: child.pid, binary: plan.binary, args: plan.args, spawned: true, mode };
 }
 void isWindows; // satisfy isolatedModules for unused exports
