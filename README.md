@@ -195,6 +195,55 @@ your DevTools-Protocol client must **not** call `Page.bringToFront()` and must
 re-raise the window onto the user's desktop and defeat the off-screen
 placement. Read and click freely; just don't re-home the window.
 
+## Drop-in prompt for your agents
+
+Run several agents in parallel across different project folders? Paste this
+into any of them (system prompt, `CLAUDE.md`, `AGENTS.md`, or a one-off
+message) so they coordinate through PortPilot instead of fighting over Chrome:
+
+```text
+This machine runs multiple AI agents in parallel across different project
+folders. Whenever a task here needs to drive a real Chrome browser — logging
+into a site, scraping, clicking through a web app or dashboard, or any
+DevTools-Protocol / puppeteer-core / Playwright-over-CDP automation — go
+through PortPilot instead of launching Chrome yourself on a hardcoded debug
+port. PortPilot hands you your own debug port and an isolated Chrome profile
+so you never collide with another agent's browser, and the human can watch
+every live session on a dashboard.
+
+How to use it:
+
+1. Claim a browser in one call — use the `open` MCP tool with:
+   - owner: your LLM name only (claude, codex, cursor, gemini, …). No
+     suffixes, batch numbers, or task IDs.
+   - cwd: this project's absolute path.
+   - url (optional): the first page to open.
+   - mode: "background" for non-interactive read/click automation (a real
+     headed Chrome that stays off-screen and never steals focus); "visible"
+     when a human must log in or solve a captcha; "headless" only if you know
+     the target site allows it.
+   - sessionId (optional): only when you need several separate browsers in
+     this same project at once.
+2. Connect your CDP client (puppeteer-core browserURL, Playwright
+   connectOverCDP) to http://127.0.0.1:<chromeDebugPort> from the response.
+3. Respect the safety verdict: if check_lane returns unsafe-foreign-chrome or
+   unsafe-unknown, that port belongs to another agent — back off, do not
+   attach, and never force-kill someone else's Chrome.
+4. Background-mode rule: if you launched in "background" mode, do NOT call
+   Page.bringToFront() or Browser.setWindowBounds with on-screen coordinates —
+   both yank the window onto the user's screen.
+5. Release when finished: call release_lane (it does not kill Chrome).
+
+No PortPilot MCP tools in this agent? Use the CLI instead:
+   paat reserve --owner <you> --cwd "<path>"
+   paat launch-chrome --owner <you> --cwd "<path>" --mode background
+then connect to the printed debug port. `paat dashboard` opens the live view.
+```
+
+The whole point is composability: every agent says `owner = <its own name>`
+and `cwd = <its own folder>`, and PortPilot keeps their browsers — ports,
+profiles, and focus — from ever stepping on each other.
+
 ## Safety contract
 
 | Verdict from `check_lane` | Meaning |
