@@ -214,8 +214,12 @@ every live session on a dashboard.
 How to use it:
 
 1. Claim a browser in one call — use the `open` MCP tool with:
-   - owner: your LLM name only (claude, codex, cursor, gemini, …). No
-     suffixes, batch numbers, or task IDs.
+   - owner: identify WHICH LLM YOU ARE and pass that name only — if you are
+     Claude use "claude", if you are Codex use "codex", likewise "cursor",
+     "gemini", "windsurf", "copilot", etc. This is how the dashboard shows the
+     human which model is driving each browser, so be honest about your own
+     identity. No suffixes, batch numbers, or task IDs — put any per-task
+     distinction in sessionId instead.
    - cwd: this project's absolute path.
    - url (optional): the first page to open.
    - mode: "background" for non-interactive read/click automation (a real
