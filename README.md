@@ -15,6 +15,12 @@ remote-debugging port, and dedicated Chrome profile. `PAAT` then guarantees, on
 every check, that an agent only ever attaches to a Chrome running **its own**
 profile — never a sibling agent's.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Port Pilot dashboard — four AI agents, four isolated Chrome lanes" width="900" />
+  <br/>
+  <em>Four agents — Cloudflare API keys, AWS IAM, eBay, Newegg — each in its own isolated Chrome lane, all on one live dashboard. &nbsp;<a href="assets/demo.mp4">▶ Watch as video (MP4)</a></em>
+</p>
+
 [![Windows-first](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4?logo=windows)]()
 [![CI](https://img.shields.io/github/actions/workflow/status/charlesonogwu/port-authority-agent-terminal/ci.yml?branch=main)](https://github.com/charlesonogwu/port-authority-agent-terminal/actions)
 [![npm](https://img.shields.io/npm/v/port-authority-agent-terminal-mcp.svg)](https://www.npmjs.com/package/port-authority-agent-terminal-mcp)
