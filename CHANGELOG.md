@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.2] — remove the dead "Show" button on hidden rows
+
+### Fixed
+
+- **"Show" did nothing on a hidden session.** Once a window was hidden
+  (parked off-screen at `-32000`), the per-row "Show" button only called
+  `SW_RESTORE` + foreground, which re-activates the window without moving it
+  back on-screen — so it stayed invisible, and the watcher would re-park it
+  regardless. It sat right next to "Unhide" (which *does* bring the window
+  back), so users clicked the broken one. Hidden rows now show only **Unhide**
+  (and Kill); "Show" remains on visible rows where it works (bring a Chrome to
+  the foreground).
+
+---
+
 ## [0.3.1] — persistent "Hide" that actually stays hidden
 
 ### Fixed
