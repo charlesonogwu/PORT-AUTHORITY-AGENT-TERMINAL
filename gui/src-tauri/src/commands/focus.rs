@@ -1,80 +1,257 @@
-// focus_chrome / hide_chrome — bring a Chrome lane window to front (or hide
-// it). Cross-platform best-effort: we shell out to platform-native tools so
-// we don't pull in winapi/cocoa direct deps for a feature that's purely a
-// quality-of-life affordance.
+// focus_chrome / hide_chrome / unhide_chrome — control a Chrome lane window.
 //
-// Windows: PowerShell grabs the target PID's MainWindowHandle (no EnumWindows
-//   gymnastics needed — .NET's Process class exposes it directly) and we call
-//   ShowWindowAsync + SetForegroundWindow on it via Add-Type P/Invoke.
-// macOS:   AppleScript via osascript to activate / hide the process.
-// Linux:   wmctrl if installed; otherwise a soft error. Linux WM diversity
-//   makes a universal solution impractical and PAAT is Windows+macOS-first.
+// HIDE is a persistent OFF-SCREEN MOVE, never SW_HIDE. SW_HIDE/SW_MINIMIZE
+// toggle a show-state bit that the driving agent's next Page.bringToFront()
+// (-> SW_SHOW/SW_RESTORE) flips right back, so a hidden window pops back onto
+// the desktop on the agent's very next action. POSITION, by contrast, is never
+// changed by activation or z-order calls (SetForegroundWindow/BringWindowToTop
+// are pure focus/z-order; SW_SHOW means "in its current size and position").
+// So a window left SHOWN but parked at (-32000,-32000) stays off every monitor
+// no matter how many times the agent raises it — until the user clicks Unhide.
+// This is the same mechanism PortPilot's "background" launch mode uses
+// (OFFSCREEN_WINDOW_ARGS), applied post-hoc to a running HWND.
+//
+// hide_chrome captures the window's WINDOWPLACEMENT (show-state + the normal
+// on-screen rect) and returns it so the dashboard can persist it and restore
+// the window to exactly where it was on Unhide.
+//
+// Windows: PowerShell + Win32 P/Invoke via Add-Type (the established pattern).
+// macOS/Linux: best-effort (set-visible / wmctrl); the durable off-screen-move
+//   analog is a documented follow-up.
 
 use crate::cli::quiet_command;
 use serde_json::{json, Value};
 
+/* -------------------------------------------------------------------------- */
+/*  focus_chrome (unchanged behavior): bring a window to the foreground.       */
+/* -------------------------------------------------------------------------- */
+
 #[tauri::command]
 pub fn focus_chrome(pid: u32) -> Result<Value, String> {
-    let result = run_window_action(pid, WindowAction::Focus);
-    Ok(make_response(pid, result))
+    let result = run_focus(pid);
+    Ok(match result {
+        Ok(()) => json!({ "ok": true, "pid": pid }),
+        Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
+    })
 }
+
+/* -------------------------------------------------------------------------- */
+/*  hide_chrome: persistent off-screen move; returns captured placement.       */
+/* -------------------------------------------------------------------------- */
 
 #[tauri::command]
 pub fn hide_chrome(pid: u32) -> Result<Value, String> {
-    let result = run_window_action(pid, WindowAction::Hide);
-    Ok(make_response(pid, result))
+    #[cfg(target_os = "windows")]
+    {
+        Ok(windows_hide(pid))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Best-effort on macOS/Linux; no placement captured (UI falls back).
+        let result = unix_hide(pid);
+        Ok(match result {
+            Ok(()) => json!({ "ok": true, "pid": pid, "placement": Value::Null }),
+            Err(e) => json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": e }),
+        })
+    }
 }
 
-enum WindowAction {
-    Focus,
-    Hide,
+/* -------------------------------------------------------------------------- */
+/*  unhide_chrome: restore the window to its saved on-screen placement.        */
+/* -------------------------------------------------------------------------- */
+
+/// Placement the dashboard passes back to restore a hidden window. Comes from
+/// the JSON hide_chrome returned, stored verbatim in the frontend. `showCmd`
+/// is the Win32 SW_* the window had before hiding (3 = maximized).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WinPlacement {
+    pub show_cmd: i32,
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
 }
 
-fn make_response(pid: u32, result: Result<(), String>) -> Value {
-    match result {
-        Ok(()) => json!({ "ok": true, "pid": pid }),
+#[tauri::command]
+pub fn unhide_chrome(pid: u32, placement: WinPlacement) -> Result<Value, String> {
+    // Sanity-guard the saved rect: if it is degenerate or itself off-screen
+    // (lost/garbled state, monitor unplugged), never restore the window
+    // invisibly — fall back to a sensible on-screen box.
+    let invalid = placement.left <= -30000
+        || placement.top <= -30000
+        || placement.right - placement.left <= 0
+        || placement.bottom - placement.top <= 0;
+    let (sc, l, t, r, b) = if invalid {
+        (1, 80, 80, 80 + 1280, 80 + 1000)
+    } else {
+        (placement.show_cmd, placement.left, placement.top, placement.right, placement.bottom)
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        Ok(windows_unhide(pid, sc, l, t, r, b))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (sc, l, t, r, b);
+        let result = run_focus(pid); // best-effort: just bring it back to front
+        Ok(match result {
+            Ok(()) => json!({ "ok": true, "pid": pid }),
+            Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
+        })
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Windows implementations                                                    */
+/* -------------------------------------------------------------------------- */
+
+#[cfg(target_os = "windows")]
+fn run_focus(pid: u32) -> Result<(), String> {
+    // SW_RESTORE = 9 (restore + activate). Bring the window to the foreground.
+    let script = r#"$ErrorActionPreference='Stop'
+try {
+  $proc = Get-Process -Id __PID__ -ErrorAction Stop
+  $hwnd = $proc.MainWindowHandle
+  if ($hwnd -eq [System.IntPtr]::Zero) { Write-Error "no visible window for PID __PID__"; exit 1 }
+  Add-Type -Name PpFocus -Namespace PpNs -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindowAsync(System.IntPtr h, int n);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h);
+'@
+  [void][PpNs.PpFocus]::ShowWindowAsync($hwnd, 9)
+  [void][PpNs.PpFocus]::SetForegroundWindow($hwnd)
+  exit 0
+} catch { Write-Error $_.Exception.Message; exit 1 }"#
+        .replace("__PID__", &pid.to_string());
+    run_powershell(&script).map(|_| ())
+}
+
+// The Win32 helper class + Park() routine shared by hide and park_windows.
+// EnumWindows -> every VISIBLE, non-zero-size top-level window owned by the pid
+// (the main browser window AND any independent popups: OAuth/sign-in windows,
+// "Restore pages?" bubbles, etc. — these are separate top-level windows that do
+// NOT follow the main window off-screen on their own). Park() applies the
+// flash-hardened off-screen move to one HWND: move off-screen + send to bottom
+// while still maximized/snapped (X/Y ignored when maximized, but bottom +
+// NOACTIVATE occludes any frame), un-maximize without activating if needed,
+// then re-assert the off-screen position with SetWindowPos (never
+// SetWindowPlacement — it clamps a fully-off-screen rect back on-screen).
+#[cfg(target_os = "windows")]
+const PPWIN_PREAMBLE: &str = r#"Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Collections.Generic;
+public class PpWin {
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT p);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int X, int Y, int cx, int cy, uint f);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct WINDOWPLACEMENT { public int length; public int flags; public int showCmd; public POINT a; public POINT b; public RECT rcNormalPosition; }
+  public static IntPtr[] TopLevelVisible(uint pid) {
+    var list = new List<IntPtr>();
+    EnumWindows((h,l)=>{ uint p; GetWindowThreadProcessId(h, out p); if (p!=pid) return true; if (!IsWindowVisible(h)) return true; RECT r; GetWindowRect(h, out r); if (r.Right-r.Left<=0 || r.Bottom-r.Top<=0) return true; list.Add(h); return true; }, IntPtr.Zero);
+    return list.ToArray();
+  }
+}
+'@
+$OFF=-32000
+function Park($h) {
+  $wp = New-Object "PpWin+WINDOWPLACEMENT"; $wp.length=[System.Runtime.InteropServices.Marshal]::SizeOf($wp)
+  [void][PpWin]::GetWindowPlacement($h,[ref]$wp)
+  [void][PpWin]::SetWindowPos($h,[System.IntPtr]1,$OFF,$OFF,0,0,(0x1 -bor 0x10))
+  if ($wp.showCmd -eq 3) { [void][PpWin]::ShowWindow($h,4) }
+  [void][PpWin]::SetWindowPos($h,[System.IntPtr]::Zero,$OFF,$OFF,0,0,(0x1 -bor 0x4 -bor 0x10))
+}
+"#;
+
+#[cfg(target_os = "windows")]
+fn windows_hide(pid: u32) -> Value {
+    // Capture the MAIN window's original placement BEFORE parking (so the rect
+    // returned for Unhide is the on-screen one), then park EVERY top-level
+    // window the process owns.
+    let script = format!(
+        r#"$ErrorActionPreference='Stop'
+try {{
+  $proc = Get-Process -Id {pid} -ErrorAction Stop
+{preamble}
+  $main = $proc.MainWindowHandle
+  $mainWp = $null
+  if ($main -ne [System.IntPtr]::Zero) {{
+    $mainWp = New-Object "PpWin+WINDOWPLACEMENT"; $mainWp.length=[System.Runtime.InteropServices.Marshal]::SizeOf($mainWp)
+    [void][PpWin]::GetWindowPlacement($main,[ref]$mainWp)
+  }}
+  foreach ($h in [PpWin]::TopLevelVisible([uint32]{pid})) {{ Park ([System.IntPtr]$h) }}
+  if ($mainWp -ne $null) {{
+    @{{ showCmd=$mainWp.showCmd; left=$mainWp.rcNormalPosition.Left; top=$mainWp.rcNormalPosition.Top; right=$mainWp.rcNormalPosition.Right; bottom=$mainWp.rcNormalPosition.Bottom }} | ConvertTo-Json -Compress | Write-Output
+  }} else {{ Write-Output '{{}}' }}
+  exit 0
+}} catch {{ Write-Error $_.Exception.Message; exit 1 }}"#,
+        pid = pid,
+        preamble = PPWIN_PREAMBLE,
+    );
+
+    match run_powershell(&script) {
+        Ok(stdout) => {
+            let placement = serde_json::from_str::<Value>(stdout.trim()).unwrap_or(Value::Null);
+            json!({ "ok": true, "pid": pid, "placement": placement })
+        }
+        Err(e) => json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": e }),
+    }
+}
+
+// Note: continuous off-screen enforcement (catching popup/sign-in windows and
+// re-hiding restarted Chromes) is handled natively by hide_watcher.rs, not by a
+// per-pid PowerShell loop. hide_chrome below is only the one-shot "Hide click"
+// that captures placement for a later Unhide and parks immediately.
+
+#[cfg(target_os = "windows")]
+fn windows_unhide(pid: u32, show_cmd: i32, left: i32, top: i32, right: i32, bottom: i32) -> Value {
+    // Reverse of hide: move back to the saved on-screen rect (no clamp issue,
+    // coords are on-screen), restore the original show-state (re-maximize if it
+    // was maximized; else normal), then bring to front + focus (intentional —
+    // Unhide is a "show me this window" action).
+    let script = r#"$ErrorActionPreference='Stop'
+try {
+  $proc = Get-Process -Id __PID__ -ErrorAction Stop
+  $hwnd = $proc.MainWindowHandle
+  if ($hwnd -eq [System.IntPtr]::Zero) { Write-Error "no window for PID __PID__"; exit 1 }
+  Add-Type -Name PpShow -Namespace PpNs -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetWindowPos(System.IntPtr h, System.IntPtr after, int X, int Y, int cx, int cy, uint f);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int n);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h);
+'@
+  $SWP_NOZORDER=0x4; $SWP_NOACTIVATE=0x10
+  $SW_SHOWMAXIMIZED=3; $SW_SHOWNORMAL=1
+  $L=__LEFT__; $T=__TOP__; $W=(__RIGHT__ - __LEFT__); $H=(__BOTTOM__ - __TOP__)
+  [void][PpNs.PpShow]::SetWindowPos($hwnd, [System.IntPtr]::Zero, $L, $T, $W, $H, ($SWP_NOZORDER -bor $SWP_NOACTIVATE))
+  if (__SHOWCMD__ -eq 3) { [void][PpNs.PpShow]::ShowWindow($hwnd, $SW_SHOWMAXIMIZED) } else { [void][PpNs.PpShow]::ShowWindow($hwnd, $SW_SHOWNORMAL) }
+  [void][PpNs.PpShow]::SetForegroundWindow($hwnd)
+  exit 0
+} catch { Write-Error $_.Exception.Message; exit 1 }"#
+        .replace("__PID__", &pid.to_string())
+        .replace("__SHOWCMD__", &show_cmd.to_string())
+        .replace("__LEFT__", &left.to_string())
+        .replace("__TOP__", &top.to_string())
+        .replace("__RIGHT__", &right.to_string())
+        .replace("__BOTTOM__", &bottom.to_string());
+
+    match run_powershell(&script) {
+        Ok(_) => json!({ "ok": true, "pid": pid }),
         Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
     }
 }
 
+/// Run a PowerShell script (console suppressed) and return trimmed stdout on
+/// success, or a formatted error on non-zero exit / spawn failure.
 #[cfg(target_os = "windows")]
-fn run_window_action(pid: u32, action: WindowAction) -> Result<(), String> {
-    // SW_RESTORE = 9 (restore + activate), SW_HIDE = 0. ShowWindowAsync is
-    // non-blocking so a misbehaving target window can't hang us.
-    let (sw_cmd, do_foreground) = match action {
-        WindowAction::Focus => (9, true),
-        WindowAction::Hide => (0, false),
-    };
-    // PowerShell 5.1 ships on every supported Windows. We grab the HWND via
-    // Get-Process -Id ...MainWindowHandle — far simpler than EnumWindows.
-    let script = format!(
-        r#"$ErrorActionPreference='Stop';
-try {{
-  $proc = Get-Process -Id {pid} -ErrorAction Stop;
-  $hwnd = $proc.MainWindowHandle;
-  if ($hwnd -eq [System.IntPtr]::Zero) {{
-    Write-Error "no visible window for PID {pid}";
-    exit 1;
-  }};
-  Add-Type -Name PaatWin -Namespace PaatNs -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("user32.dll")]
-public static extern bool ShowWindowAsync(System.IntPtr hWnd, int nCmdShow);
-[System.Runtime.InteropServices.DllImport("user32.dll")]
-public static extern bool SetForegroundWindow(System.IntPtr hWnd);
-'@;
-  [void][PaatNs.PaatWin]::ShowWindowAsync($hwnd, {sw});
-  if (${fg}) {{ [void][PaatNs.PaatWin]::SetForegroundWindow($hwnd); }};
-  exit 0;
-}} catch {{
-  Write-Error $_.Exception.Message;
-  exit 1;
-}}"#,
-        pid = pid,
-        sw = sw_cmd,
-        fg = if do_foreground { "true" } else { "false" }
-    );
+fn run_powershell(script: &str) -> Result<String, String> {
     let output = quiet_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .map_err(|e| format!("failed to spawn powershell: {}", e))?;
     if !output.status.success() {
@@ -85,53 +262,70 @@ public static extern bool SetForegroundWindow(System.IntPtr hWnd);
             stderr.trim()
         ));
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/* -------------------------------------------------------------------------- */
+/*  macOS implementations (best-effort)                                        */
+/* -------------------------------------------------------------------------- */
+
+#[cfg(target_os = "macos")]
+fn run_focus(pid: u32) -> Result<(), String> {
+    let script = format!(
+        "tell application \"System Events\" to set frontmost of (first process whose unix id is {}) to true",
+        pid
+    );
+    run_osascript(&script)
 }
 
 #[cfg(target_os = "macos")]
-fn run_window_action(pid: u32, action: WindowAction) -> Result<(), String> {
-    // AppleScript via osascript: System Events targets processes by Unix PID.
-    // `set frontmost to true` activates; `set visible to false` hides.
-    let script = match action {
-        WindowAction::Focus => format!(
-            "tell application \"System Events\" to set frontmost of (first process whose unix id is {}) to true",
-            pid
-        ),
-        WindowAction::Hide => format!(
-            "tell application \"System Events\" to set visible of (first process whose unix id is {}) to false",
-            pid
-        ),
-    };
+fn unix_hide(pid: u32) -> Result<(), String> {
+    // Durable-ish: move the front window off-screen rather than set-visible
+    // false (which the agent re-shows). Best-effort; not flash-hardened.
+    let script = format!(
+        "tell application \"System Events\" to set position of front window of (first process whose unix id is {}) to {{-32000, -32000}}",
+        pid
+    );
+    run_osascript(&script)
+}
+
+#[cfg(target_os = "macos")]
+fn run_osascript(script: &str) -> Result<(), String> {
     let output = quiet_command("osascript")
-        .args(["-e", &script])
+        .args(["-e", script])
         .output()
         .map_err(|e| format!("failed to spawn osascript: {}", e))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("osascript failed: {}", stderr.trim()));
+        return Err(format!("osascript failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    Ok(())
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Linux implementations (best-effort)                                        */
+/* -------------------------------------------------------------------------- */
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn run_focus(pid: u32) -> Result<(), String> {
+    let output = quiet_command("wmctrl")
+        .args(["-i", "-x", "-p", &pid.to_string(), "-a"])
+        .output()
+        .map_err(|e| format!("wmctrl not available: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("wmctrl exit {}", output.status.code().unwrap_or(-1)));
     }
     Ok(())
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn run_window_action(pid: u32, action: WindowAction) -> Result<(), String> {
-    // Best-effort Linux path via wmctrl. PAAT is not officially supported on
-    // Linux yet — this is a courtesy so the build compiles.
-    let action_args: &[&str] = match action {
-        WindowAction::Focus => &["-a"],
-        WindowAction::Hide => &["-b", "add,hidden"],
-    };
-    let mut cmd = quiet_command("wmctrl");
-    cmd.args(["-i", "-x", "-p", &pid.to_string()]);
-    cmd.args(action_args);
-    let output = cmd
+fn unix_hide(pid: u32) -> Result<(), String> {
+    // Best-effort: move off-screen via wmctrl -e (gravity,x,y,w,h = keep size).
+    let output = quiet_command("wmctrl")
+        .args(["-i", "-x", "-p", &pid.to_string(), "-e", "0,-32000,-32000,-1,-1"])
         .output()
         .map_err(|e| format!("wmctrl not available: {}", e))?;
     if !output.status.success() {
-        return Err(format!(
-            "wmctrl exit {} (Linux window control is best-effort)",
-            output.status.code().unwrap_or(-1)
-        ));
+        return Err(format!("wmctrl exit {}", output.status.code().unwrap_or(-1)));
     }
     Ok(())
 }

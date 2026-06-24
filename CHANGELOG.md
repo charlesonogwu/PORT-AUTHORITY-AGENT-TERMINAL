@@ -11,6 +11,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] — persistent "Hide" that actually stays hidden
+
+### Fixed
+
+- **Hidden Chrome windows kept popping back onto the desktop.** "Hide" used
+  to call `SW_HIDE` once, which the agent's next `Page.bringToFront` (or a
+  page navigation) undid immediately, so an actively-working agent's window
+  reappeared constantly. Hide now moves the window fully off-screen
+  (`-32000, -32000`) instead of toggling its visibility bit. Position, unlike
+  show-state, is never changed by activation or z-order calls, so the window
+  stays off every monitor no matter how often the agent raises it.
+- **Sign-in / OAuth popups and "Restore pages?" bubbles still appeared.**
+  Those are independent top-level windows that don't follow the main window
+  off-screen. Hide now parks *every* top-level window the Chrome process owns,
+  not just the main one.
+- **New popups and Chrome restarts no longer flash.** A native background
+  watcher thread (Windows) re-parks any on-screen window of a hidden lane
+  every ~150 ms — imperceptible, and microseconds of work natively (no
+  PowerShell in the loop). The hidden set is keyed by debug-port + profile, so
+  a restarted Chrome's new pid is re-hidden automatically.
+
+### Added
+
+- `Unhide` restores a hidden window to its exact original position and
+  maximized/normal state. Hide state persists across dashboard restarts.
+
+### Changed
+
+- The dashboard's per-row and per-group Hide buttons toggle to **Unhide** once
+  a session is hidden.
+
+---
+
 ## [0.3.0] — background Chrome launch mode
 
 ### Added
