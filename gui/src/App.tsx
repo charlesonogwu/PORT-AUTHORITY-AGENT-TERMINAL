@@ -21,7 +21,15 @@ import {
 } from "@/components/ui/table"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import type { DashboardSnapshot, LiveSession } from "@/types"
-import { focusChrome, getSnapshot, hideChrome, killChrome } from "@/api/client"
+import {
+  focusChrome,
+  getSnapshot,
+  hideChrome,
+  killChrome,
+  setHiddenPids,
+  unhideChrome,
+  type WindowPlacement,
+} from "@/api/client"
 import { cn } from "@/lib/utils"
 
 // 3-second poll cadence balances "live feel" with subprocess cost. Each
@@ -32,6 +40,202 @@ import { cn } from "@/lib/utils"
 // (see useSnapshot) so the cost only applies when the user is looking.
 const POLL_MS = 3_000
 const KILL_CONFIRM_MS = 3_000
+
+/* -------------------------------------------------------------------------- */
+/*  Persistent "hide until unhide" state                                       */
+/* -------------------------------------------------------------------------- */
+/**
+ * Hiding a Chrome here is durable. hide_chrome moves the window fully
+ * off-screen and leaves it SHOWN there, so it stays invisible even as the
+ * driving agent keeps raising it (position is untouched by bringToFront /
+ * activation). We remember which sessions are hidden so the per-row button
+ * flips to "Unhide" and the poll loop re-parks a window that comes back (e.g.
+ * Chrome restarted). State is keyed by a PID-FREE stable key (lane id, else
+ * port+profile) and mirrored to localStorage so it survives dashboard restarts.
+ */
+const HIDDEN_LS_KEY = "portpilot.hiddenSessions.v2"
+const ENFORCE_POOL = 4
+
+interface HiddenEntry {
+  stableKey: string
+  laneId?: string
+  port: number
+  profileNorm: string
+  lastPid: number
+  placement?: WindowPlacement | null
+  hiddenAt: number
+}
+
+type HideTarget = Pick<
+  LiveSession,
+  "laneId" | "chromeDebugPort" | "chromeProfileDir" | "pid"
+>
+
+function normProfile(p?: string): string {
+  return (p ?? "").replace(/[\\/]+/g, "/").toLowerCase()
+}
+
+/**
+ * Stable across Chrome restarts. Keyed by debug-port + profile (NOT laneId):
+ * a relaunched Chrome reuses the same --remote-debugging-port + --user-data-dir,
+ * so the same lane always resolves to the same key even when its pid (and
+ * sometimes its laneId) changes. The allocator guarantees no two live lanes
+ * share a debug port, so this is unique.
+ */
+function stableKeyOf(
+  s: Pick<LiveSession, "laneId" | "chromeDebugPort" | "chromeProfileDir">
+): string {
+  const profile = normProfile(s.chromeProfileDir)
+  if (profile) return `pp:${s.chromeDebugPort}:${profile}`
+  return `port:${s.chromeDebugPort}`
+}
+
+interface HiddenApi {
+  map: Map<string, HiddenEntry>
+  isHidden: (s: HideTarget) => boolean
+  getEntry: (s: HideTarget) => HiddenEntry | undefined
+  markHidden: (s: HideTarget, placement?: WindowPlacement | null) => void
+  patchEntry: (key: string, patch: Partial<HiddenEntry>) => void
+  clearHidden: (s: HideTarget) => void
+}
+
+function useHiddenSet(): HiddenApi {
+  const [map, setMap] = useState<Map<string, HiddenEntry>>(() => {
+    try {
+      const raw = localStorage.getItem(HIDDEN_LS_KEY)
+      if (!raw) return new Map()
+      const arr = JSON.parse(raw) as HiddenEntry[]
+      return new Map(
+        arr.filter((e) => e && e.stableKey).map((e) => [e.stableKey, e])
+      )
+    } catch {
+      return new Map()
+    }
+  })
+
+  const persist = useCallback((m: Map<string, HiddenEntry>) => {
+    try {
+      localStorage.setItem(HIDDEN_LS_KEY, JSON.stringify(Array.from(m.values())))
+    } catch {
+      /* localStorage unavailable — in-memory state still works this session */
+    }
+  }, [])
+
+  const isHidden = useCallback((s: HideTarget) => map.has(stableKeyOf(s)), [map])
+  const getEntry = useCallback((s: HideTarget) => map.get(stableKeyOf(s)), [map])
+
+  const markHidden = useCallback(
+    (s: HideTarget, placement?: WindowPlacement | null) => {
+      setMap((prev) => {
+        const next = new Map(prev)
+        const key = stableKeyOf(s)
+        next.set(key, {
+          stableKey: key,
+          laneId: s.laneId,
+          port: s.chromeDebugPort,
+          profileNorm: normProfile(s.chromeProfileDir),
+          lastPid: s.pid,
+          placement: placement ?? prev.get(key)?.placement ?? null,
+          hiddenAt: Date.now(),
+        })
+        persist(next)
+        return next
+      })
+    },
+    [persist]
+  )
+
+  const patchEntry = useCallback(
+    (key: string, patch: Partial<HiddenEntry>) => {
+      setMap((prev) => {
+        const cur = prev.get(key)
+        if (!cur) return prev
+        const next = new Map(prev)
+        next.set(key, { ...cur, ...patch })
+        persist(next)
+        return next
+      })
+    },
+    [persist]
+  )
+
+  const clearHidden = useCallback(
+    (s: HideTarget) => {
+      setMap((prev) => {
+        const key = stableKeyOf(s)
+        if (!prev.has(key)) return prev
+        const next = new Map(prev)
+        next.delete(key)
+        persist(next)
+        return next
+      })
+    },
+    [persist]
+  )
+
+  return { map, isHidden, getEntry, markHidden, patchEntry, clearHidden }
+}
+
+/**
+ * Drives the native hide-watcher. The watcher thread in the Rust shell keeps
+ * every window of every hidden pid off-screen in real time (~150ms); this hook
+ * just keeps it told WHICH pids those are, recomputing whenever the live
+ * sessions or the hidden set change:
+ *   - On change, push the current hidden pids (live sessions whose stable key is
+ *     in the hidden map) to the watcher. This covers Chrome restarts for free:
+ *     the relaunched Chrome reuses the same port+profile -> same stable key ->
+ *     its new pid lands in the set -> the watcher parks its window.
+ *   - When a hidden lane's pid changes (restart), recapture the new window's
+ *     placement so a later Unhide restores it correctly.
+ * Depending on `hiddenApi.map` (referentially stable until a hide/unhide) means
+ * an Unhide removes the pid from the watcher within a render tick, before
+ * unhideChrome brings the window on-screen — so the watcher never re-parks the
+ * window you just unhid.
+ */
+function useHideEnforcement(
+  snap: DashboardSnapshot | null,
+  hiddenApi: HiddenApi
+): void {
+  const apiRef = useRef(hiddenApi)
+  apiRef.current = hiddenApi
+  const seenPidForKey = useRef<Map<string, number>>(new Map())
+
+  useEffect(() => {
+    const api = apiRef.current
+    const live = snap?.liveSessions ?? []
+    const liveKeys = new Set<string>()
+    const hiddenPids: number[] = []
+    for (const s of live) {
+      const key = stableKeyOf(s)
+      liveKeys.add(key)
+      const entry = api.map.get(key)
+      if (!entry) continue
+      hiddenPids.push(s.pid)
+      // Chrome restarted for a hidden lane (new pid -> new on-screen window):
+      // capture the fresh window's placement so a later Unhide restores right.
+      // (The watcher already parks it via the pushed pid set below.)
+      if (entry.lastPid !== s.pid && seenPidForKey.current.get(key) !== s.pid) {
+        seenPidForKey.current.set(key, s.pid)
+        void hideChrome(s.pid)
+          .then((res) => {
+            if (res.ok) {
+              apiRef.current.patchEntry(key, {
+                lastPid: s.pid,
+                ...(res.placement ? { placement: res.placement } : {}),
+              })
+            }
+          })
+          .catch(() => {})
+      }
+    }
+    for (const k of Array.from(seenPidForKey.current.keys())) {
+      if (!liveKeys.has(k)) seenPidForKey.current.delete(k)
+    }
+
+    // Keep the native watcher's pid set in sync (empty array -> watcher idles).
+    void setHiddenPids(hiddenPids).catch(() => {})
+  }, [snap, hiddenApi.map])
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Single-instance: detect when the dashboard is open in another tab/window  */
@@ -322,9 +526,11 @@ function groupByCwd(sessions: LiveSession[]): GroupedSessions {
 function LiveSessions({
   snap,
   onKilled,
+  hiddenApi,
 }: {
   snap: DashboardSnapshot
   onKilled: () => void
+  hiddenApi: HiddenApi
 }) {
   const groups = useMemo(
     () => groupByCwd(snap.liveSessions),
@@ -364,7 +570,12 @@ function LiveSessions({
         </TableHeader>
         <TableBody>
           {groups.map((g, gi) => (
-            <SessionGroup key={gi} group={g} onKilled={onKilled} />
+            <SessionGroup
+              key={gi}
+              group={g}
+              onKilled={onKilled}
+              hiddenApi={hiddenApi}
+            />
           ))}
         </TableBody>
       </Table>
@@ -375,9 +586,11 @@ function LiveSessions({
 function SessionGroup({
   group,
   onKilled,
+  hiddenApi,
 }: {
   group: GroupedSessions[number]
   onKilled: () => void
+  hiddenApi: HiddenApi
 }) {
   return (
     <>
@@ -400,20 +613,33 @@ function SessionGroup({
               className="flex shrink-0 items-center gap-1.5"
               onClick={(e) => e.stopPropagation()}
             >
-              <HideAllButton sessions={group.sessions} />
+              <HideAllButton sessions={group.sessions} hiddenApi={hiddenApi} />
               <KillAllButton sessions={group.sessions} onKilled={onKilled} />
             </div>
           </div>
         </TableCell>
       </TableRow>
       {group.sessions.map((s) => (
-        <SessionRow key={s.key} s={s} onKilled={onKilled} />
+        <SessionRow
+          key={s.key}
+          s={s}
+          onKilled={onKilled}
+          hiddenApi={hiddenApi}
+        />
       ))}
     </>
   )
 }
 
-function SessionRow({ s, onKilled }: { s: LiveSession; onKilled: () => void }) {
+function SessionRow({
+  s,
+  onKilled,
+  hiddenApi,
+}: {
+  s: LiveSession
+  onKilled: () => void
+  hiddenApi: HiddenApi
+}) {
   const [open, setOpen] = useState(false)
   return (
     <>
@@ -498,7 +724,7 @@ function SessionRow({ s, onKilled }: { s: LiveSession; onKilled: () => void }) {
         >
           <div className="inline-flex items-center gap-1">
             <FocusButton pid={s.pid} />
-            <HideButton pid={s.pid} />
+            <HideToggleButton s={s} hiddenApi={hiddenApi} />
             <KillButton pid={s.pid} onKilled={onKilled} />
           </div>
         </TableCell>
@@ -714,7 +940,13 @@ function FocusButton({ pid }: { pid: number }) {
  * No confirmation dialog: hide is fully reversible (Show button or the
  * taskbar icon brings any window back) so the friction-free path wins.
  */
-function HideAllButton({ sessions }: { sessions: LiveSession[] }) {
+function HideAllButton({
+  sessions,
+  hiddenApi,
+}: {
+  sessions: LiveSession[]
+  hiddenApi: HiddenApi
+}) {
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<
     { kind: "idle" } | { kind: "done"; ok: number; failed: number }
@@ -726,27 +958,46 @@ function HideAllButton({ sessions }: { sessions: LiveSession[] }) {
     return () => window.clearTimeout(id)
   }, [result])
 
+  // Flip to "Unhide all" once every in-scope session is already hidden.
+  const allHidden =
+    sessions.length > 0 && sessions.every((s) => hiddenApi.isHidden(s))
+
   const onClick = useCallback(async () => {
-    if (busy) return
-    if (sessions.length === 0) return
+    if (busy || sessions.length === 0) return
     setBusy(true)
     setResult({ kind: "idle" })
-    const responses = await Promise.all(
-      sessions.map(async (s) => {
+    const targets = [...sessions]
+    let i = 0
+    let ok = 0
+    const worker = async () => {
+      while (i < targets.length) {
+        const s = targets[i++]
         try {
-          const data = await hideChrome(s.pid)
-          return data.ok
+          if (allHidden) {
+            const entry = hiddenApi.getEntry(s)
+            hiddenApi.clearHidden(s)
+            const res = await unhideChrome(s.pid, entry?.placement)
+            if (res.ok) ok++
+          } else {
+            const res = await hideChrome(s.pid)
+            if (res.ok) {
+              hiddenApi.markHidden(s, res.placement)
+              ok++
+            }
+          }
         } catch {
-          return false
+          /* counted as failed below */
         }
-      })
-    )
-    const ok = responses.filter(Boolean).length
-    setResult({ kind: "done", ok, failed: sessions.length - ok })
+      }
+    }
+    const pool = Math.min(ENFORCE_POOL, targets.length)
+    await Promise.all(Array.from({ length: pool }, () => worker()))
+    setResult({ kind: "done", ok, failed: targets.length - ok })
     setBusy(false)
-  }, [busy, sessions])
+  }, [busy, sessions, allHidden, hiddenApi])
 
   const disabled = busy || sessions.length === 0
+  const n = sessions.length
 
   return (
     <Button
@@ -756,21 +1007,25 @@ function HideAllButton({ sessions }: { sessions: LiveSession[] }) {
       onClick={onClick}
       className="h-7 px-3 text-[11px]"
       title={
-        sessions.length === 0
+        n === 0
           ? "Nothing to hide"
-          : `Minimize all ${sessions.length} Chrome window${sessions.length === 1 ? "" : "s"}`
+          : allHidden
+            ? `Bring all ${n} hidden Chrome window${n === 1 ? "" : "s"} back on-screen`
+            : `Hide all ${n} Chrome window${n === 1 ? "" : "s"} off-screen until you unhide`
       }
     >
       {busy ? (
-        `Hiding ${sessions.length}…`
+        `${allHidden ? "Unhiding" : "Hiding"} ${n}…`
       ) : result.kind === "done" ? (
         <span className="text-emerald-400">
           {result.failed === 0
-            ? `${result.ok} hidden ✓`
-            : `${result.ok} hidden, ${result.failed} failed`}
+            ? `${result.ok} ${allHidden ? "shown" : "hidden"} ✓`
+            : `${result.ok} ok, ${result.failed} failed`}
         </span>
+      ) : allHidden ? (
+        `Unhide all (${n})`
       ) : (
-        `Hide all (${sessions.length})`
+        `Hide all (${n})`
       )}
     </Button>
   )
@@ -877,16 +1132,22 @@ function KillAllButton({
   )
 }
 
-function HideButton({ pid }: { pid: number }) {
+/**
+ * Hide / Unhide toggle. Hide moves the window off-screen and keeps it there
+ * (durable against the agent raising it); the button then flips to "Unhide",
+ * which restores the window to exactly where it was. Persistence is tracked in
+ * the shared hiddenApi (localStorage-backed, keyed by a pid-free stable key).
+ */
+function HideToggleButton({
+  s,
+  hiddenApi,
+}: {
+  s: LiveSession
+  hiddenApi: HiddenApi
+}) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [hiddenAt, setHiddenAt] = useState<number | null>(null)
-
-  useEffect(() => {
-    if (hiddenAt === null) return
-    const id = window.setTimeout(() => setHiddenAt(null), 1500)
-    return () => window.clearTimeout(id)
-  }, [hiddenAt])
+  const hidden = hiddenApi.isHidden(s)
 
   useEffect(() => {
     if (error === null) return
@@ -899,18 +1160,24 @@ function HideButton({ pid }: { pid: number }) {
     setBusy(true)
     setError(null)
     try {
-      const data = await hideChrome(pid)
-      if (!data.ok) {
-        setError(data.error ?? "hide failed")
+      if (hidden) {
+        const entry = hiddenApi.getEntry(s)
+        // Clear the persistent flag FIRST, so a concurrent poll tick can't
+        // re-park the window we are about to bring back.
+        hiddenApi.clearHidden(s)
+        const res = await unhideChrome(s.pid, entry?.placement)
+        if (!res.ok) setError(res.error ?? "unhide failed")
       } else {
-        setHiddenAt(Date.now())
+        const res = await hideChrome(s.pid)
+        if (!res.ok) setError(res.error ?? "hide failed")
+        else hiddenApi.markHidden(s, res.placement)
       }
     } catch (err) {
       setError((err as Error).message)
     } finally {
       setBusy(false)
     }
-  }, [busy, pid])
+  }, [busy, hidden, s, hiddenApi])
 
   if (error) {
     return (
@@ -926,13 +1193,17 @@ function HideButton({ pid }: { pid: number }) {
       variant="ghost"
       disabled={busy}
       onClick={onClick}
-      className="h-7 px-2 text-[11px]"
-      title={`Minimize Chrome pid ${pid} (same as the underscore button)`}
+      className={cn("h-7 px-2 text-[11px]", hidden && "text-sky-400")}
+      title={
+        hidden
+          ? "Bring this Chrome back on-screen where it was"
+          : "Hide this Chrome and keep it off-screen until you click Unhide — even if the agent keeps raising it"
+      }
     >
       {busy ? (
-        "hiding…"
-      ) : hiddenAt !== null ? (
-        <span className="text-emerald-400">hidden ✓</span>
+        <span>{hidden ? "unhiding…" : "hiding…"}</span>
+      ) : hidden ? (
+        <span>Unhide</span>
       ) : (
         <span>Hide</span>
       )}
@@ -1023,6 +1294,8 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
 export function App() {
   const { snap, error, refresh } = useSnapshot()
   const { primary } = useSingleInstance()
+  const hiddenApi = useHiddenSet()
+  useHideEnforcement(snap, hiddenApi)
 
   if (!primary) {
     return (
@@ -1050,14 +1323,21 @@ export function App() {
             <div className="mb-3 flex items-center justify-between">
               <SectionLabel className="mb-0">Live Chrome sessions</SectionLabel>
               <div className="flex items-center gap-2">
-                <HideAllButton sessions={snap.liveSessions} />
+                <HideAllButton
+                  sessions={snap.liveSessions}
+                  hiddenApi={hiddenApi}
+                />
                 <KillAllButton
                   sessions={snap.liveSessions}
                   onKilled={refresh}
                 />
               </div>
             </div>
-            <LiveSessions snap={snap} onKilled={refresh} />
+            <LiveSessions
+              snap={snap}
+              onKilled={refresh}
+              hiddenApi={hiddenApi}
+            />
           </>
         )}
         {!snap && !error && (
