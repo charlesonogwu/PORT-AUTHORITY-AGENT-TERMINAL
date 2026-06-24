@@ -723,7 +723,11 @@ function SessionRow({
           aria-label="row actions"
         >
           <div className="inline-flex items-center gap-1">
-            <FocusButton pid={s.pid} />
+            {/* "Show" (focus) only restores + foregrounds; it can't move a
+                hidden window back on-screen, and the watcher would re-park it
+                anyway. So once a lane is hidden, the only bring-it-back action
+                is "Unhide" — hide the dead button to avoid the confusion. */}
+            {!hiddenApi.isHidden(s) && <FocusButton pid={s.pid} />}
             <HideToggleButton s={s} hiddenApi={hiddenApi} />
             <KillButton pid={s.pid} onKilled={onKilled} />
           </div>
