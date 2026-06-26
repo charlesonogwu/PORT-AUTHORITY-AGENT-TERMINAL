@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import process from "node:process";
 import { mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
 import { isStale, normalizeCwd, nowIso } from "../core/lane.js";
 import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
@@ -10,6 +11,7 @@ import { portpilotHome, profilesDir, registryPath } from "../core/paths.js";
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
 import { installShortcut, shortcutStatus, uninstallShortcut } from "./shortcut.js";
 import { installMcpFor } from "./install-mcp.js";
+import { formatMissingDependencyMessage, isMissingDependencyError, missingDependencyName } from "./mcp-preflight.js";
 import { flagBool, flagString, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
 import { formatLanesTable, formatReserveBlock } from "./format.js";
 import { HELP } from "./help.js";
@@ -554,9 +556,24 @@ async function cmdDashboardSnapshot(ctx) {
     // and there's no reasonable human-readable fallback for ~3KB of nested data.
     ctx.stdout.write(JSON.stringify(snap) + "\n");
 }
-async function cmdMcp(_ctx) {
-    // Lazy import to avoid pulling MCP into every CLI invocation.
-    const mod = await import("../mcp/server.js");
+async function cmdMcp(ctx) {
+    // Lazy import to avoid pulling MCP into every CLI invocation. If this install
+    // lost its node_modules, the SDK import throws ERR_MODULE_NOT_FOUND at module
+    // load and the process would die with no explanation (the agent just sees
+    // "MCP server disconnected"). Catch that one case and print the exact fix.
+    let mod;
+    try {
+        mod = await import("../mcp/server.js");
+    }
+    catch (err) {
+        if (isMissingDependencyError(err)) {
+            const packageDir = fileURLToPath(new URL("../../../", import.meta.url));
+            const missing = missingDependencyName(err);
+            ctx.stderr.write(formatMissingDependencyMessage({ packageDir, ...(missing ? { missing } : {}) }));
+            process.exit(78); // EX_CONFIG: the install is incomplete, not a runtime bug
+        }
+        throw err;
+    }
     await mod.runMcpStdio();
 }
 async function cmdInstallMcp(ctx) {

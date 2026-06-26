@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.3] — actionable error when the MCP server can't load its deps
+
+### Fixed
+
+- **A missing `node_modules` made the MCP server fail with no explanation.**
+  When PortPilot's MCP server is registered to run from a working checkout
+  (e.g. `node <repo>/dist/src/cli/index.js mcp`) and that checkout later loses
+  its `node_modules` (a clean, a fresh pull, a disk tidy), the server's
+  `import` of `@modelcontextprotocol/sdk` threw `ERR_MODULE_NOT_FOUND` at
+  startup and the process died before printing anything — the calling agent
+  just saw "MCP server disconnected". The `mcp` command now catches that one
+  failure mode and prints a single actionable line (which install is missing
+  its deps, and the two ways to fix it) before exiting `78` (EX_CONFIG).
+  Cross-platform; no behavior change on a healthy install.
+
+---
+
 ## [0.3.2] — remove the dead "Show" button on hidden rows
 
 ### Fixed
