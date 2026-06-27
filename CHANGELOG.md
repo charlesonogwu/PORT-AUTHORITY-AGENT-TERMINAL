@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.4] — survive transient Windows file locks when writing the registry
+
+### Fixed
+
+- **Registry writes could fail and strand a temp file on Windows.** Every
+  registry update writes a sibling temp file and renames it over `lanes.json`.
+  On Windows that rename intermittently fails with `EPERM` (or `EACCES` /
+  `EBUSY`) when the file is momentarily locked by antivirus, the Search
+  indexer, the dashboard, or a second PortPilot process — which both **lost
+  the write** and left an orphaned `.lanes.json.<pid>.<ts>.tmp` behind (these
+  accumulated; one machine had nine). The rename is now retried through
+  transient locks with a short linear backoff (~1.1s over 10 tries), and the
+  temp file is **always** cleaned up if the write or rename ultimately fails.
+  POSIX behaviour is unchanged.
+
+---
+
 ## [0.3.3] — actionable error when the MCP server can't load its deps
 
 ### Fixed

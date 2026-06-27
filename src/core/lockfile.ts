@@ -99,15 +99,75 @@ export async function withLock<T>(lockPath: string, fn: () => Promise<T>, opts: 
 }
 
 /**
- * Atomically write JSON to `target` by writing a sibling temp file and renaming.
- * On most platforms (POSIX, NTFS) rename is atomic for files on the same volume.
+ * Windows can fail an otherwise-atomic rename with a transient error when the
+ * destination file is momentarily locked by another handle — antivirus, the
+ * Search indexer, the dashboard reading the registry, or a second PortPilot
+ * process. POSIX does not hit this. These are the codes worth a brief retry;
+ * anything else is a real error and fails fast.
  */
-export async function atomicWriteJson(target: string, data: unknown): Promise<void> {
+const RENAME_RETRY_CODES = new Set<string>(["EPERM", "EACCES", "EBUSY"]);
+
+export interface AtomicWriteOptions {
+  /** Injectable rename, for tests. Defaults to fs.promises.rename. */
+  rename?: (from: string, to: string) => Promise<void>;
+  /** Max rename attempts before giving up. Default 10. */
+  attempts?: number;
+  /** Base backoff between attempts in ms (grows linearly). Default 20. */
+  baseDelayMs?: number;
+}
+
+/**
+ * Rename `tmp` onto `target`, retrying on transient Windows lock errors with a
+ * short linear backoff (20ms, 40ms, … by default — ~1.1s total over 10 tries,
+ * long enough to ride out an antivirus/indexer scan). Non-transient errors
+ * throw immediately. Exported for testing.
+ */
+export async function renameWithRetry(
+  tmp: string,
+  target: string,
+  opts: AtomicWriteOptions = {},
+): Promise<void> {
+  const doRename = opts.rename ?? rename;
+  const attempts = opts.attempts ?? 10;
+  const baseDelayMs = opts.baseDelayMs ?? 20;
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await doRename(tmp, target);
+      return;
+    } catch (err: unknown) {
+      lastErr = err;
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      if (!RENAME_RETRY_CODES.has(code)) throw err; // real error → fail fast
+      await sleep(baseDelayMs * (i + 1));
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * Atomically write JSON to `target` by writing a sibling temp file and renaming.
+ * On POSIX/NTFS the rename is atomic for files on the same volume. On Windows
+ * the rename is retried through transient locks (see renameWithRetry), and the
+ * temp file is ALWAYS cleaned up if the write or rename ultimately fails — so a
+ * momentarily-locked registry can never leave an orphaned `.lanes.json.*.tmp`
+ * behind (and the write either lands or surfaces a real error, never silently
+ * loses the update).
+ */
+export async function atomicWriteJson(
+  target: string,
+  data: unknown,
+  opts: AtomicWriteOptions = {},
+): Promise<void> {
   await ensureDir(target);
   const tmp = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.tmp`);
-  const payload = JSON.stringify(data, null, 2);
-  await writeFile(tmp, payload, "utf8");
-  await rename(tmp, target);
+  try {
+    await writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
+    await renameWithRetry(tmp, target, opts);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 function basename(p: string): string {
