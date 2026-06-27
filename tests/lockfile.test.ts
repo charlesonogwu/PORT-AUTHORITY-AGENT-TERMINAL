@@ -1,9 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { acquireLock, atomicWriteJson, withLock, LockError } from "../src/core/lockfile.js";
+import { acquireLock, atomicWriteJson, renameWithRetry, withLock, LockError } from "../src/core/lockfile.js";
 import { withTempHome } from "./helpers.js";
+
+function errWithCode(message: string, code: string): NodeJS.ErrnoException {
+  const e: NodeJS.ErrnoException = new Error(message);
+  e.code = code;
+  return e;
+}
 
 test("acquireLock blocks a second acquirer until the first releases", async () => {
   await withTempHome(async (home) => {
@@ -61,5 +67,68 @@ test("atomicWriteJson does not leave a temp file when complete", async () => {
     await atomicWriteJson(target, { hello: "world" });
     const raw = await readFile(target, "utf8");
     assert.deepEqual(JSON.parse(raw), { hello: "world" });
+    const leftovers = (await readdir(home)).filter((f) => f.endsWith(".tmp"));
+    assert.deepEqual(leftovers, []);
+  });
+});
+
+test("renameWithRetry calls rename once on success", async () => {
+  let calls = 0;
+  await renameWithRetry("a", "b", { rename: async () => { calls++; }, attempts: 5, baseDelayMs: 1 });
+  assert.equal(calls, 1);
+});
+
+test("renameWithRetry retries a transient EPERM then succeeds", async () => {
+  let calls = 0;
+  await renameWithRetry("a", "b", {
+    rename: async () => {
+      calls++;
+      if (calls < 3) throw errWithCode("locked", "EPERM");
+    },
+    attempts: 5,
+    baseDelayMs: 1,
+  });
+  assert.equal(calls, 3);
+});
+
+test("renameWithRetry rethrows a non-transient error immediately", async () => {
+  let calls = 0;
+  await assert.rejects(
+    renameWithRetry("a", "b", {
+      rename: async () => { calls++; throw errWithCode("gone", "ENOENT"); },
+      attempts: 5,
+      baseDelayMs: 1,
+    }),
+    /gone/,
+  );
+  assert.equal(calls, 1); // failed fast, did not burn the retry budget
+});
+
+test("renameWithRetry gives up after the attempt budget on persistent EPERM", async () => {
+  let calls = 0;
+  await assert.rejects(
+    renameWithRetry("a", "b", {
+      rename: async () => { calls++; throw errWithCode("still locked", "EPERM"); },
+      attempts: 4,
+      baseDelayMs: 1,
+    }),
+    /still locked/,
+  );
+  assert.equal(calls, 4);
+});
+
+test("atomicWriteJson removes its temp file when rename keeps failing", async () => {
+  await withTempHome(async (home) => {
+    const target = join(home, "lanes.json");
+    await assert.rejects(
+      atomicWriteJson(target, { hello: "world" }, {
+        rename: async () => { throw errWithCode("locked", "EPERM"); },
+        attempts: 3,
+        baseDelayMs: 1,
+      }),
+      /locked/,
+    );
+    const leftovers = (await readdir(home)).filter((f) => f.endsWith(".tmp"));
+    assert.deepEqual(leftovers, [], `expected no orphaned temp files, found: ${leftovers.join(", ")}`);
   });
 });
