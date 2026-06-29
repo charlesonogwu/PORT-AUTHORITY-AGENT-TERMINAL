@@ -22,6 +22,16 @@ COMMANDS:
                   [--all]                    remove every released lane regardless of age
                   [--older-than 24h]         only remove released lanes older than this (default 24h)
                   [--dry-run]                preview without writing
+  profiles <subcommand>         Manage the per-lane Chrome profile folders on disk (~/.portpilot/profiles)
+                  list                       (default) every profile: size, owning lane, status, age
+                  prune                      delete abandoned profiles to reclaim disk (and their saved logins)
+                       (preview only unless --yes; NEVER touches active/reserved lanes)
+                       [--yes]                    actually delete (default is a dry-run preview)
+                       [--orphaned] [--released] [--stale]   pick buckets (default: orphaned + released)
+                       [--all]                    every profile except active/reserved
+                       [--older-than 30d]         only those whose lane was last seen before this
+                       [--name <glob>]            target specific profiles (e.g. "scraper-*")
+                  [--json]
   launch-chrome --owner <n> --cwd <p>
                                 Launch Chrome bound to the lane's debug port + profile
                   [--session <id>] [--dry-run] [--bin <path>]

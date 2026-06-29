@@ -11,6 +11,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.5] — reclaim disk with `paat profiles` (list + prune)
+
+### Added
+
+- **`paat profiles list`** — inventory every per-lane Chrome profile under
+  `~/.portpilot/profiles`: size on disk, the owning lane (owner/project/
+  session), its effective status (active / reserved / stale / released /
+  orphaned), when it was last used, plus a total and how much is reclaimable
+  right now.
+- **`paat profiles prune`** — delete abandoned profile folders to reclaim disk.
+  **Preview-only by default** (shows what it would remove + the space freed);
+  pass `--yes` to actually delete. **Never** touches active or reserved lanes.
+  The conservative default targets only orphaned (no lane record) and
+  explicitly released profiles; widen with `--stale`, `--all`,
+  `--older-than <dur>`, or target specific folders by name/glob. A hard guard
+  refuses to operate on anything outside the profiles directory, so it can
+  never reach the user's real Chrome profile.
+
+### Notes
+
+- Profiles persist logins across sessions by design (each lane gets its own
+  `--user-data-dir`), but were never reclaimed — so they accumulate (one
+  machine had 108 profiles / ~50 GB). This adds visibility and safe, opt-in
+  cleanup. Deleting a profile gives up its saved logins, which is why the
+  default is conservative and prune previews before it deletes.
+
+---
+
 ## [0.3.4] — survive transient Windows file locks when writing the registry
 
 ### Fixed
