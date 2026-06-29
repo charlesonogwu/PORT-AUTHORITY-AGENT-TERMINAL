@@ -8,6 +8,7 @@ import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneRelease
 import { scanPorts, hasSonar } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
 import { portpilotHome, profilesDir, registryPath } from "../core/paths.js";
+import { deleteProfileDir, listProfiles, selectPruneCandidates } from "../core/profiles.js";
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
 import { installShortcut, shortcutStatus, uninstallShortcut } from "./shortcut.js";
 import { installMcpFor } from "./install-mcp.js";
@@ -556,6 +557,127 @@ async function cmdDashboardSnapshot(ctx) {
     // and there's no reasonable human-readable fallback for ~3KB of nested data.
     ctx.stdout.write(JSON.stringify(snap) + "\n");
 }
+function formatBytes(n) {
+    if (n < 1024)
+        return `${n} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let v = n / 1024;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+        v /= 1024;
+        i++;
+    }
+    return `${v.toFixed(1)} ${units[i]}`;
+}
+async function cmdProfiles(ctx) {
+    const sub = ctx.args.positional[0] ?? "list";
+    if (sub === "list")
+        return cmdProfilesList(ctx);
+    if (sub === "prune")
+        return cmdProfilesPrune(ctx);
+    fail(ctx, `unknown 'profiles' subcommand: ${sub}. Try: list, prune`, 1);
+}
+async function cmdProfilesList(ctx) {
+    const profiles = await listProfiles();
+    const total = profiles.reduce((s, p) => s + p.sizeBytes, 0);
+    const reclaimable = profiles.filter((p) => p.status === "orphaned" || p.status === "released");
+    const reclaimBytes = reclaimable.reduce((s, p) => s + p.sizeBytes, 0);
+    if (ctx.json) {
+        emit(ctx, {
+            ok: true,
+            profilesDir: profilesDir(),
+            count: profiles.length,
+            totalBytes: total,
+            reclaimableBytes: reclaimBytes,
+            profiles,
+        });
+        return;
+    }
+    ctx.stdout.write(`Profiles dir: ${profilesDir()}\n`);
+    ctx.stdout.write(`${profiles.length} profiles, ${formatBytes(total)} total\n\n`);
+    if (profiles.length === 0) {
+        ctx.stdout.write("No profiles.\n");
+        return;
+    }
+    ctx.stdout.write(`  ${"SIZE".padStart(9)}  ${"STATUS".padEnd(9)}  ${"LAST SEEN".padEnd(19)}  PROFILE\n`);
+    for (const p of profiles) {
+        const last = p.lastSeen ? p.lastSeen.replace("T", " ").slice(0, 19) : "-";
+        ctx.stdout.write(`  ${formatBytes(p.sizeBytes).padStart(9)}  ${p.status.padEnd(9)}  ${last.padEnd(19)}  ${p.name}\n`);
+    }
+    ctx.stdout.write(`\nReclaimable now (orphaned + released): ${formatBytes(reclaimBytes)} across ${reclaimable.length} profile(s).\n`);
+    ctx.stdout.write(`Preview a cleanup with:  portpilot profiles prune        (add --yes to delete)\n`);
+}
+async function cmdProfilesPrune(ctx) {
+    const apply = flagBool(ctx.args, "yes");
+    const fOrphaned = flagBool(ctx.args, "orphaned");
+    const fReleased = flagBool(ctx.args, "released");
+    const fStale = flagBool(ctx.args, "stale");
+    const fAll = flagBool(ctx.args, "all");
+    const anyStatusFlag = fOrphaned || fReleased || fStale || fAll;
+    const olderRaw = flagString(ctx.args, "older-than");
+    let olderThanMs;
+    if (olderRaw) {
+        olderThanMs = parseDurationMs(olderRaw);
+        if (olderThanMs === undefined)
+            fail(ctx, `invalid --older-than "${olderRaw}". Use e.g. 7d, 24h, 30m`, 1);
+    }
+    const nameFlag = flagString(ctx.args, "name");
+    const names = [...ctx.args.positional.slice(1), ...(nameFlag ? [nameFlag] : [])];
+    const hasNames = names.length > 0;
+    // Conservative default (no status flags, no name filter): orphaned + released.
+    const opts = {
+        includeOrphaned: fAll || fOrphaned || (!anyStatusFlag && !hasNames),
+        includeReleased: fAll || fReleased || (!anyStatusFlag && !hasNames),
+        includeStale: fAll || fStale,
+        ...(olderThanMs !== undefined ? { olderThanMs } : {}),
+        ...(hasNames ? { names } : {}),
+    };
+    const profiles = await listProfiles();
+    const candidates = selectPruneCandidates(profiles, opts);
+    const bytes = candidates.reduce((s, p) => s + p.sizeBytes, 0);
+    if (!apply) {
+        if (ctx.json) {
+            emit(ctx, { ok: true, dryRun: true, wouldRemove: candidates, wouldReclaimBytes: bytes });
+            return;
+        }
+        if (candidates.length === 0) {
+            ctx.stdout.write("Nothing to prune with these filters.\n");
+            return;
+        }
+        ctx.stdout.write(`Would remove ${candidates.length} profile(s), reclaiming ${formatBytes(bytes)} (preview — add --yes to delete):\n\n`);
+        for (const p of candidates) {
+            ctx.stdout.write(`  ${formatBytes(p.sizeBytes).padStart(9)}  ${p.status.padEnd(9)}  ${p.name}\n`);
+        }
+        ctx.stdout.write(`\nActive/reserved profiles are never removed. Deleting a profile gives up its saved logins.\n` +
+            `Re-run with --yes to actually delete.\n`);
+        return;
+    }
+    const removed = [];
+    const failed = [];
+    for (const p of candidates) {
+        try {
+            await deleteProfileDir(p.path);
+            removed.push({ name: p.name, sizeBytes: p.sizeBytes });
+        }
+        catch (err) {
+            failed.push({ name: p.name, error: err.message });
+        }
+    }
+    const reclaimed = removed.reduce((s, p) => s + p.sizeBytes, 0);
+    if (ctx.json) {
+        emit(ctx, { ok: failed.length === 0, removed, failed, reclaimedBytes: reclaimed });
+        if (failed.length)
+            process.exit(1);
+        return;
+    }
+    ctx.stdout.write(`Removed ${removed.length} profile(s), reclaimed ${formatBytes(reclaimed)}.\n`);
+    if (failed.length) {
+        ctx.stdout.write(`\n${failed.length} could not be removed (likely a Chrome still using it):\n`);
+        for (const f of failed)
+            ctx.stdout.write(`  ${f.name}: ${f.error}\n`);
+        process.exit(1);
+    }
+}
 async function cmdMcp(ctx) {
     // Lazy import to avoid pulling MCP into every CLI invocation. If this install
     // lost its node_modules, the SDK import throws ERR_MODULE_NOT_FOUND at module
@@ -731,6 +853,8 @@ async function dispatch(args) {
             return cmdAutostart(ctx);
         case "prune":
             return cmdPrune(ctx);
+        case "profiles":
+            return cmdProfiles(ctx);
         case "mcp":
             return cmdMcp(ctx);
         case "help":
