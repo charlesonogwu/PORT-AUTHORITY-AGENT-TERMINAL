@@ -26,6 +26,11 @@ agent-lanes/
 .claude/scheduled_tasks.json
 .claude/settings.local.json
 
+# Internal AI planning / spec artifacts (the brainstorming + writing-plans
+# skills write here). They contain local machine paths and dev-session notes,
+# so they must never reach the public repo.
+docs/superpowers/
+
 # Environment / secrets
 .env
 .env.local
