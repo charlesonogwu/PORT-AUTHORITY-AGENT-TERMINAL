@@ -73,3 +73,27 @@ export declare function assertWithinProfilesRoot(target: string): void;
  *  root. The guard makes it impossible to remove anything outside
  *  ~/.portpilot/profiles. */
 export declare function deleteProfileDir(path: string): Promise<void>;
+/**
+ * Cheap check: does this profile already hold a real browser session — a
+ * cookie store, a localStorage DB, or saved credentials? Used by the dashboard
+ * to show a "saved data" marker per row WITHOUT walking the whole (possibly
+ * multi-GB) profile on every 2-second poll. A few `access()` calls, no walk.
+ */
+export declare function profileHasSavedData(profileDir: string): Promise<boolean>;
+/**
+ * "Forget" a lane's saved browser data: delete its profile directory (guarded
+ * to ~/.portpilot/profiles) and drop the lane from the registry so its
+ * dashboard row disappears and its ports free up.
+ *
+ * The caller MUST have already closed the Chrome that owns the profile — a
+ * running Chrome holds file locks and the delete will throw (which is the safe
+ * outcome: the lane is left intact so the user can retry). The profile is
+ * deleted first; the lane is only dropped once the delete succeeds.
+ */
+export declare function forgetProfile(opts: {
+    profileDir: string;
+    laneId?: string;
+}): Promise<{
+    removedProfile: boolean;
+    removedLane: boolean;
+}>;

@@ -43,6 +43,7 @@ pub fn run() {
             commands::doctor::get_doctor,
             commands::config::get_config,
             commands::kill::kill_chrome,
+            commands::erase::erase_chrome,
             commands::focus::focus_chrome,
             commands::focus::hide_chrome,
             commands::focus::unhide_chrome,

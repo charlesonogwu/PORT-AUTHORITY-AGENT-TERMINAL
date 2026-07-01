@@ -17,6 +17,7 @@ import { evaluateChromeAttach, ChromeAttachVerdict, isChromeProcess } from "../c
 import { loadConfig } from "../core/config.js";
 import { portpilotHome, registryPath } from "../core/paths.js";
 import { markStaleLanes } from "../core/registry.js";
+import { profileHasSavedData } from "../core/profiles.js";
 import {
   EntrySource,
   LiveChrome,
@@ -80,6 +81,11 @@ export interface LiveSession {
   debugMode: "port" | "pipe";
   appPort?: number;
   chromeProfileDir: string;
+  /** True when the profile already holds a login/cookie/localStorage store —
+   *  i.e. there is saved browser data the user could choose to erase. The
+   *  dashboard shows a "saved" marker for these rows. Cheap to compute (a few
+   *  stat calls), unlike a full size walk. */
+  hasSavedData: boolean;
   browserVersion?: string;
   /** All non-internal CDP targets we found. Empty for pipe-mode Chromes. */
   tabs: CdpTab[];
@@ -272,6 +278,7 @@ function buildLiveSession(
     chromeDebugPort: live.port,
     debugMode: live.debugMode,
     chromeProfileDir: profile,
+    hasSavedData: false, // filled in by the caller (async stat check)
     tabs: cdp.tabs,
     primaryTabs: cdp.tabs.filter((t) => !isInternalTab(t)),
     registeredBy,
@@ -441,7 +448,9 @@ export async function buildSnapshot(opts: { cdpTimeoutMs?: number } = {}): Promi
       const cdp = live.debugMode === "port" && live.port > 0
         ? await gatherCdp(live.port, cdpTimeoutMs)
         : { tabs: [] as CdpTab[], error: "pipe-mode CDP — only the launching agent can read this Chrome's tabs" };
-      return buildLiveSession(live, ppLane, cdp, processSnap, births);
+      const session = buildLiveSession(live, ppLane, cdp, processSnap, births);
+      session.hasSavedData = session.chromeProfileDir ? await profileHasSavedData(session.chromeProfileDir) : false;
+      return session;
     }),
   );
 

@@ -31,6 +31,9 @@ COMMANDS:
                        [--all]                    every profile except active/reserved
                        [--older-than 30d]         only those whose lane was last seen before this
                        [--name <glob>]            target specific profiles (e.g. "scraper-*")
+                  forget --profile-dir <path>   erase ONE lane's saved data (delete profile + drop lane)
+                       [--lane <id>]              also remove this registry entry
+                       (Chrome must already be closed; this is what the dashboard Erase button calls)
                   [--json]
   launch-chrome --owner <n> --cwd <p>
                                 Launch Chrome bound to the lane's debug port + profile

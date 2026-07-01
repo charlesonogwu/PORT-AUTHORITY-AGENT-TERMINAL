@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod doctor;
+pub mod erase;
 pub mod focus;
 pub mod kill;
 pub mod lanes;
