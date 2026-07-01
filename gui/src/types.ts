@@ -32,6 +32,9 @@ export interface LiveSession {
   debugMode: "port" | "pipe"
   appPort?: number
   chromeProfileDir: string
+  /** True when the profile already holds a login/cookie/localStorage store —
+   *  i.e. there is saved browser data the user could choose to erase. */
+  hasSavedData?: boolean
   browserVersion?: string
   tabs: CdpTab[]
   primaryTabs: CdpTab[]

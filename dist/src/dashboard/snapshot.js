@@ -16,6 +16,7 @@ import { isChromeProcess } from "../core/chrome.js";
 import { loadConfig } from "../core/config.js";
 import { portpilotHome, registryPath } from "../core/paths.js";
 import { markStaleLanes } from "../core/registry.js";
+import { profileHasSavedData } from "../core/profiles.js";
 import { findAllAgentChromes, findLiveChromes, inferCwdFromProfile, inferOwnerFromProfile, inferProjectFromProfile, readPortpilotLanes, } from "./sources.js";
 import { collectProcessSnapshot } from "./process-info.js";
 import { inferAgentFromLiveChrome, walkParentChain } from "./agent-inference.js";
@@ -123,6 +124,7 @@ function buildLiveSession(live, ppLane, cdp, processSnap, births) {
         chromeDebugPort: live.port,
         debugMode: live.debugMode,
         chromeProfileDir: profile,
+        hasSavedData: false, // filled in by the caller (async stat check)
         tabs: cdp.tabs,
         primaryTabs: cdp.tabs.filter((t) => !isInternalTab(t)),
         registeredBy,
@@ -290,7 +292,9 @@ export async function buildSnapshot(opts = {}) {
         const cdp = live.debugMode === "port" && live.port > 0
             ? await gatherCdp(live.port, cdpTimeoutMs)
             : { tabs: [], error: "pipe-mode CDP — only the launching agent can read this Chrome's tabs" };
-        return buildLiveSession(live, ppLane, cdp, processSnap, births);
+        const session = buildLiveSession(live, ppLane, cdp, processSnap, births);
+        session.hasSavedData = session.chromeProfileDir ? await profileHasSavedData(session.chromeProfileDir) : false;
+        return session;
     }));
     // Sort: with-pages first, then by agent name, then by port.
     liveSessions.sort((a, b) => {

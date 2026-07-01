@@ -9,9 +9,12 @@ import {
   assertWithinProfilesRoot,
   deleteProfileDir,
   listProfiles,
+  profileHasSavedData,
+  forgetProfile,
   type ProfileEntry,
 } from "../src/core/profiles.js";
 import { profilesDir } from "../src/core/paths.js";
+import { listLanes } from "../src/core/registry.js";
 import { Lane, nowIso } from "../src/core/lane.js";
 
 const NOW = Date.parse("2026-06-29T12:00:00.000Z");
@@ -148,5 +151,46 @@ test("listProfiles inventories + classifies; deleteProfileDir removes only withi
 
     await deleteProfileDir(orphan.path);
     assert.deepEqual(await readdir(pdir), ["codex-live"]);
+  });
+});
+
+// ── profileHasSavedData ─────────────────────────────────────────────────────
+
+test("profileHasSavedData: true when a cookie store exists, false for an empty profile", async () => {
+  await withTempHome(async (home) => {
+    const withData = join(home, "profiles", "codex-loggedin");
+    await mkdir(join(withData, "Default", "Network"), { recursive: true });
+    await writeFile(join(withData, "Default", "Network", "Cookies"), Buffer.alloc(64));
+    const empty = join(home, "profiles", "codex-fresh");
+    await mkdir(empty, { recursive: true });
+
+    assert.equal(await profileHasSavedData(withData), true);
+    assert.equal(await profileHasSavedData(empty), false);
+  });
+});
+
+// ── forgetProfile ───────────────────────────────────────────────────────────
+
+test("forgetProfile deletes the profile dir AND drops the lane from the registry", async () => {
+  await withTempHome(async (home) => {
+    const pdir = join(home, "profiles", "codex-gone");
+    await mkdir(pdir, { recursive: true });
+    await writeFile(join(pdir, "f.bin"), Buffer.alloc(128));
+    const l = lane({ id: "L9", chromeProfileDir: pdir, status: "released" });
+    await writeFile(join(home, "lanes.json"), JSON.stringify({ version: 1, lanes: [l] }), "utf8");
+
+    const r = await forgetProfile({ profileDir: pdir, laneId: "L9" });
+    assert.deepEqual(r, { removedProfile: true, removedLane: true });
+    await assert.rejects(readdir(pdir)); // dir is gone
+    assert.deepEqual(await listLanes(), []); // lane dropped
+  });
+});
+
+test("forgetProfile refuses a path outside the profiles root (and keeps the lane)", async () => {
+  await withTempHome(async (home) => {
+    const l = lane({ id: "L10", chromeProfileDir: join(home, "profiles", "x"), status: "released" });
+    await writeFile(join(home, "lanes.json"), JSON.stringify({ version: 1, lanes: [l] }), "utf8");
+    await assert.rejects(forgetProfile({ profileDir: join(home, "lanes.json"), laneId: "L10" }));
+    assert.equal((await listLanes()).length, 1); // lane untouched because the delete was refused
   });
 });

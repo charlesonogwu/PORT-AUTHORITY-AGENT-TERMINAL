@@ -8,7 +8,7 @@ import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneRelease
 import { scanPorts, hasSonar } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
 import { portpilotHome, profilesDir, registryPath } from "../core/paths.js";
-import { deleteProfileDir, listProfiles, selectPruneCandidates } from "../core/profiles.js";
+import { deleteProfileDir, forgetProfile, listProfiles, selectPruneCandidates } from "../core/profiles.js";
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
 import { installShortcut, shortcutStatus, uninstallShortcut } from "./shortcut.js";
 import { installMcpFor } from "./install-mcp.js";
@@ -575,7 +575,33 @@ async function cmdProfiles(ctx) {
         return cmdProfilesList(ctx);
     if (sub === "prune")
         return cmdProfilesPrune(ctx);
-    fail(ctx, `unknown 'profiles' subcommand: ${sub}. Try: list, prune`, 1);
+    if (sub === "forget")
+        return cmdProfilesForget(ctx);
+    fail(ctx, `unknown 'profiles' subcommand: ${sub}. Try: list, prune, forget`, 1);
+}
+/**
+ * `paat profiles forget --profile-dir <path> [--lane <id>]` — erase one lane's
+ * saved browser data: delete the profile directory (guarded to the profiles
+ * root) and drop the lane from the registry. Chrome must already be closed —
+ * this is what the dashboard's Erase button calls after killing the pid.
+ */
+async function cmdProfilesForget(ctx) {
+    const profileDir = flagString(ctx.args, "profile-dir");
+    if (!profileDir)
+        fail(ctx, "missing required --profile-dir", 1);
+    const laneId = flagString(ctx.args, "lane");
+    try {
+        const r = await forgetProfile({ profileDir: profileDir, ...(laneId ? { laneId } : {}) });
+        if (ctx.json) {
+            emit(ctx, { ok: true, ...r });
+        }
+        else {
+            ctx.stdout.write(`Erased saved data: ${profileDir}` + (r.removedLane ? ` (and removed lane ${laneId}).\n` : ".\n"));
+        }
+    }
+    catch (err) {
+        fail(ctx, `could not erase profile (is Chrome still open?): ${err.message}`, 1);
+    }
 }
 async function cmdProfilesList(ctx) {
     const profiles = await listProfiles();

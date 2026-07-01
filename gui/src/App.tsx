@@ -4,6 +4,8 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
+  Database,
+  Eraser,
   Trash2,
   X,
 } from "lucide-react"
@@ -22,6 +24,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import type { DashboardSnapshot, LiveSession } from "@/types"
 import {
+  eraseChrome,
   focusChrome,
   getSnapshot,
   hideChrome,
@@ -716,6 +719,14 @@ function SessionRow({
         </TableCell>
         <TableCell>
           <SourcePill session={s} />
+          {s.hasSavedData && (
+            <div
+              className="mt-1 inline-flex items-center gap-1 text-[10px] text-muted-foreground"
+              title="This session has saved logins, cookies and history stored on disk. Use Erase to wipe it."
+            >
+              <Database className="size-3" /> saved
+            </div>
+          )}
         </TableCell>
         <TableCell
           className="text-right"
@@ -730,6 +741,7 @@ function SessionRow({
             {!hiddenApi.isHidden(s) && <FocusButton pid={s.pid} />}
             <HideToggleButton s={s} hiddenApi={hiddenApi} />
             <KillButton pid={s.pid} onKilled={onKilled} />
+            <EraseButton s={s} onErased={onKilled} />
           </div>
         </TableCell>
       </TableRow>
@@ -1280,6 +1292,82 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
         <>
           <Trash2 className="size-3" />
           <span className="hidden sm:inline">Kill</span>
+        </>
+      )}
+    </Button>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Erase button — closes Chrome AND wipes the saved profile (logins, cookies, */
+/*  history), then drops the lane so the row disappears. Two-click confirm     */
+/*  because, unlike Kill, this is irreversible login loss. Mirrors KillButton. */
+/* -------------------------------------------------------------------------- */
+function EraseButton({ s, onErased }: { s: LiveSession; onErased: () => void }) {
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const timer = useRef<number | null>(null)
+
+  const reset = useCallback(() => {
+    setConfirming(false)
+    if (timer.current) {
+      window.clearTimeout(timer.current)
+      timer.current = null
+    }
+  }, [])
+
+  const onClick = useCallback(async () => {
+    if (busy) return
+    if (!confirming) {
+      setConfirming(true)
+      timer.current = window.setTimeout(reset, KILL_CONFIRM_MS)
+      return
+    }
+    if (timer.current) window.clearTimeout(timer.current)
+    setBusy(true)
+    setError(null)
+    try {
+      const data = await eraseChrome(s.pid, s.chromeProfileDir, s.laneId)
+      if (!data.ok) {
+        setError(data.error ?? "unknown error")
+        setBusy(false)
+        setConfirming(false)
+        return
+      }
+      onErased()
+    } catch (err) {
+      setError((err as Error).message)
+      setBusy(false)
+      setConfirming(false)
+    }
+  }, [busy, confirming, s, onErased, reset])
+
+  if (error) {
+    return (
+      <span className="flex items-center justify-end gap-1 text-[10px] text-destructive">
+        <X className="size-3" /> {error.slice(0, 40)}
+      </span>
+    )
+  }
+
+  return (
+    <Button
+      size="sm"
+      variant={confirming ? "destructive" : "ghost"}
+      disabled={busy}
+      onClick={onClick}
+      className="h-7 px-2 text-[11px]"
+      title="Erase this session's saved logins, cookies & history. Closes Chrome and cannot be undone."
+    >
+      {busy ? (
+        "erasing…"
+      ) : confirming ? (
+        "Erase all data?"
+      ) : (
+        <>
+          <Eraser className="size-3" />
+          <span className="hidden sm:inline">Erase</span>
         </>
       )}
     </Button>

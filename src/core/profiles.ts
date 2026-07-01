@@ -1,9 +1,9 @@
 import type { Dirent } from "node:fs";
-import { readdir, rm, stat } from "node:fs/promises";
+import { access, readdir, rm, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { Lane, LaneStatus, isStale, normalizeCwd } from "./lane.js";
 import { profilesDir } from "./paths.js";
-import { listLanes } from "./registry.js";
+import { listLanes, removeLane } from "./registry.js";
 
 /**
  * Lifecycle tooling for the per-lane Chrome profiles PortPilot stores under
@@ -213,4 +213,47 @@ export function assertWithinProfilesRoot(target: string): void {
 export async function deleteProfileDir(path: string): Promise<void> {
   assertWithinProfilesRoot(path);
   await rm(path, { recursive: true, force: true });
+}
+
+/**
+ * Cheap check: does this profile already hold a real browser session — a
+ * cookie store, a localStorage DB, or saved credentials? Used by the dashboard
+ * to show a "saved data" marker per row WITHOUT walking the whole (possibly
+ * multi-GB) profile on every 2-second poll. A few `access()` calls, no walk.
+ */
+export async function profileHasSavedData(profileDir: string): Promise<boolean> {
+  const markers = [
+    join(profileDir, "Default", "Network", "Cookies"),
+    join(profileDir, "Default", "Local Storage", "leveldb"),
+    join(profileDir, "Default", "Login Data"),
+  ];
+  for (const m of markers) {
+    try {
+      await access(m);
+      return true;
+    } catch {
+      /* not present — try the next marker */
+    }
+  }
+  return false;
+}
+
+/**
+ * "Forget" a lane's saved browser data: delete its profile directory (guarded
+ * to ~/.portpilot/profiles) and drop the lane from the registry so its
+ * dashboard row disappears and its ports free up.
+ *
+ * The caller MUST have already closed the Chrome that owns the profile — a
+ * running Chrome holds file locks and the delete will throw (which is the safe
+ * outcome: the lane is left intact so the user can retry). The profile is
+ * deleted first; the lane is only dropped once the delete succeeds.
+ */
+export async function forgetProfile(opts: {
+  profileDir: string;
+  laneId?: string;
+}): Promise<{ removedProfile: boolean; removedLane: boolean }> {
+  await deleteProfileDir(opts.profileDir);
+  let removedLane = false;
+  if (opts.laneId) removedLane = await removeLane(opts.laneId);
+  return { removedProfile: true, removedLane };
 }

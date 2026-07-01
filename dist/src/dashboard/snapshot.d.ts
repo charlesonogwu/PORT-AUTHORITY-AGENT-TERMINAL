@@ -56,6 +56,11 @@ export interface LiveSession {
     debugMode: "port" | "pipe";
     appPort?: number;
     chromeProfileDir: string;
+    /** True when the profile already holds a login/cookie/localStorage store —
+     *  i.e. there is saved browser data the user could choose to erase. The
+     *  dashboard shows a "saved" marker for these rows. Cheap to compute (a few
+     *  stat calls), unlike a full size walk. */
+    hasSavedData: boolean;
     browserVersion?: string;
     /** All non-internal CDP targets we found. Empty for pipe-mode Chromes. */
     tabs: CdpTab[];

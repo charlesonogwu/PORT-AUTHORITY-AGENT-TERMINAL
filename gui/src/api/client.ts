@@ -109,3 +109,24 @@ export async function setHiddenPids(pids: number[]): Promise<void> {
 export async function killChrome(pid: number): Promise<KillResult> {
   return await invoke<KillResult>("kill_chrome", { pid });
 }
+
+export interface EraseResult {
+  ok: boolean;
+  removedProfile?: boolean;
+  removedLane?: boolean;
+  error?: string;
+}
+
+/**
+ * Erase a lane's saved browser data: closes the Chrome pid, then deletes its
+ * profile directory (logins, cookies, history) and drops the lane. Unlike
+ * `killChrome`, this does NOT preserve the login — the next open is a fresh,
+ * logged-out browser. Irreversible; the UI must confirm before calling it.
+ */
+export async function eraseChrome(
+  pid: number,
+  profileDir: string,
+  laneId?: string,
+): Promise<EraseResult> {
+  return await invoke<EraseResult>("erase_chrome", { pid, profileDir, laneId });
+}

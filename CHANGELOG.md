@@ -11,6 +11,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.6] — erase a session's saved data from the dashboard
+
+### Added
+
+- **Dashboard "Erase" button + a "saved data" marker.** Each live session
+  whose Chrome profile holds a login now shows a small **saved** marker, and a
+  new per-row **Erase** button closes that Chrome AND wipes its profile
+  (logins, cookies, history), then drops the lane so the row disappears.
+  Unlike **Kill** — which closes Chrome but keeps the saved login, so the agent
+  reopens still signed in — Erase is a true "forget this session": the next
+  open is a fresh, logged-out browser. Two-click confirm (mirrors Kill), since
+  it is irreversible.
+- **`paat profiles forget --profile-dir <path> [--lane <id>]`** — the CLI
+  operation the Erase button calls: a guarded profile delete (only ever inside
+  `~/.portpilot/profiles`, never the user's real Chrome) plus lane removal.
+  Chrome must already be closed; the dashboard kills the pid first.
+
+### Notes
+
+- The saved-data marker is a cheap check (a couple of `stat` calls for a
+  cookie / localStorage / login-data store), not a full profile-size walk, so
+  it adds nothing meaningful to the dashboard's 2-second poll.
+- Ships a rebuilt `paat-dashboard.exe` (the new `erase_chrome` Tauri command).
+
+---
+
 ## [0.3.5] — reclaim disk with `paat profiles` (list + prune)
 
 ### Added
