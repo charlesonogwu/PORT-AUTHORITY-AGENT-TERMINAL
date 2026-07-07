@@ -11,18 +11,23 @@ export type LaneStatus = "reserved" | "active" | "stale" | "released";
  * Which browser backend a lane launches/coordinates.
  *
  *   - "chrome"  — Chromium family via CDP (--remote-debugging-port). Default.
+ *   - "edge"    — Microsoft Edge. Also Chromium, so it speaks real CDP and
+ *                 supports every Chrome launch mode; it only differs in binary
+ *                 location and process identity.
  *   - "firefox" — Firefox with a dedicated -profile dir. Its debug port serves
  *                 WebDriver BiDi (ws://127.0.0.1:<port>/session), NOT Chrome
  *                 CDP — agents must use a BiDi-capable client (Playwright,
  *                 WebDriver). PortPilot launches + coordinates; it does not
- *                 drive either browser.
+ *                 drive any browser.
  */
-export type BrowserKind = "chrome" | "firefox";
+export type BrowserKind = "chrome" | "firefox" | "edge";
 
 /** Read a lane's browser defensively: lanes written before the field existed
  *  (or by older versions) are Chrome lanes. */
 export function laneBrowser(lane: { browser?: string }): BrowserKind {
-  return lane.browser === "firefox" ? "firefox" : "chrome";
+  if (lane.browser === "firefox") return "firefox";
+  if (lane.browser === "edge") return "edge";
+  return "chrome";
 }
 
 export interface Lane {

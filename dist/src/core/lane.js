@@ -7,7 +7,11 @@
 /** Read a lane's browser defensively: lanes written before the field existed
  *  (or by older versions) are Chrome lanes. */
 export function laneBrowser(lane) {
-    return lane.browser === "firefox" ? "firefox" : "chrome";
+    if (lane.browser === "firefox")
+        return "firefox";
+    if (lane.browser === "edge")
+        return "edge";
+    return "chrome";
 }
 /**
  * The implicit session id used when a caller does not supply one. Lanes

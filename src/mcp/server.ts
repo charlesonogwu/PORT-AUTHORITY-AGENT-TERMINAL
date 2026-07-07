@@ -5,7 +5,7 @@ import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
 import { findLane, listLanes, markStaleLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { hasSonar, scanPorts } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
-import { assertModeSupported, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
+import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
 import { loadConfig } from "../core/config.js";
 import { portpilotHome, profilesDir } from "../core/paths.js";
 import { BrowserKind, isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
@@ -68,13 +68,13 @@ export function buildMcpServer(): McpServer {
           .enum(["visible", "background", "headless"])
           .optional()
           .describe(
-            "Launch visibility. 'visible' (default) = normal window; 'background' = real headed Chrome rendered off-screen, never steals focus; 'headless' = no window (--headless=new). Overrides the PORTPILOT_CHROME_MODE env var and the config default. Omit to use the machine default. NOTE: 'background' is Chrome-only — Firefox rejects it (use 'visible' or 'headless').",
+            "Launch visibility. 'visible' (default) = normal window; 'background' = real headed browser rendered off-screen, never steals focus; 'headless' = no window (--headless=new). Overrides the PORTPILOT_CHROME_MODE env var and the config default. Omit to use the machine default. NOTE: 'background' works for chrome and edge (both Chromium) — Firefox rejects it (use 'visible' or 'headless').",
           ),
         browser: z
-          .enum(["chrome", "firefox"])
+          .enum(["chrome", "firefox", "edge"])
           .optional()
           .describe(
-            "Browser backend. 'chrome' (default) = Chromium via CDP. 'firefox' = a real Firefox with its own dedicated PortPilot profile, exposing WebDriver BiDi on the lane's debug port (ws://127.0.0.1:<port>/session) — NOT Chrome CDP; drive it with a BiDi client (Playwright firefox / WebDriver). PortPilot launches + coordinates Firefox but does not enumerate its tabs.",
+            "Browser backend. 'chrome' (default) = Chromium via CDP. 'edge' = Microsoft Edge — also Chromium, so the lane's debug port serves real Chrome CDP and all modes work; only the binary differs. 'firefox' = a real Firefox with its own dedicated PortPilot profile, exposing WebDriver BiDi on the lane's debug port (ws://127.0.0.1:<port>/session) — NOT Chrome CDP; drive it with a BiDi client (Playwright firefox / WebDriver). Every backend gets its own dedicated PortPilot profile — never the user's personal browser profile.",
           ),
         headless: z
           .boolean()
@@ -94,7 +94,7 @@ export function buildMcpServer(): McpServer {
         browser,
       });
       const lane = reserve.lane;
-      const label = browser === "firefox" ? "Firefox" : "Chrome";
+      const label = browserLabel(browser);
       // Safety gate
       const result = await checkLane(lane);
       if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
@@ -182,9 +182,9 @@ export function buildMcpServer(): McpServer {
         withAppPort: z.boolean().optional().default(true),
         withChromePort: z.boolean().optional().default(true),
         browser: z
-          .enum(["chrome", "firefox"])
+          .enum(["chrome", "firefox", "edge"])
           .optional()
-          .describe("Browser backend for this lane. 'chrome' (default) or 'firefox' (own dedicated profile; debug port serves WebDriver BiDi, not CDP). Chrome and Firefox lanes for the same (owner, cwd, sessionId) are distinct and get separate profile dirs."),
+          .describe("Browser backend for this lane. 'chrome' (default), 'edge' (Microsoft Edge — Chromium, real CDP), or 'firefox' (own dedicated profile; debug port serves WebDriver BiDi, not CDP). Lanes for the same (owner, cwd, sessionId) but different browsers are distinct and get separate profile dirs."),
         browserScript: z.string().optional(),
       },
     },
@@ -343,11 +343,12 @@ export function buildMcpServer(): McpServer {
   server.registerTool(
     "launch_browser_lane",
     {
-      title: "Launch a browser (chrome or firefox) for an existing portpilot lane",
+      title: "Launch a browser (chrome, edge, or firefox) for an existing portpilot lane",
       description:
-        "Generic launcher for an already-reserved lane — routes to Chrome or Firefox by the lane's browser. " +
+        "Generic launcher for an already-reserved lane — routes to Chrome, Edge, or Firefox by the lane's browser. " +
         "Binds the browser to that lane's debug port + dedicated profile and shows it on the dashboard. Refuses " +
         "to launch when the port is held by a foreign browser (different profile) or a non-browser process. " +
+        "EDGE lanes behave exactly like Chrome (Chromium, real CDP, all modes). " +
         "For FIREFOX lanes the debug port serves WebDriver BiDi (ws://127.0.0.1:<port>/session), not Chrome CDP, " +
         "and mode='background' is rejected (Firefox has no off-screen window mode — use visible/headless). " +
         "Most callers should use the higher-level 'open' tool with a browser argument instead. Set dryRun=true to " +
@@ -361,14 +362,14 @@ export function buildMcpServer(): McpServer {
         mode: z
           .enum(["visible", "background", "headless"])
           .optional()
-          .describe("Launch mode. 'visible' (default), 'headless', or 'background' (Chrome-only; Firefox rejects it)."),
+          .describe("Launch mode. 'visible' (default), 'headless', or 'background' (chrome/edge only; Firefox rejects it)."),
       },
     },
     async (args) => {
       const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}) });
       if (!lane) return jsonResult({ ok: false, error: `no lane found for owner=${args.owner} cwd=${args.cwd}${args.sessionId ? ` sessionId=${args.sessionId}` : ""}` });
       const browser = laneBrowser(lane);
-      const label = browser === "firefox" ? "Firefox" : "Chrome";
+      const label = browserLabel(browser);
       const result = await checkLane(lane);
       if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
         return jsonResult({ ok: false, error: `unsafe to launch ${label}: ${result.verdict.kind}`, verdict: result.verdict });

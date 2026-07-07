@@ -68,6 +68,8 @@ export function findLiveChromes(observations) {
             live.commandLine = o.commandLine;
         if (profileDir !== undefined)
             live.profileDir = profileDir;
+        if (isEdgeName(o.command))
+            live.browser = "edge";
         out.push(live);
     }
     return out;
@@ -87,6 +89,12 @@ const CHROMIUM_NAMES = new Set([
 ]);
 function isChromiumProcessName(name) {
     return CHROMIUM_NAMES.has((name || "").toLowerCase());
+}
+/** Edge is Chromium, but lanes distinguish it — tag msedge processes "edge" so
+ *  they match Edge lanes (findOwningLane requires browser equality). */
+function isEdgeName(name) {
+    const n = (name || "").toLowerCase();
+    return n === "msedge.exe" || n === "msedge" || n === "microsoft edge" || n.startsWith("microsoft-edge");
 }
 /**
  * Enumerate every Chromium-family PARENT process on the box and return one
@@ -133,6 +141,8 @@ export function findAllAgentChromes(snap) {
             : { port: 0, debugMode: "pipe", pid: proc.pid, command: proc.name, commandLine: cl };
         if (profileDir !== undefined)
             live.profileDir = profileDir;
+        if (isEdgeName(proc.name))
+            live.browser = "edge";
         out.push(live);
     }
     return out;

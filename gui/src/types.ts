@@ -31,7 +31,7 @@ export interface LiveSession {
    */
   debugMode: "port" | "pipe"
   /** Which browser backend this lane runs. Absent/"chrome" is the default. */
-  browser?: "chrome" | "firefox"
+  browser?: "chrome" | "firefox" | "edge"
   appPort?: number
   chromeProfileDir: string
   /** True when the profile already holds a login/cookie/localStorage store —

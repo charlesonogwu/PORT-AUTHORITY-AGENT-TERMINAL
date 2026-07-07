@@ -7,7 +7,7 @@ import { isStale, normalizeCwd, nowIso } from "../core/lane.js";
 import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { scanPorts, hasSonar } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
-import { assertModeSupported, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
+import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
 import { portpilotHome, profilesDir, registryPath } from "../core/paths.js";
 import { deleteProfileDir, forgetProfile, listProfiles, selectPruneCandidates } from "../core/profiles.js";
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
@@ -102,7 +102,11 @@ async function cmdReserve(ctx) {
     const chromeRange = parsePortRange(flagString(ctx.args, "chrome-range"));
     const withApp = !flagBool(ctx.args, "no-app-port", false);
     const withChrome = !flagBool(ctx.args, "no-chrome-port", false);
-    const browser = normalizeBrowserKind(flagString(ctx.args, "browser"));
+    const reserveBrowserFlag = flagString(ctx.args, "browser");
+    const browser = normalizeBrowserKind(reserveBrowserFlag);
+    if (reserveBrowserFlag && !browser) {
+        fail(ctx, `unknown --browser "${reserveBrowserFlag}". Valid values: chrome, edge, firefox.`, 1);
+    }
     const result = await allocateLane({
         owner,
         cwd,
@@ -285,17 +289,22 @@ async function cmdDoctor(ctx) {
     ctx.stdout.write("\nNo destructive action was taken. portpilot will never kill processes automatically.\n");
 }
 /**
- * `paat open` — one-shot reserve + launch + navigate, for either browser.
+ * `paat open` — one-shot reserve + launch + navigate, for any browser.
  * The CLI mirror of the MCP `open` tool. Chrome is the default; pass
- * `--browser firefox` for a dedicated-profile Firefox window.
+ * `--browser firefox` or `--browser edge` for a dedicated-profile window
+ * of that browser.
  */
 async function cmdOpen(ctx) {
     const { owner, cwd } = requireOwnerCwd(ctx);
     const sessionId = flagString(ctx.args, "session");
     const task = flagString(ctx.args, "task");
     const url = flagString(ctx.args, "url");
-    const browser = normalizeBrowserKind(flagString(ctx.args, "browser")) ?? "chrome";
-    const label = browser === "firefox" ? "Firefox" : "Chrome";
+    const browserFlag = flagString(ctx.args, "browser");
+    const browser = normalizeBrowserKind(browserFlag) ?? "chrome";
+    if (browserFlag && !normalizeBrowserKind(browserFlag)) {
+        fail(ctx, `unknown --browser "${browserFlag}". Valid values: chrome, edge, firefox.`, 1);
+    }
+    const label = browserLabel(browser);
     const reserve = await allocateLane({
         owner,
         cwd,
