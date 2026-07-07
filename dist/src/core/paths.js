@@ -33,8 +33,13 @@ export function profileDirFor(ownerSlug, projectSlug, options = {}) {
     // Backwards-compat for the previous third-positional `suffix` argument.
     const opts = typeof options === "string" ? { dedupeSuffix: options } : options;
     const session = opts.sessionId && opts.sessionId !== "default" ? `-${opts.sessionId}` : "";
+    // Non-chrome browsers get a suffix so a Chrome lane and a Firefox lane in
+    // the same (owner, project, session) can never share a profile directory —
+    // the formats are mutually incompatible. Chrome paths stay byte-identical
+    // to pre-0.3.7 so existing lanes keep their logins.
+    const browser = opts.browser && opts.browser !== "chrome" ? `-${opts.browser}` : "";
     const dedupe = opts.dedupeSuffix ? `-${opts.dedupeSuffix}` : "";
-    return join(profilesDir(), `${ownerSlug}-${projectSlug}${session}${dedupe}`);
+    return join(profilesDir(), `${ownerSlug}-${projectSlug}${session}${browser}${dedupe}`);
 }
 export function isWindows() {
     return platform() === "win32";

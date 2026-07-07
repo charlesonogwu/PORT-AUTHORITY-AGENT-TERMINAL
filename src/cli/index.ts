@@ -7,6 +7,7 @@ import { Lane, isStale, normalizeCwd, nowIso } from "../core/lane.js";
 import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { scanPorts, hasSonar } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
+import { assertModeSupported, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
 import { portpilotHome, profilesDir, registryPath } from "../core/paths.js";
 import { deleteProfileDir, forgetProfile, listProfiles, selectPruneCandidates, type ProfilePruneOptions } from "../core/profiles.js";
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
@@ -105,6 +106,7 @@ async function cmdReserve(ctx: CliContext): Promise<void> {
   const chromeRange = parsePortRange(flagString(ctx.args, "chrome-range"));
   const withApp = !flagBool(ctx.args, "no-app-port", false);
   const withChrome = !flagBool(ctx.args, "no-chrome-port", false);
+  const browser = normalizeBrowserKind(flagString(ctx.args, "browser"));
   const result = await allocateLane({
     owner,
     cwd,
@@ -115,6 +117,7 @@ async function cmdReserve(ctx: CliContext): Promise<void> {
     chromeDebugRange: chromeRange,
     withAppPort: withApp,
     withChromePort: withChrome,
+    ...(browser ? { browser } : {}),
   });
   await mkdir(result.lane.chromeProfileDir, { recursive: true }).catch(() => {});
   if (ctx.json) {
@@ -270,6 +273,66 @@ async function cmdDoctor(ctx: CliContext): Promise<void> {
     if (i.suggestion) ctx.stdout.write(`        suggested: ${i.suggestion}\n`);
   }
   ctx.stdout.write("\nNo destructive action was taken. portpilot will never kill processes automatically.\n");
+}
+
+/**
+ * `paat open` — one-shot reserve + launch + navigate, for either browser.
+ * The CLI mirror of the MCP `open` tool. Chrome is the default; pass
+ * `--browser firefox` for a dedicated-profile Firefox window.
+ */
+async function cmdOpen(ctx: CliContext): Promise<void> {
+  const { owner, cwd } = requireOwnerCwd(ctx);
+  const sessionId = flagString(ctx.args, "session");
+  const task = flagString(ctx.args, "task");
+  const url = flagString(ctx.args, "url");
+  const browser = normalizeBrowserKind(flagString(ctx.args, "browser")) ?? "chrome";
+  const label = browser === "firefox" ? "Firefox" : "Chrome";
+  const reserve = await allocateLane({
+    owner,
+    cwd,
+    ...(sessionId ? { sessionId } : {}),
+    ...(task ? { task } : {}),
+    browser,
+  });
+  const lane = reserve.lane;
+  await mkdir(lane.chromeProfileDir, { recursive: true }).catch(() => {});
+  const result = await checkLane(lane);
+  if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
+    fail(ctx, `unsafe to launch ${label} on lane ${lane.id}: ${result.verdict.kind}. Run portpilot doctor for details.`, 3);
+  }
+  if (result.verdict.kind === "safe-attach") {
+    if (ctx.json) emit(ctx, { ok: true, alreadyRunning: true, browser, lane });
+    else ctx.stdout.write(`${label} already running on port ${lane.chromeDebugPort} with the matching profile. Reusing it.\n`);
+    return;
+  }
+  const dryRun = flagBool(ctx.args, "dry-run");
+  const bin = flagString(ctx.args, "bin");
+  const cfg = await loadConfig();
+  const mode = resolveChromeMode(flagString(ctx.args, "mode"), cfg.chromeMode);
+  try {
+    assertModeSupported(browser, mode);
+  } catch (err) {
+    fail(ctx, (err as Error).message, 1);
+  }
+  const launch = await launchBrowserForLane(lane, {
+    dryRun,
+    binaryPath: bin,
+    mode,
+    ...(url ? { initialUrl: url } : {}),
+  });
+  await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
+  if (ctx.json) {
+    emit(ctx, { ok: true, launched: !dryRun, browser, mode, lane, pid: launch.pid, navigatedTo: url ?? null, command: { binary: launch.binary, args: launch.args } });
+    return;
+  }
+  if (dryRun) {
+    ctx.stdout.write(`Would launch (${browser}, ${mode}): ${launch.binary} ${launch.args.join(" ")}\n`);
+    return;
+  }
+  ctx.stdout.write(`Launched ${label} (pid=${launch.pid ?? "?"}, mode=${mode})\nDebug port: ${lane.chromeDebugPort}\nProfile:    ${lane.chromeProfileDir}\n`);
+  if (browser === "firefox") {
+    ctx.stdout.write(`Firefox debug port serves WebDriver BiDi (ws://127.0.0.1:${lane.chromeDebugPort}/session), NOT Chrome CDP.\n`);
+  }
 }
 
 async function cmdLaunchChrome(ctx: CliContext): Promise<void> {
@@ -852,6 +915,8 @@ async function dispatch(args: ParsedArgs): Promise<void> {
       return cmdDoctor(ctx);
     case "launch-chrome":
       return cmdLaunchChrome(ctx);
+    case "open":
+      return cmdOpen(ctx);
     case "config":
       return cmdConfig(ctx);
     case "dashboard":

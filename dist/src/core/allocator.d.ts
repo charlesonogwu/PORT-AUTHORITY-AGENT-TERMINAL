@@ -1,4 +1,4 @@
-import { Lane, LaneStatus, PortRange } from "./lane.js";
+import { BrowserKind, Lane, LaneStatus, PortRange } from "./lane.js";
 import { PortObservation } from "./scanner.js";
 import { ChromeAttachVerdict } from "./chrome.js";
 export interface AllocateOptions {
@@ -28,6 +28,10 @@ export interface AllocateOptions {
     status?: LaneStatus;
     /** Optional browser script path the agent will use to talk to Chrome. */
     browserScript?: string;
+    /** Browser backend for this lane. Default "chrome". Firefox lanes get a
+     *  distinct profile dir (suffix "-firefox") so the two backends can never
+     *  share one. */
+    browser?: BrowserKind;
 }
 export interface AllocateResult {
     lane: Lane;
@@ -38,7 +42,7 @@ export interface AllocateResult {
     /** Number of active lanes after this allocation, when a cap is configured. */
     activeLaneCount?: number;
 }
-export declare function findExistingLane(lanes: Lane[], owner: string, cwd: string, sessionId?: string): Lane | undefined;
+export declare function findExistingLane(lanes: Lane[], owner: string, cwd: string, sessionId?: string, browser?: BrowserKind): Lane | undefined;
 /**
  * Reserve a lane for `owner` working in `cwd`. If an active reservation
  * already exists for this (owner, cwd, sessionId) tuple, it is returned

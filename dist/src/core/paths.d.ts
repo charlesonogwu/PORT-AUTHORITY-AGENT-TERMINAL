@@ -18,5 +18,6 @@ export declare function profilesDir(): string;
 export declare function profileDirFor(ownerSlug: string, projectSlug: string, options?: {
     sessionId?: string;
     dedupeSuffix?: string;
+    browser?: string;
 } | string): string;
 export declare function isWindows(): boolean;

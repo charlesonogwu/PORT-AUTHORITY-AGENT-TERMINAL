@@ -1,7 +1,8 @@
-import { KNOWN_LLM_OWNERS, Lane, LaneStatus, isStale, laneSessionId, normalizeCwd, ownerSlug, projectSlug } from "../core/lane.js";
+import { BrowserKind, KNOWN_LLM_OWNERS, Lane, LaneStatus, isStale, laneBrowser, laneSessionId, normalizeCwd, ownerSlug, projectSlug } from "../core/lane.js";
 import { listLanes } from "../core/registry.js";
 import { PortObservation } from "../core/scanner.js";
 import { extractUserDataDir, isChromeProcess } from "../core/chrome.js";
+import { extractFirefoxProfileDir } from "../core/firefox.js";
 
 /**
  * Where the dashboard sourced this entry. portpilot is the canonical
@@ -28,6 +29,7 @@ export interface UnifiedLane {
   appPort?: number;
   chromeDebugPort?: number;
   chromeProfileDir: string;
+  browser: BrowserKind;
   browserScript?: string;
   status: LaneStatus;
   createdAt: string;
@@ -50,6 +52,7 @@ function toUnified(l: Lane): UnifiedLane {
     cwd: l.cwd,
     sessionId: laneSessionId(l),
     chromeProfileDir: l.chromeProfileDir,
+    browser: laneBrowser(l),
     status: l.status,
     createdAt: l.createdAt,
     lastSeen: l.lastSeen,
@@ -72,6 +75,10 @@ export interface LiveChrome {
   command?: string;
   commandLine?: string;
   profileDir?: string;
+  /** Which browser this live process is. Absent = "chrome". Firefox live
+   *  processes are found by findAllAgentFirefoxes and tagged "firefox"; their
+   *  port is a WebDriver BiDi endpoint, not CDP. */
+  browser?: BrowserKind;
   /**
    * How the agent is talking to Chrome's DevTools Protocol:
    *   "port" — TCP listener on `port`, reachable from the dashboard for
@@ -173,6 +180,54 @@ export function findAllAgentChromes(snap: { processes: Map<number, { pid: number
       ? { port: Number(portMatch[1]), debugMode: "port", pid: proc.pid, command: proc.name, commandLine: cl }
       : { port: 0, debugMode: "pipe", pid: proc.pid, command: proc.name, commandLine: cl };
     if (profileDir !== undefined) live.profileDir = profileDir;
+    out.push(live);
+  }
+  return out;
+}
+
+const FIREFOX_NAMES = new Set([
+  "firefox.exe",
+  "firefox",
+  "firefox-bin",
+  "firefox-esr",
+  "librewolf.exe",
+  "librewolf",
+  "waterfox.exe",
+  "waterfox",
+]);
+
+function isFirefoxProcessName(name: string): boolean {
+  return FIREFOX_NAMES.has((name || "").toLowerCase());
+}
+
+/**
+ * Enumerate agent-launched Firefox parent processes (ones carrying a
+ * `-profile` dir — i.e. a PortPilot lane, never the user's default Firefox).
+ * Firefox's `-contentproc` child processes are skipped. The debug port (if
+ * present) is a WebDriver BiDi endpoint, so we tag debugMode "port" but the
+ * snapshot deliberately does NOT try Chrome CDP against it.
+ */
+export function findAllAgentFirefoxes(snap: { processes: Map<number, { pid: number; ppid: number; name: string; commandLine: string }> }): LiveChrome[] {
+  const out: LiveChrome[] = [];
+  const seen = new Set<number>();
+  for (const proc of snap.processes.values()) {
+    if (!isFirefoxProcessName(proc.name)) continue;
+    const cl = proc.commandLine ?? "";
+    if (/-contentproc/.test(cl)) continue; // Firefox child (renderer/gpu) process
+    const profileDir = extractFirefoxProfileDir(cl);
+    if (!profileDir) continue; // only PortPilot-launched Firefoxes carry -profile
+    if (seen.has(proc.pid)) continue;
+    seen.add(proc.pid);
+    const portMatch = /--remote-debugging-port[= ](\d+)/.exec(cl);
+    const live: LiveChrome = {
+      port: portMatch ? Number(portMatch[1]) : 0,
+      debugMode: "port",
+      pid: proc.pid,
+      command: proc.name,
+      commandLine: cl,
+      profileDir,
+      browser: "firefox",
+    };
     out.push(live);
   }
   return out;

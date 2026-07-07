@@ -1,6 +1,7 @@
-import { KNOWN_LLM_OWNERS, isStale, laneSessionId, normalizeCwd, ownerSlug, projectSlug } from "../core/lane.js";
+import { KNOWN_LLM_OWNERS, isStale, laneBrowser, laneSessionId, normalizeCwd, ownerSlug, projectSlug } from "../core/lane.js";
 import { listLanes } from "../core/registry.js";
 import { extractUserDataDir, isChromeProcess } from "../core/chrome.js";
+import { extractFirefoxProfileDir } from "../core/firefox.js";
 export async function readPortpilotLanes() {
     const lanes = await listLanes();
     return lanes.map((l) => toUnified(l));
@@ -14,6 +15,7 @@ function toUnified(l) {
         cwd: l.cwd,
         sessionId: laneSessionId(l),
         chromeProfileDir: l.chromeProfileDir,
+        browser: laneBrowser(l),
         status: l.status,
         createdAt: l.createdAt,
         lastSeen: l.lastSeen,
@@ -131,6 +133,55 @@ export function findAllAgentChromes(snap) {
             : { port: 0, debugMode: "pipe", pid: proc.pid, command: proc.name, commandLine: cl };
         if (profileDir !== undefined)
             live.profileDir = profileDir;
+        out.push(live);
+    }
+    return out;
+}
+const FIREFOX_NAMES = new Set([
+    "firefox.exe",
+    "firefox",
+    "firefox-bin",
+    "firefox-esr",
+    "librewolf.exe",
+    "librewolf",
+    "waterfox.exe",
+    "waterfox",
+]);
+function isFirefoxProcessName(name) {
+    return FIREFOX_NAMES.has((name || "").toLowerCase());
+}
+/**
+ * Enumerate agent-launched Firefox parent processes (ones carrying a
+ * `-profile` dir — i.e. a PortPilot lane, never the user's default Firefox).
+ * Firefox's `-contentproc` child processes are skipped. The debug port (if
+ * present) is a WebDriver BiDi endpoint, so we tag debugMode "port" but the
+ * snapshot deliberately does NOT try Chrome CDP against it.
+ */
+export function findAllAgentFirefoxes(snap) {
+    const out = [];
+    const seen = new Set();
+    for (const proc of snap.processes.values()) {
+        if (!isFirefoxProcessName(proc.name))
+            continue;
+        const cl = proc.commandLine ?? "";
+        if (/-contentproc/.test(cl))
+            continue; // Firefox child (renderer/gpu) process
+        const profileDir = extractFirefoxProfileDir(cl);
+        if (!profileDir)
+            continue; // only PortPilot-launched Firefoxes carry -profile
+        if (seen.has(proc.pid))
+            continue;
+        seen.add(proc.pid);
+        const portMatch = /--remote-debugging-port[= ](\d+)/.exec(cl);
+        const live = {
+            port: portMatch ? Number(portMatch[1]) : 0,
+            debugMode: "port",
+            pid: proc.pid,
+            command: proc.name,
+            commandLine: cl,
+            profileDir,
+            browser: "firefox",
+        };
         out.push(live);
     }
     return out;
