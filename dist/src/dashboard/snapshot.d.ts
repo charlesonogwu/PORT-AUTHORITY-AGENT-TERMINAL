@@ -10,6 +10,7 @@
  * `conflicts` warnings; we never let stale registry rows pollute the live
  * view.
  */
+import { BrowserKind } from "../core/lane.js";
 import { EntrySource } from "./sources.js";
 export interface CdpTab {
     id: string;
@@ -56,6 +57,9 @@ export interface LiveSession {
     debugMode: "port" | "pipe";
     appPort?: number;
     chromeProfileDir: string;
+    /** Which browser this session is: "chrome" (CDP) or "firefox" (WebDriver
+     *  BiDi debug endpoint; tabs not enumerable from the dashboard). */
+    browser: BrowserKind;
     /** True when the profile already holds a login/cookie/localStorage store —
      *  i.e. there is saved browser data the user could choose to erase. The
      *  dashboard shows a "saved" marker for these rows. Cheap to compute (a few

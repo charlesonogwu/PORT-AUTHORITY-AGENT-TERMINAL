@@ -1,4 +1,4 @@
-import { LaneStatus } from "../core/lane.js";
+import { BrowserKind, LaneStatus } from "../core/lane.js";
 import { PortObservation } from "../core/scanner.js";
 /**
  * Where the dashboard sourced this entry. portpilot is the canonical
@@ -24,6 +24,7 @@ export interface UnifiedLane {
     appPort?: number;
     chromeDebugPort?: number;
     chromeProfileDir: string;
+    browser: BrowserKind;
     browserScript?: string;
     status: LaneStatus;
     createdAt: string;
@@ -40,6 +41,10 @@ export interface LiveChrome {
     command?: string;
     commandLine?: string;
     profileDir?: string;
+    /** Which browser this live process is. Absent = "chrome". Firefox live
+     *  processes are found by findAllAgentFirefoxes and tagged "firefox"; their
+     *  port is a WebDriver BiDi endpoint, not CDP. */
+    browser?: BrowserKind;
     /**
      * How the agent is talking to Chrome's DevTools Protocol:
      *   "port" — TCP listener on `port`, reachable from the dashboard for
@@ -81,6 +86,21 @@ export declare function findLiveChromes(observations: PortObservation[]): LiveCh
  * caller is expected to fall back to `findLiveChromes` in that case.
  */
 export declare function findAllAgentChromes(snap: {
+    processes: Map<number, {
+        pid: number;
+        ppid: number;
+        name: string;
+        commandLine: string;
+    }>;
+}): LiveChrome[];
+/**
+ * Enumerate agent-launched Firefox parent processes (ones carrying a
+ * `-profile` dir — i.e. a PortPilot lane, never the user's default Firefox).
+ * Firefox's `-contentproc` child processes are skipped. The debug port (if
+ * present) is a WebDriver BiDi endpoint, so we tag debugMode "port" but the
+ * snapshot deliberately does NOT try Chrome CDP against it.
+ */
+export declare function findAllAgentFirefoxes(snap: {
     processes: Map<number, {
         pid: number;
         ppid: number;

@@ -30,6 +30,8 @@ export interface LiveSession {
    * "pipe" — stdio pipe owned by the launching agent (Playwright default)
    */
   debugMode: "port" | "pipe"
+  /** Which browser backend this lane runs. Absent/"chrome" is the default. */
+  browser?: "chrome" | "firefox"
   appPort?: number
   chromeProfileDir: string
   /** True when the profile already holds a login/cookie/localStorage store —

@@ -5,6 +5,22 @@
  * a Chrome profile directory, and metadata identifying who owns it.
  */
 export type LaneStatus = "reserved" | "active" | "stale" | "released";
+/**
+ * Which browser backend a lane launches/coordinates.
+ *
+ *   - "chrome"  — Chromium family via CDP (--remote-debugging-port). Default.
+ *   - "firefox" — Firefox with a dedicated -profile dir. Its debug port serves
+ *                 WebDriver BiDi (ws://127.0.0.1:<port>/session), NOT Chrome
+ *                 CDP — agents must use a BiDi-capable client (Playwright,
+ *                 WebDriver). PortPilot launches + coordinates; it does not
+ *                 drive either browser.
+ */
+export type BrowserKind = "chrome" | "firefox";
+/** Read a lane's browser defensively: lanes written before the field existed
+ *  (or by older versions) are Chrome lanes. */
+export declare function laneBrowser(lane: {
+    browser?: string;
+}): BrowserKind;
 export interface Lane {
     id: string;
     owner: string;
@@ -19,8 +35,17 @@ export interface Lane {
     sessionId: string;
     task?: string;
     appPort?: number;
+    /**
+     * Remote-debugging port. For Chrome lanes this is the CDP port; for Firefox
+     * lanes the same port serves WebDriver BiDi. Field name kept for
+     * backwards compatibility with existing registries and callers.
+     */
     chromeDebugPort?: number;
+    /** Dedicated browser profile dir (--user-data-dir for Chrome, -profile for
+     *  Firefox). Field name kept for backwards compatibility. */
     chromeProfileDir: string;
+    /** Browser backend. Absent = "chrome" (pre-0.3.7 lanes). */
+    browser?: BrowserKind;
     browserScript?: string;
     status: LaneStatus;
     createdAt: string;

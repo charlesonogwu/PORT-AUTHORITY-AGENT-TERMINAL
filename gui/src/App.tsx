@@ -674,6 +674,15 @@ function SessionRow({
                 inferred
               </Badge>
             )}
+            {s.browser === "firefox" && (
+              <Badge
+                variant="outline"
+                className="border-orange-500/40 px-1.5 py-0 text-[9px] font-normal uppercase text-orange-600 dark:text-orange-400"
+                title="Firefox lane — debug port is WebDriver BiDi, not Chrome CDP"
+              >
+                Firefox
+              </Badge>
+            )}
           </div>
         </TableCell>
         <TableCell>

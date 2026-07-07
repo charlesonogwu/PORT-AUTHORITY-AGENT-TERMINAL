@@ -17,7 +17,7 @@ import { loadConfig } from "../core/config.js";
 import { portpilotHome, registryPath } from "../core/paths.js";
 import { markStaleLanes } from "../core/registry.js";
 import { profileHasSavedData } from "../core/profiles.js";
-import { findAllAgentChromes, findLiveChromes, inferCwdFromProfile, inferOwnerFromProfile, inferProjectFromProfile, readPortpilotLanes, } from "./sources.js";
+import { findAllAgentChromes, findAllAgentFirefoxes, findLiveChromes, inferCwdFromProfile, inferOwnerFromProfile, inferProjectFromProfile, readPortpilotLanes, } from "./sources.js";
 import { collectProcessSnapshot } from "./process-info.js";
 import { inferAgentFromLiveChrome, walkParentChain } from "./agent-inference.js";
 import { BirthRegistry } from "./chrome-births.js";
@@ -54,10 +54,11 @@ function profilesEqual(a, b) {
         return false;
     return a.replace(/[\\/]+/g, "/").toLowerCase() === b.replace(/[\\/]+/g, "/").toLowerCase();
 }
-function findOwningLane(liveProfile, livePort, lanes) {
-    // Strict match: same port + same profile dir. Profile match is the
-    // authoritative signal — port alone is not enough.
-    return lanes.find((l) => l.chromeDebugPort === livePort && profilesEqual(l.chromeProfileDir, liveProfile));
+function findOwningLane(liveProfile, livePort, lanes, browser = "chrome") {
+    // Strict match: same browser + same port + same profile dir. Profile match is
+    // the authoritative signal — port alone is not enough. Browser must match so
+    // a Firefox process can't be matched to a Chrome lane (or vice versa).
+    return lanes.find((l) => l.browser === browser && l.chromeDebugPort === livePort && profilesEqual(l.chromeProfileDir, liveProfile));
 }
 function isInternalTab(t) {
     const url = t.url ?? "";
@@ -124,6 +125,7 @@ function buildLiveSession(live, ppLane, cdp, processSnap, births) {
         chromeDebugPort: live.port,
         debugMode: live.debugMode,
         chromeProfileDir: profile,
+        browser: live.browser ?? lane?.browser ?? "chrome",
         hasSavedData: false, // filled in by the caller (async stat check)
         tabs: cdp.tabs,
         primaryTabs: cdp.tabs.filter((t) => !isInternalTab(t)),
@@ -255,10 +257,11 @@ export async function buildSnapshot(opts = {}) {
     //      backup when the process snapshot is empty (non-Windows, perms
     //      denied, etc.) and as belt-and-braces for the port-mode case.
     const fromProcs = findAllAgentChromes(processSnap);
+    const fromFirefox = findAllAgentFirefoxes(processSnap);
     const fromScan = findLiveChromes(scan.observations);
     const seenPids = new Set();
     const liveChromes = [];
-    for (const lc of fromProcs) {
+    for (const lc of [...fromProcs, ...fromFirefox]) {
         if (lc.pid !== undefined)
             seenPids.add(lc.pid);
         liveChromes.push(lc);
@@ -288,10 +291,21 @@ export async function buildSnapshot(opts = {}) {
     // running in port mode. Pipe-mode Chromes can't be reached from outside
     // the launcher process, so we emit a friendly placeholder instead.
     const liveSessions = await Promise.all(liveChromes.map(async (live) => {
-        const ppLane = findOwningLane(live.profileDir, live.port, portpilotLanes);
-        const cdp = live.debugMode === "port" && live.port > 0
+        const liveBrowser = live.browser ?? "chrome";
+        const ppLane = findOwningLane(live.profileDir, live.port, portpilotLanes, liveBrowser);
+        // Firefox's debug port is WebDriver BiDi, not Chrome CDP — never poke it
+        // with CDP HTTP calls (they'd just time out and produce a bogus error).
+        // Chrome pipe-mode also has no reachable CDP. Both degrade cleanly to
+        // "no enumerable tabs" with an honest reason.
+        const isFirefox = liveBrowser === "firefox";
+        const cdp = !isFirefox && live.debugMode === "port" && live.port > 0
             ? await gatherCdp(live.port, cdpTimeoutMs)
-            : { tabs: [], error: "pipe-mode CDP — only the launching agent can read this Chrome's tabs" };
+            : {
+                tabs: [],
+                error: isFirefox
+                    ? "Firefox lane: debug port is WebDriver BiDi (not Chrome CDP); the dashboard does not enumerate Firefox tabs"
+                    : "pipe-mode CDP — only the launching agent can read this Chrome's tabs",
+            };
         const session = buildLiveSession(live, ppLane, cdp, processSnap, births);
         session.hasSavedData = session.chromeProfileDir ? await profileHasSavedData(session.chromeProfileDir) : false;
         return session;

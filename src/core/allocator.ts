@@ -1,4 +1,6 @@
 import {
+  BrowserKind,
+  laneBrowser,
   DEFAULT_APP_PORT_RANGE,
   DEFAULT_CHROME_DEBUG_RANGE,
   DEFAULT_SESSION_ID,
@@ -17,7 +19,8 @@ import {
 } from "./lane.js";
 import { profileDirFor } from "./paths.js";
 import { PortObservation, isPortInUse, scanPorts } from "./scanner.js";
-import { ChromeAttachVerdict, evaluateChromeAttach } from "./chrome.js";
+import { ChromeAttachVerdict } from "./chrome.js";
+import { evaluateBrowserAttach } from "./browsers.js";
 import { listLanes, updateRegistry } from "./registry.js";
 import { CapacityError, loadConfig } from "./config.js";
 
@@ -48,6 +51,10 @@ export interface AllocateOptions {
   status?: LaneStatus;
   /** Optional browser script path the agent will use to talk to Chrome. */
   browserScript?: string;
+  /** Browser backend for this lane. Default "chrome". Firefox lanes get a
+   *  distinct profile dir (suffix "-firefox") so the two backends can never
+   *  share one. */
+  browser?: BrowserKind;
 }
 
 export interface AllocateResult {
@@ -98,16 +105,17 @@ function buildProfileDir(
   sessionId: string,
   taken: Set<string>,
   override?: string,
+  browser?: BrowserKind,
 ): string {
   if (override) return override;
   const o = ownerSlug(owner);
   const p = projectSlug(project);
   const s = sessionId === DEFAULT_SESSION_ID ? undefined : sessionId;
-  const base = profileDirFor(o, p, { sessionId: s });
+  const base = profileDirFor(o, p, { sessionId: s, browser });
   if (!taken.has(base.toLowerCase())) return base;
   let suffix = 2;
   while (true) {
-    const candidate = profileDirFor(o, p, { sessionId: s, dedupeSuffix: String(suffix) });
+    const candidate = profileDirFor(o, p, { sessionId: s, browser, dedupeSuffix: String(suffix) });
     if (!taken.has(candidate.toLowerCase())) return candidate;
     suffix++;
   }
@@ -127,6 +135,7 @@ export function findExistingLane(
   owner: string,
   cwd: string,
   sessionId: string = DEFAULT_SESSION_ID,
+  browser: BrowserKind = "chrome",
 ): Lane | undefined {
   const target = normalizeCwd(cwd);
   // Match canonical-against-canonical so a registry that still contains
@@ -134,7 +143,11 @@ export function findExistingLane(
   // canonicalizeOwner shipped) can still satisfy idempotency for new
   // callers passing the same raw inputs. Without this, allocateLane would
   // create a duplicate lane on every retry, eating ports + profile dirs.
+  // Browser must match too: a Chrome lane and a Firefox lane for the same
+  // (owner, cwd, session) are DIFFERENT lanes — reusing one for the other
+  // would hand a Firefox caller a Chrome profile dir.
   return lanes.find((l) => {
+    if (laneBrowser(l) !== browser) return false;
     if (normalizeCwd(l.cwd) !== target) return false;
     if (laneSessionId(l) !== sessionId) return false;
     if (l.status === "released") return false;
@@ -194,7 +207,8 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
       return lane;
     });
 
-    const existing = findExistingLane(lanes, ownerCanonical, opts.cwd, sessionId);
+    const browser: BrowserKind = opts.browser ?? "chrome";
+    const existing = findExistingLane(lanes, ownerCanonical, opts.cwd, sessionId, browser);
     if (existing) {
       alreadyExisted = true;
       // Re-activate stale lanes when the caller comes back. This is what
@@ -229,7 +243,7 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
     if (wantChrome && chromeDebugPort === undefined) {
       throw new Error(`No free Chrome debug port in range ${chromeRange.start}-${chromeRange.end}`);
     }
-    const profileDir = buildProfileDir(ownerCanonical, opts.cwd, sessionId, takenProfileDirs(lanes), opts.profileDir);
+    const profileDir = buildProfileDir(ownerCanonical, opts.cwd, sessionId, takenProfileDirs(lanes), opts.profileDir, browser);
     const lane: Lane = {
       id: opts.id ?? newLaneId(),
       owner: ownerCanonical,
@@ -240,6 +254,9 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
       appPort,
       chromeDebugPort,
       chromeProfileDir: profileDir,
+      // Only persisted for non-chrome lanes: keeps every pre-0.3.7 registry
+      // byte-compatible and "absent = chrome" unambiguous.
+      ...(browser !== "chrome" ? { browser } : {}),
       browserScript: opts.browserScript,
       status: opts.status ?? "reserved",
       createdAt: nowIso(),
@@ -296,7 +313,9 @@ export interface CheckResult {
  */
 export async function checkLane(lane: Lane): Promise<CheckResult> {
   const scan = await scanPorts();
-  const verdict = evaluateChromeAttach(lane, scan.observations);
+  // Routed by the lane's browser: Firefox lanes are judged against Firefox
+  // processes + -profile args, never mistaken for (or matched to) Chrome CDP.
+  const verdict = evaluateBrowserAttach(lane, scan.observations);
   const appPortInUse = typeof lane.appPort === "number" ? isPortInUse(scan.observations, lane.appPort) : false;
   const appPortObservation =
     typeof lane.appPort === "number"

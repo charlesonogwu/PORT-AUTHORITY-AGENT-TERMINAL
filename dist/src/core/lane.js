@@ -4,6 +4,11 @@
  * A "lane" is one agent's reserved working slot: an app port, a Chrome debug port,
  * a Chrome profile directory, and metadata identifying who owns it.
  */
+/** Read a lane's browser defensively: lanes written before the field existed
+ *  (or by older versions) are Chrome lanes. */
+export function laneBrowser(lane) {
+    return lane.browser === "firefox" ? "firefox" : "chrome";
+}
 /**
  * The implicit session id used when a caller does not supply one. Lanes
  * stored before sessionId existed are read back as if they had this id, so

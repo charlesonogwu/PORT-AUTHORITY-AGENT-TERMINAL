@@ -11,6 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.7] — Firefox lanes (opt-in), alongside Chrome
+
+### Added
+
+- **`--browser firefox` on lanes.** Every lane now has a browser backend —
+  `chrome` (default) or `firefox`. Chrome behaviour is unchanged; Firefox is
+  purely opt-in, for agents that want to browse or sign in with Firefox.
+- **`paat open` — one-step reserve + launch + navigate**, for either browser:
+  ```
+  paat open --owner codex --cwd <project> --browser firefox --mode visible --url about:blank
+  ```
+  (`paat reserve` and the MCP \`open\` tool also take \`--browser\` / \`browser\`.)
+- **A generic \`launch_browser_lane\` MCP tool** that launches whichever browser
+  the lane was reserved for. \`launch_chrome_lane\` is untouched (back-compat).
+- **Dashboard shows a "Firefox" badge** on Firefox lanes, with browser type,
+  pid, profile dir, cwd, owner, session and task in the row as before.
+
+### Firefox: what it does and does NOT do (no faking)
+
+- **Dedicated profile, never yours.** Firefox launches with
+  \`-profile <PortPilot dir>\` + \`-no-remote\`, so it uses an isolated PortPilot
+  profile and never joins or mutates your real/default Firefox. The profile dir
+  gets a \`-firefox\` suffix so it can never collide with a Chrome lane's profile.
+- **Launch + coordinate only.** \`--remote-debugging-port\` on Firefox serves
+  **WebDriver BiDi** (\`ws://127.0.0.1:<port>/session\`), **not** Chrome CDP.
+  Agents drive it with a BiDi/WebDriver client (e.g. Playwright's firefox).
+  PortPilot itself never drives the browser.
+- **No tab enumeration.** Because the port is BiDi not CDP, the dashboard
+  cannot list a Firefox lane's tabs (it says so on the row instead of guessing).
+- **\`visible\` and \`headless\` only.** Firefox has no off-screen window
+  positioning, so \`--mode background\` is **refused** for Firefox rather than
+  faked. Use \`chrome\` if you need background.
+- **\`check_lane\` understands Firefox lanes** — it inspects the \`-profile\` of the
+  process on the port and does NOT treat a Firefox lane as a Chrome CDP lane.
+
+### Compatibility
+
+- Existing Chrome lanes are byte-identical: the \`browser\` field is only written
+  when it is \`firefox\`, and Chrome profile paths are unchanged (no suffix).
+
 ## [0.3.6] — erase a session's saved data from the dashboard
 
 ### Added
