@@ -11,6 +11,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.8] — Microsoft Edge lanes
+
+### Added
+
+- **`--browser edge`** — the third lane backend, alongside `chrome` (default)
+  and `firefox`. Because Edge IS Chromium, an Edge lane behaves exactly like a
+  Chrome lane where it matters:
+  - the debug port serves **real Chrome CDP** (tab enumeration works, agents
+    drive it with any CDP client),
+  - **all three modes** work: `visible`, `background` (off-screen), `headless`,
+  - profile isolation via `--user-data-dir` with a dedicated PortPilot dir
+    (`-edge` suffix) — never your personal Edge profile.
+- Works everywhere the browser option exists: `paat open --browser edge`,
+  `paat reserve --browser edge`, and the MCP `open` / `reserve_lane` /
+  `launch_browser_lane` tools (`msedge` accepted as an alias).
+- **Binary auto-detection** probes both Edge install dirs on Windows
+  (`Program Files` and `Program Files (x86)`), plus macOS and Linux paths.
+  Override with `PORTPILOT_EDGE_BIN`.
+- **Dashboard "Edge" badge**; live msedge processes are tagged so they match
+  their Edge lanes.
+- `check_lane` on an Edge lane requires an **Edge** process on the port — a
+  Chrome squatting there reports `unsafe-unknown`, not a false attach.
+- CLI now rejects an unknown `--browser` value loudly instead of silently
+  falling back to Chrome.
+
+### Compatibility
+
+- Chrome and Firefox lanes are untouched; `browser` is still only persisted
+  when it isn't `chrome`. Chrome/Edge/Firefox lanes for the same
+  (owner, cwd, session) are three distinct lanes with separate profiles.
+
 ## [0.3.7] — Firefox lanes (opt-in), alongside Chrome
 
 ### Added

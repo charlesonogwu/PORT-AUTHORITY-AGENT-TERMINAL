@@ -41,9 +41,10 @@ export interface LiveChrome {
     command?: string;
     commandLine?: string;
     profileDir?: string;
-    /** Which browser this live process is. Absent = "chrome". Firefox live
-     *  processes are found by findAllAgentFirefoxes and tagged "firefox"; their
-     *  port is a WebDriver BiDi endpoint, not CDP. */
+    /** Which browser this live process is. Absent = "chrome". Edge processes
+     *  (msedge) are tagged "edge" — still Chromium/CDP, but tagged so they match
+     *  Edge lanes. Firefox live processes are found by findAllAgentFirefoxes and
+     *  tagged "firefox"; their port is a WebDriver BiDi endpoint, not CDP. */
     browser?: BrowserKind;
     /**
      * How the agent is talking to Chrome's DevTools Protocol:

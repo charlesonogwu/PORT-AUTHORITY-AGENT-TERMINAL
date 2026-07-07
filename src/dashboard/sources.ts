@@ -75,9 +75,10 @@ export interface LiveChrome {
   command?: string;
   commandLine?: string;
   profileDir?: string;
-  /** Which browser this live process is. Absent = "chrome". Firefox live
-   *  processes are found by findAllAgentFirefoxes and tagged "firefox"; their
-   *  port is a WebDriver BiDi endpoint, not CDP. */
+  /** Which browser this live process is. Absent = "chrome". Edge processes
+   *  (msedge) are tagged "edge" — still Chromium/CDP, but tagged so they match
+   *  Edge lanes. Firefox live processes are found by findAllAgentFirefoxes and
+   *  tagged "firefox"; their port is a WebDriver BiDi endpoint, not CDP. */
   browser?: BrowserKind;
   /**
    * How the agent is talking to Chrome's DevTools Protocol:
@@ -117,6 +118,7 @@ export function findLiveChromes(observations: PortObservation[]): LiveChrome[] {
     if (o.command !== undefined) live.command = o.command;
     if (o.commandLine !== undefined) live.commandLine = o.commandLine;
     if (profileDir !== undefined) live.profileDir = profileDir;
+    if (isEdgeName(o.command)) live.browser = "edge";
     out.push(live);
   }
   return out;
@@ -138,6 +140,13 @@ const CHROMIUM_NAMES = new Set([
 
 function isChromiumProcessName(name: string): boolean {
   return CHROMIUM_NAMES.has((name || "").toLowerCase());
+}
+
+/** Edge is Chromium, but lanes distinguish it — tag msedge processes "edge" so
+ *  they match Edge lanes (findOwningLane requires browser equality). */
+function isEdgeName(name: string | undefined): boolean {
+  const n = (name || "").toLowerCase();
+  return n === "msedge.exe" || n === "msedge" || n === "microsoft edge" || n.startsWith("microsoft-edge");
 }
 
 /**
@@ -180,6 +189,7 @@ export function findAllAgentChromes(snap: { processes: Map<number, { pid: number
       ? { port: Number(portMatch[1]), debugMode: "port", pid: proc.pid, command: proc.name, commandLine: cl }
       : { port: 0, debugMode: "pipe", pid: proc.pid, command: proc.name, commandLine: cl };
     if (profileDir !== undefined) live.profileDir = profileDir;
+    if (isEdgeName(proc.name)) live.browser = "edge";
     out.push(live);
   }
   return out;

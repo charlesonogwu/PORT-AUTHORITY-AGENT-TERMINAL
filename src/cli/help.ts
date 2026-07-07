@@ -10,7 +10,7 @@ COMMANDS:
                   [--session <id>]   parallel session id (different sessions = different ports)
                   [--task "..."] [--app-range 3000-3099] [--chrome-range 9322-9399]
                   [--no-app-port] [--no-chrome-port] [--browser-script <path>]
-                  [--browser chrome|firefox] [--json]
+                  [--browser chrome|edge|firefox] [--json]
   check --owner <n> --cwd <p>   Verify the lane is safe to use right now (Chrome attach safety)
                   [--session <id>] [--json]
   release --owner <n> --cwd <p> Mark a lane as released
@@ -46,13 +46,17 @@ COMMANDS:
                        headless    no window at all (--headless=new); some sites block it
                        (override globally via PORTPILOT_CHROME_MODE env or the
                         chromeMode field in ~/.portpilot/config.json)
-  open --owner <n> --cwd <p>    Reserve + launch + navigate in ONE step, for Chrome or Firefox
+  open --owner <n> --cwd <p>    Reserve + launch + navigate in ONE step, for Chrome, Edge, or Firefox
                   [--session <id>] [--task "..."] [--url <url>]
-                  [--browser chrome|firefox]   default chrome
+                  [--browser chrome|edge|firefox]   default chrome
                   [--mode visible|background|headless]   firefox has no 'background'
                   [--dry-run] [--bin <path>] [--json]
-                       Firefox notes: launches with a DEDICATED PortPilot profile
-                       (never your default Firefox) + -no-remote; the debug port is
+                       Every browser gets a DEDICATED PortPilot profile — never your
+                       personal browser profile.
+                       Edge notes: Microsoft Edge is Chromium, so the debug port is
+                       real Chrome CDP and all three modes work (like Chrome).
+                       Override binary with PORTPILOT_EDGE_BIN.
+                       Firefox notes: launches with -no-remote; the debug port is
                        WebDriver BiDi (ws://127.0.0.1:<port>/session), NOT Chrome CDP,
                        so the dashboard can't enumerate Firefox tabs.
   config <subcommand>           Manage ~/.portpilot/config.json
@@ -94,6 +98,7 @@ EXAMPLES:
   portpilot reserve --owner codex --cwd C:\\Users\\me\\Downloads\\vend-site --task "ship checkout"
   portpilot check  --owner codex --cwd C:\\Users\\me\\Downloads\\vend-site
   portpilot open   --owner codex --cwd C:\\Users\\me\\Downloads\\vend-site --browser firefox --url about:blank
+  portpilot open   --owner codex --cwd C:\\Users\\me\\Downloads\\vend-site --browser edge --mode background
   portpilot list --json
   portpilot doctor
 

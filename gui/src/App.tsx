@@ -683,6 +683,15 @@ function SessionRow({
                 Firefox
               </Badge>
             )}
+            {s.browser === "edge" && (
+              <Badge
+                variant="outline"
+                className="border-sky-500/40 px-1.5 py-0 text-[9px] font-normal uppercase text-sky-600 dark:text-sky-400"
+                title="Microsoft Edge lane — Chromium, real Chrome CDP on the debug port"
+              >
+                Edge
+              </Badge>
+            )}
           </div>
         </TableCell>
         <TableCell>
