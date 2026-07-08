@@ -168,7 +168,11 @@ function isFirefoxProcessName(name) {
  * snapshot deliberately does NOT try Chrome CDP against it.
  */
 export function findAllAgentFirefoxes(snap) {
-    const out = [];
+    // Collect candidates first: on Windows, Firefox runs a LAUNCHER process that
+    // spawns the real browser process with the IDENTICAL command line (both carry
+    // -profile, neither is -contentproc). Without deduping, every Firefox lane
+    // shows up twice on the dashboard.
+    const candidates = [];
     const seen = new Set();
     for (const proc of snap.processes.values()) {
         if (!isFirefoxProcessName(proc.name))
@@ -182,19 +186,24 @@ export function findAllAgentFirefoxes(snap) {
         if (seen.has(proc.pid))
             continue;
         seen.add(proc.pid);
-        const portMatch = /--remote-debugging-port[= ](\d+)/.exec(cl);
-        const live = {
+        candidates.push({ pid: proc.pid, ppid: proc.ppid, name: proc.name, cl, profileDir });
+    }
+    // Drop the launcher: if another candidate with the same profile has us as
+    // its parent, we are the launcher — keep the child (the actual browser that
+    // owns the BiDi port and the window).
+    const deduped = candidates.filter((c) => !candidates.some((other) => other.ppid === c.pid && other.profileDir === c.profileDir));
+    return deduped.map((c) => {
+        const portMatch = /--remote-debugging-port[= ](\d+)/.exec(c.cl);
+        return {
             port: portMatch ? Number(portMatch[1]) : 0,
             debugMode: "port",
-            pid: proc.pid,
-            command: proc.name,
-            commandLine: cl,
-            profileDir,
+            pid: c.pid,
+            command: c.name,
+            commandLine: c.cl,
+            profileDir: c.profileDir,
             browser: "firefox",
         };
-        out.push(live);
-    }
-    return out;
+    });
 }
 function profilesEqual(a, b) {
     if (!a || !b)

@@ -218,7 +218,11 @@ function isFirefoxProcessName(name: string): boolean {
  * snapshot deliberately does NOT try Chrome CDP against it.
  */
 export function findAllAgentFirefoxes(snap: { processes: Map<number, { pid: number; ppid: number; name: string; commandLine: string }> }): LiveChrome[] {
-  const out: LiveChrome[] = [];
+  // Collect candidates first: on Windows, Firefox runs a LAUNCHER process that
+  // spawns the real browser process with the IDENTICAL command line (both carry
+  // -profile, neither is -contentproc). Without deduping, every Firefox lane
+  // shows up twice on the dashboard.
+  const candidates: Array<{ pid: number; ppid: number; name: string; cl: string; profileDir: string }> = [];
   const seen = new Set<number>();
   for (const proc of snap.processes.values()) {
     if (!isFirefoxProcessName(proc.name)) continue;
@@ -228,19 +232,26 @@ export function findAllAgentFirefoxes(snap: { processes: Map<number, { pid: numb
     if (!profileDir) continue; // only PortPilot-launched Firefoxes carry -profile
     if (seen.has(proc.pid)) continue;
     seen.add(proc.pid);
-    const portMatch = /--remote-debugging-port[= ](\d+)/.exec(cl);
-    const live: LiveChrome = {
-      port: portMatch ? Number(portMatch[1]) : 0,
-      debugMode: "port",
-      pid: proc.pid,
-      command: proc.name,
-      commandLine: cl,
-      profileDir,
-      browser: "firefox",
-    };
-    out.push(live);
+    candidates.push({ pid: proc.pid, ppid: proc.ppid, name: proc.name, cl, profileDir });
   }
-  return out;
+  // Drop the launcher: if another candidate with the same profile has us as
+  // its parent, we are the launcher — keep the child (the actual browser that
+  // owns the BiDi port and the window).
+  const deduped = candidates.filter(
+    (c) => !candidates.some((other) => other.ppid === c.pid && other.profileDir === c.profileDir),
+  );
+  return deduped.map((c) => {
+    const portMatch = /--remote-debugging-port[= ](\d+)/.exec(c.cl);
+    return {
+      port: portMatch ? Number(portMatch[1]) : 0,
+      debugMode: "port" as const,
+      pid: c.pid,
+      command: c.name,
+      commandLine: c.cl,
+      profileDir: c.profileDir,
+      browser: "firefox" as const,
+    };
+  });
 }
 
 function profilesEqual(a?: string, b?: string): boolean {

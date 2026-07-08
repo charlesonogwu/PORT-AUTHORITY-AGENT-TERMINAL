@@ -647,7 +647,7 @@ function SessionRow({
   return (
     <>
       <TableRow
-        className={cn("cursor-pointer", s.cdpError && "bg-destructive/5")}
+        className={cn("cursor-pointer", s.cdpError && s.browser !== "firefox" && "bg-destructive/5")}
         onClick={() => setOpen((o) => !o)}
       >
         <TableCell>
@@ -712,8 +712,18 @@ function SessionRow({
                 {shortUrl(s.primaryTabs[0].url)}
               </div>
             </div>
+          ) : s.browser === "firefox" ? (
+            <div
+              className="truncate text-xs text-muted-foreground italic"
+              title={s.cdpError ?? undefined}
+            >
+              Firefox lane — tab list unavailable (BiDi); drive it with the page_* tools
+            </div>
           ) : (
-            <div className="text-xs text-muted-foreground italic">
+            <div
+              className="truncate text-xs text-muted-foreground italic"
+              title={s.cdpError ?? undefined}
+            >
               {s.cdpError ? `CDP error: ${s.cdpError}` : "no open pages"}
             </div>
           )}

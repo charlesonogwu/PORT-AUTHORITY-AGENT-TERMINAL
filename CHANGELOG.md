@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.10] — dashboard: Firefox rows fixed (dedupe + readable note)
+
+### Fixed
+
+- **Firefox lanes no longer appear twice.** On Windows, Firefox runs a
+  launcher process that spawns the real browser with an identical command
+  line; the dashboard counted both. The launcher is now dropped — one row per
+  Firefox, with the pid of the process that actually owns the window/port.
+- **The Firefox "CDP error" text no longer wrecks the row layout.** The long
+  message overflowed the Current-page column across port/source/action cells.
+  It is now truncated, and Firefox lanes show a neutral note — "Firefox lane —
+  tab list unavailable (BiDi); drive it with the page_* tools" — instead of a
+  red error tint: not being CDP is not an error.
+- Snapshot JSON message updated to point at the page_* tools.
+
 ## [0.3.9] — drive Firefox like Chrome: page control over BiDi + CDP
 
 Firefox lanes launched fine since 0.3.7, but agents fluent in Chrome CDP had
