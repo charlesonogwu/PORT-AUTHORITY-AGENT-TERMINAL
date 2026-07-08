@@ -303,7 +303,7 @@ export async function buildSnapshot(opts = {}) {
             : {
                 tabs: [],
                 error: isFirefox
-                    ? "Firefox lane: debug port is WebDriver BiDi (not Chrome CDP); the dashboard does not enumerate Firefox tabs"
+                    ? "Firefox lane: BiDi debug port (not Chrome CDP) — tab list unavailable; drive it with the page_* tools"
                     : "pipe-mode CDP — only the launching agent can read this Chrome's tabs",
             };
         const session = buildLiveSession(live, ppLane, cdp, processSnap, births);
