@@ -8,7 +8,8 @@ import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "..
 import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
 import { loadConfig } from "../core/config.js";
 import { portpilotHome, profilesDir } from "../core/paths.js";
-import { BrowserKind, isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
+import { BrowserKind, Lane, isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
+import { PageControlError, PageController, openPageController } from "../core/pagecontrol.js";
 
 /**
  * Build the MCP server, registering one tool per CLI verb. The MCP server
@@ -145,7 +146,7 @@ export function buildMcpServer(): McpServer {
         dashboardUrl: "http://127.0.0.1:7321/",
         navigatedTo: args.url ?? null,
         ...(browser === "firefox"
-          ? { note: "Firefox lane: debug port serves WebDriver BiDi (ws://127.0.0.1:" + lane.chromeDebugPort + "/session), not Chrome CDP." }
+          ? { note: "Firefox lane: debug port serves WebDriver BiDi (ws://127.0.0.1:" + lane.chromeDebugPort + "/session), not Chrome CDP. Drive it with the page_* tools (page_goto/page_text/page_eval/page_click/page_fill/page_screenshot) — they speak BiDi for you." }
           : {}),
       });
     },
@@ -397,10 +398,132 @@ export function buildMcpServer(): McpServer {
         command: { binary: launch.binary, args: launch.args },
         pid: launch.pid,
         ...(browser === "firefox"
-          ? { note: "Firefox lane: debug port serves WebDriver BiDi (ws://127.0.0.1:" + lane.chromeDebugPort + "/session), not Chrome CDP." }
+          ? { note: "Firefox lane: debug port serves WebDriver BiDi (ws://127.0.0.1:" + lane.chromeDebugPort + "/session), not Chrome CDP. Drive it with the page_* tools (page_goto/page_text/page_eval/page_click/page_fill/page_screenshot) — they speak BiDi for you." }
           : {}),
       });
     },
+  );
+
+  // ── PAGE CONTROL: one interface for every browser backend ───────────────
+  // Firefox is driven over WebDriver BiDi, Chrome/Edge over CDP — same tools,
+  // same semantics, so agents don't need protocol-specific fluency. Only the
+  // lane's OWN browser (matching dedicated profile) is ever controlled.
+
+  const pageToolTarget = {
+    owner: z.string().min(1).describe("Lane owner (LLM provider name, e.g. 'codex')."),
+    cwd: z.string().min(1).describe("Lane project directory."),
+    sessionId: z.string().optional().describe("Lane session id, if the lane was reserved with one."),
+    tab: z.string().optional().describe("Which tab: an id from page_tabs, a 0-based index ('0','1',…), or a url/title substring (e.g. 'checkout'). Omit for the first tab. NOTE: Firefox tab ids change between calls — prefer index or substring for Firefox lanes."),
+  };
+
+  async function withPage(
+    args: { owner: string; cwd: string; sessionId?: string },
+    fn: (page: PageController, lane: Lane) => Promise<Record<string, unknown>>,
+  ) {
+    const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}) });
+    if (!lane) {
+      return jsonResult({ ok: false, error: `no lane found for owner=${args.owner} cwd=${args.cwd}${args.sessionId ? ` sessionId=${args.sessionId}` : ""}. Reserve + launch with 'open' first.` });
+    }
+    let page: PageController | undefined;
+    try {
+      page = await openPageController(lane);
+      const result = await fn(page, lane);
+      return jsonResult({ ok: true, browser: page.browser, ...result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResult({ ok: false, error: msg, ...(err instanceof PageControlError ? {} : { errorType: (err as Error).name }) });
+    } finally {
+      await page?.close();
+    }
+  }
+
+  server.registerTool(
+    "page_tabs",
+    {
+      title: "List the open tabs in a lane's browser",
+      description:
+        "List open tabs (id, url, title) in the lane's browser — works for chrome, edge (CDP), and firefox (WebDriver BiDi) lanes alike. " +
+        "Tab ids feed the optional 'tab' argument of the other page_* tools. The lane's browser must already be running (use 'open').",
+      inputSchema: { owner: pageToolTarget.owner, cwd: pageToolTarget.cwd, sessionId: pageToolTarget.sessionId },
+    },
+    async (args) => withPage(args, async (page) => ({ tabs: await page.tabs() })),
+  );
+
+  server.registerTool(
+    "page_goto",
+    {
+      title: "Navigate a lane's browser tab and wait for the load to finish",
+      description:
+        "Navigate the lane's browser to a URL and wait until the document load completes, then return the final url + title as confirmation. " +
+        "Works identically for chrome/edge (CDP) and firefox (BiDi) lanes.",
+      inputSchema: { ...pageToolTarget, url: z.string().min(1).describe("http/https/about/file/data URL to open.") },
+    },
+    async (args) => withPage(args, async (page) => ({ page: await page.navigate(args.url, args.tab) })),
+  );
+
+  server.registerTool(
+    "page_eval",
+    {
+      title: "Evaluate JavaScript in a lane's browser page",
+      description:
+        "Evaluate a JavaScript EXPRESSION in the page and return its value (awaited if it's a promise, JSON round-tripped). " +
+        "Use for DOM inspection and page state: document.title, [...document.querySelectorAll('a')].map(a=>a.href), fetch(...).then(r=>r.json()), etc. " +
+        "Multi-statement code must be wrapped in an IIFE: (()=>{ ...; return value })(). Works for chrome/edge (CDP) and firefox (BiDi) lanes.",
+      inputSchema: { ...pageToolTarget, expression: z.string().min(1).describe("A single JS expression. Its (awaited) value is returned as JSON.") },
+    },
+    async (args) => withPage(args, async (page) => ({ value: await page.evalExpression(args.expression, args.tab) })),
+  );
+
+  server.registerTool(
+    "page_text",
+    {
+      title: "Read the visible text of a lane's browser page",
+      description:
+        "Return the trimmed visible text of the page body, or of the first element matching a CSS selector. Capped at 20k chars " +
+        "(truncated flag set when clipped). The cheap way to 'look at' a page without a screenshot.",
+      inputSchema: { ...pageToolTarget, selector: z.string().optional().describe("Optional CSS selector; omit for the whole page body.") },
+    },
+    async (args) => withPage(args, async (page) => ({ result: await page.text(args.selector, args.tab) })),
+  );
+
+  server.registerTool(
+    "page_click",
+    {
+      title: "Click an element in a lane's browser page",
+      description:
+        "Click the first element matching a CSS selector (scrolled into view first). Returns {clicked:false, error} when nothing matches. " +
+        "Same behaviour on chrome/edge and firefox lanes.",
+      inputSchema: { ...pageToolTarget, selector: z.string().min(1).describe("CSS selector of the element to click.") },
+    },
+    async (args) => withPage(args, async (page) => ({ result: await page.click(args.selector, args.tab) })),
+  );
+
+  server.registerTool(
+    "page_fill",
+    {
+      title: "Fill a form field in a lane's browser page",
+      description:
+        "Set the value of the first input/textarea/select/contenteditable matching a CSS selector and dispatch the input/change events " +
+        "frameworks listen for (React-safe native setter). Returns the resulting value as confirmation.",
+      inputSchema: {
+        ...pageToolTarget,
+        selector: z.string().min(1).describe("CSS selector of the form control."),
+        value: z.string().describe("The value to set."),
+      },
+    },
+    async (args) => withPage(args, async (page) => ({ result: await page.fill(args.selector, args.value, args.tab) })),
+  );
+
+  server.registerTool(
+    "page_screenshot",
+    {
+      title: "Screenshot a lane's browser tab to a PNG file",
+      description:
+        "Capture the tab as a PNG and save it to disk (default: ~/.portpilot/shots/<lane>-<ts>.png). Returns the file path — read it with " +
+        "an image-capable tool if you need to see it. Works for chrome/edge (CDP) and firefox (BiDi) lanes.",
+      inputSchema: { ...pageToolTarget, path: z.string().optional().describe("Optional output .png path. Default: ~/.portpilot/shots/.") },
+    },
+    async (args) => withPage(args, async (page) => ({ screenshot: await page.screenshot(args.path, args.tab) })),
   );
 
   server.registerTool(

@@ -11,6 +11,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.9] — drive Firefox like Chrome: page control over BiDi + CDP
+
+Firefox lanes launched fine since 0.3.7, but agents fluent in Chrome CDP had
+no way to actually DRIVE Firefox (its port speaks WebDriver BiDi). This
+release adds a uniform page-control layer so Firefox is as agent-controllable
+as Chrome/Edge — same tools, same semantics, any backend.
+
+### Added
+
+- **`page_*` MCP tools** — one interface for every lane browser, routed to
+  WebDriver BiDi (firefox) or CDP (chrome/edge) under the hood:
+  - `page_tabs` — list open tabs (id, url, title)
+  - `page_goto` — navigate + wait for the load to complete, returns final
+    url + title (reliable navigation confirmation)
+  - `page_eval` — evaluate a JS expression in the page, get its JSON value
+    (DOM/page-state inspection)
+  - `page_text` — visible text of the page or a selector (capped 20k chars)
+  - `page_click` — click by CSS selector (scrolled into view first)
+  - `page_fill` — set a form field with React-safe native setter +
+    input/change events
+  - `page_screenshot` — PNG to disk (default `~/.portpilot/shots/`)
+- **`paat page <tabs|goto|eval|text|click|fill|screenshot>`** — the same
+  seven verbs as CLI commands, for shell-based agents.
+- Both are built on one in-page JS layer, so Chrome, Edge, and Firefox
+  behave IDENTICALLY from the agent's point of view.
+- Zero new dependencies — uses Node's built-in WebSocket + fetch (Node ≥ 22).
+
+### Safety
+
+- Page control REFUSES to touch a port unless the lane's attach verdict is
+  `safe-attach` — i.e. the process on the port is the lane's own browser
+  with the lane's own dedicated profile. PortPilot will never inject
+  JavaScript into a browser it didn't launch (in particular, never the
+  user's personal browser).
+- `page_goto` enforces the same URL scheme allowlist as launch.
+
+### Notes
+
+- Verified live against Firefox 152 (BiDi), Edge 150 and Chrome (CDP).
+- Interactions are dispatched in-page (element.click(), native value setter
+  + events) — the right tradeoff for form/DOM automation; sites that demand
+  trusted OS-level input events may still behave differently.
+
 ## [0.3.8] — Microsoft Edge lanes
 
 ### Added

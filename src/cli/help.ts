@@ -57,8 +57,24 @@ COMMANDS:
                        real Chrome CDP and all three modes work (like Chrome).
                        Override binary with PORTPILOT_EDGE_BIN.
                        Firefox notes: launches with -no-remote; the debug port is
-                       WebDriver BiDi (ws://127.0.0.1:<port>/session), NOT Chrome CDP,
-                       so the dashboard can't enumerate Firefox tabs.
+                       WebDriver BiDi (ws://127.0.0.1:<port>/session), NOT Chrome CDP.
+                       Drive it with 'portpilot page ...' (below) — same commands as
+                       chrome/edge; PortPilot speaks BiDi for you. (The dashboard
+                       still can't enumerate Firefox tabs.)
+  page <sub> --owner <n> --cwd <p>
+                                Drive the lane's browser — chrome/edge via CDP, firefox
+                                via WebDriver BiDi. SAME subcommands for every backend.
+                                Only ever controls the lane's OWN browser (safe-attach).
+                  [--session <id>] [--tab <id|index|substring>] [--json]
+                       --tab accepts a tab id, 0-based index, or url/title substring.
+                       (Firefox tab ids change between calls — use index/substring.)
+                  tabs                        list open tabs (id, url, title)
+                  goto --url <url>            navigate + wait for load, returns url+title
+                  eval --expr <js>            evaluate a JS expression, returns its JSON value
+                  text [--selector <css>]     visible text of page/element (capped 20k chars)
+                  click --selector <css>      click the first matching element
+                  fill --selector <css> --value <text>   set a form field + fire input/change
+                  screenshot [--out <file.png>]          save a PNG (default ~/.portpilot/shots)
   config <subcommand>           Manage ~/.portpilot/config.json
                   show                       (default) print current config
                   recommend                  show RAM-based recommendation

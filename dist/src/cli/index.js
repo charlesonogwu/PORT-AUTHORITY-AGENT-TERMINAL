@@ -8,6 +8,7 @@ import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneRelease
 import { scanPorts, hasSonar } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
 import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
+import { openPageController } from "../core/pagecontrol.js";
 import { portpilotHome, profilesDir, registryPath } from "../core/paths.js";
 import { deleteProfileDir, forgetProfile, listProfiles, selectPruneCandidates } from "../core/profiles.js";
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
@@ -353,6 +354,83 @@ async function cmdOpen(ctx) {
     ctx.stdout.write(`Launched ${label} (pid=${launch.pid ?? "?"}, mode=${mode})\nDebug port: ${lane.chromeDebugPort}\nProfile:    ${lane.chromeProfileDir}\n`);
     if (browser === "firefox") {
         ctx.stdout.write(`Firefox debug port serves WebDriver BiDi (ws://127.0.0.1:${lane.chromeDebugPort}/session), NOT Chrome CDP.\n`);
+    }
+}
+/**
+ * `paat page <sub>` — drive the lane's browser: chrome/edge over CDP,
+ * firefox over WebDriver BiDi. Same subcommands, same semantics, any backend.
+ * Only ever controls the lane's OWN browser (safe-attach verdict required).
+ */
+async function cmdPage(ctx) {
+    const sub = ctx.args.positional[0];
+    const subs = ["tabs", "goto", "eval", "text", "click", "fill", "screenshot"];
+    if (!sub || !subs.includes(sub)) {
+        fail(ctx, `usage: portpilot page <${subs.join("|")}> --owner <n> --cwd <p> [--session <id>] [--tab <id>] ...`);
+    }
+    const { owner, cwd } = requireOwnerCwd(ctx);
+    const sessionId = flagString(ctx.args, "session");
+    const tab = flagString(ctx.args, "tab");
+    const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}) });
+    if (!lane)
+        fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}. Run 'open' first.`, 2);
+    let page;
+    try {
+        page = await openPageController(lane);
+    }
+    catch (err) {
+        fail(ctx, err.message, 3);
+    }
+    try {
+        let payload;
+        switch (sub) {
+            case "tabs":
+                payload = { tabs: await page.tabs() };
+                break;
+            case "goto": {
+                const url = flagString(ctx.args, "url") ?? ctx.args.positional[1];
+                if (!url)
+                    fail(ctx, "page goto requires --url <url>");
+                payload = { page: await page.navigate(url, tab) };
+                break;
+            }
+            case "eval": {
+                const expr = flagString(ctx.args, "expr") ?? ctx.args.positional[1];
+                if (!expr)
+                    fail(ctx, "page eval requires --expr <jsExpression>");
+                payload = { value: await page.evalExpression(expr, tab) };
+                break;
+            }
+            case "text":
+                payload = { result: await page.text(flagString(ctx.args, "selector"), tab) };
+                break;
+            case "click": {
+                const selector = flagString(ctx.args, "selector") ?? ctx.args.positional[1];
+                if (!selector)
+                    fail(ctx, "page click requires --selector <css>");
+                payload = { result: await page.click(selector, tab) };
+                break;
+            }
+            case "fill": {
+                const selector = flagString(ctx.args, "selector");
+                const value = flagString(ctx.args, "value");
+                if (!selector || value === undefined)
+                    fail(ctx, "page fill requires --selector <css> --value <text>");
+                payload = { result: await page.fill(selector, value, tab) };
+                break;
+            }
+            case "screenshot":
+                payload = { screenshot: await page.screenshot(flagString(ctx.args, "out"), tab) };
+                break;
+            default:
+                fail(ctx, `unknown page subcommand: ${sub}`);
+        }
+        if (ctx.json)
+            emit(ctx, { ok: true, browser: page.browser, ...payload });
+        else
+            ctx.stdout.write(JSON.stringify({ browser: page.browser, ...payload }, null, 2) + "\n");
+    }
+    finally {
+        await page?.close();
     }
 }
 async function cmdLaunchChrome(ctx) {
@@ -941,6 +1019,8 @@ async function dispatch(args) {
             return cmdLaunchChrome(ctx);
         case "open":
             return cmdOpen(ctx);
+        case "page":
+            return cmdPage(ctx);
         case "config":
             return cmdConfig(ctx);
         case "dashboard":
