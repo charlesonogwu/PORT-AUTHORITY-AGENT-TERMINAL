@@ -366,7 +366,7 @@ async function cmdOpen(ctx) {
  */
 async function cmdPage(ctx) {
     const sub = ctx.args.positional[0];
-    const subs = ["tabs", "goto", "eval", "text", "click", "fill", "screenshot"];
+    const subs = ["tabs", "newtab", "goto", "eval", "text", "click", "fill", "screenshot"];
     if (!sub || !subs.includes(sub)) {
         fail(ctx, `usage: portpilot page <${subs.join("|")}> --owner <n> --cwd <p> [--session <id>] [--tab <id>] ...`);
     }
@@ -388,6 +388,9 @@ async function cmdPage(ctx) {
         switch (sub) {
             case "tabs":
                 payload = { tabs: await page.tabs() };
+                break;
+            case "newtab":
+                payload = { tab: await page.newTab(flagString(ctx.args, "url") ?? ctx.args.positional[1]) };
                 break;
             case "goto": {
                 const url = flagString(ctx.args, "url") ?? ctx.args.positional[1];

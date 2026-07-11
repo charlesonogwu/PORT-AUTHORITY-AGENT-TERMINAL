@@ -31,7 +31,7 @@ import {
   mergeSources,
   readPortpilotLanes,
 } from "./sources.js";
-import { collectProcessSnapshot, ProcessSnapshot } from "./process-info.js";
+import { collectProcessSnapshot, ProcessSnapshot, sumTreeMemoryMB } from "./process-info.js";
 import { inferAgentFromLiveChrome, walkParentChain } from "./agent-inference.js";
 import { BirthRegistry } from "./chrome-births.js";
 
@@ -90,6 +90,9 @@ export interface LiveSession {
    *  dashboard shows a "saved" marker for these rows. Cheap to compute (a few
    *  stat calls), unlike a full size walk. */
   hasSavedData: boolean;
+  /** Working-set RAM of this lane's whole browser tree (parent + renderers),
+   *  in MB. Absent when the process snapshot has no memory data. */
+  memoryMB?: number;
   browserVersion?: string;
   /** All non-internal CDP targets we found. Empty for pipe-mode Chromes. */
   tabs: CdpTab[];
@@ -469,6 +472,10 @@ export async function buildSnapshot(opts: { cdpTimeoutMs?: number } = {}): Promi
           };
       const session = buildLiveSession(live, ppLane, cdp, processSnap, births);
       session.hasSavedData = session.chromeProfileDir ? await profileHasSavedData(session.chromeProfileDir) : false;
+      if (live.pid !== undefined) {
+        const mem = sumTreeMemoryMB(live.pid, processSnap.processes);
+        if (mem !== undefined) session.memoryMB = mem;
+      }
       return session;
     }),
   );

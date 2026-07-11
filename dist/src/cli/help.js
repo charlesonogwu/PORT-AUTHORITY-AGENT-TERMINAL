@@ -70,6 +70,9 @@ COMMANDS:
                        --tab accepts a tab id, 0-based index, or url/title substring.
                        (Firefox tab ids change between calls — use index/substring.)
                   tabs                        list open tabs (id, url, title)
+                  newtab [--url <url>]        open a NEW TAB in the lane's existing browser —
+                                              the RAM-friendly way to get more pages (~100-200 MB/tab
+                                              vs ~0.5-1.5 GB for every extra lane/session)
                   goto --url <url>            navigate + wait for load, returns url+title
                   eval --expr <js>            evaluate a JS expression, returns its JSON value
                   text [--selector <css>]     visible text of page/element (capped 20k chars)

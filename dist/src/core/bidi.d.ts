@@ -24,6 +24,8 @@ export declare class BidiClient {
         id: string;
         url: string;
     }>>;
+    /** Open a NEW top-level context (tab) and return its id. */
+    createContext(): Promise<string>;
     /** Navigate a context and wait for the load to complete. */
     navigate(contextId: string, url: string): Promise<{
         url: string;

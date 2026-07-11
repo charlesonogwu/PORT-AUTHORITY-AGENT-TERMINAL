@@ -18,6 +18,9 @@ export interface ProcessRecord {
     ppid: number;
     name: string;
     commandLine: string;
+    /** Working-set size in bytes. Powers the dashboard's per-lane RAM column.
+     *  Optional: absent/0 when unavailable (non-Windows, synthetic records). */
+    memoryBytes?: number;
 }
 export interface TcpConnection {
     localPort: number;
@@ -44,6 +47,17 @@ interface RawSnapshot {
 export declare function collectProcessSnapshot(opts?: {
     timeoutMs?: number;
 }): Promise<ProcessSnapshot>;
+/**
+ * Sum the working-set memory of a process AND all its descendants, in MB.
+ * This is what a browser lane actually costs: the parent browser process
+ * plus every renderer/GPU/utility child it spawned. Returns undefined when
+ * the snapshot has no memory data (non-Windows, or the root is unknown) so
+ * callers can distinguish "0 MB" from "don't know".
+ *
+ * Cycle-safe: a visited set guards against pathological ppid loops (PID
+ * reuse can make a descendant appear to parent an ancestor).
+ */
+export declare function sumTreeMemoryMB(rootPid: number, processes: Map<number, ProcessRecord>): number | undefined;
 /** Pure normaliser — exported for the unit tests. */
 export declare function parseSnapshot(raw: RawSnapshot): ProcessSnapshot;
 export {};

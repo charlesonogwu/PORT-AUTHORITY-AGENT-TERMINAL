@@ -46,6 +46,27 @@ export async function listCdpPages(port: number, timeoutMs = 5_000): Promise<Cdp
     });
 }
 
+/** Open a NEW tab via the HTTP endpoint and return its target descriptor.
+ *  Modern Chrome/Edge require PUT for /json/new (GET is rejected). The tab
+ *  opens on about:blank; navigation is the caller's job so the wait-for-load
+ *  semantics stay identical to every other navigate. */
+export async function createCdpTab(port: number, timeoutMs = 5_000): Promise<CdpTarget> {
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${port}/json/new`, { method: "PUT", signal: AbortSignal.timeout(timeoutMs) });
+  } catch {
+    throw new CdpError(`could not reach CDP on http://127.0.0.1:${port}/json/new — is the lane's browser running?`);
+  }
+  if (!res.ok) {
+    throw new CdpError(`CDP /json/new failed: HTTP ${res.status}`);
+  }
+  const t = (await res.json()) as { id: string; url: string; title?: string; webSocketDebuggerUrl?: string };
+  const out: CdpTarget = { id: t.id, url: t.url };
+  if (t.title !== undefined) out.title = t.title;
+  if (t.webSocketDebuggerUrl !== undefined) out.webSocketDebuggerUrl = t.webSocketDebuggerUrl;
+  return out;
+}
+
 interface CdpResponse {
   id?: number;
   result?: Record<string, unknown>;

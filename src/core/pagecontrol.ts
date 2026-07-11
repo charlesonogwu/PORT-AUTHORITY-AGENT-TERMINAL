@@ -5,7 +5,7 @@ import { portpilotHome } from "./paths.js";
 import { checkLane } from "./allocator.js";
 import { isSafeInitialUrl } from "./chrome.js";
 import { BidiClient } from "./bidi.js";
-import { CdpClient, CdpError, listCdpPages } from "./cdp.js";
+import { CdpClient, CdpError, createCdpTab, listCdpPages } from "./cdp.js";
 import { clickExpr, evalWrapperExpr, fillExpr, metaExpr, textExpr } from "./pagejs.js";
 
 /**
@@ -40,6 +40,10 @@ export class PageControlError extends Error {
 export interface PageController {
   browser: BrowserKind;
   tabs(): Promise<PageTab[]>;
+  /** Open a NEW tab in this lane's EXISTING browser (the RAM-friendly
+   *  alternative to reserving another lane — a tab costs ~100-200 MB, a whole
+   *  extra lane costs ~0.5-1.5 GB). Navigates it when `url` is given. */
+  newTab(url?: string): Promise<PageTab>;
   navigate(url: string, tabId?: string): Promise<{ url: string; title: string }>;
   /** Evaluate a caller-supplied JS EXPRESSION; awaited and JSON round-tripped. */
   evalExpression(expression: string, tabId?: string): Promise<unknown>;
@@ -123,6 +127,15 @@ class BidiPageController implements PageController {
       out.push(title === undefined ? { id: c.id, url: c.url } : { id: c.id, url: c.url, title });
     }
     return out;
+  }
+
+  async newTab(url?: string): Promise<PageTab> {
+    const ctx = await this.client.createContext();
+    if (url) {
+      const meta = await this.navigate(url, ctx);
+      return { id: ctx, url: meta.url, title: meta.title };
+    }
+    return { id: ctx, url: "about:blank" };
   }
 
   async navigate(url: string, tabId?: string): Promise<{ url: string; title: string }> {
@@ -212,6 +225,15 @@ class CdpPageController implements PageController {
   async tabs(): Promise<PageTab[]> {
     const pages = await listCdpPages(this.port);
     return pages.map((p) => (p.title === undefined ? { id: p.id, url: p.url } : { id: p.id, url: p.url, title: p.title }));
+  }
+
+  async newTab(url?: string): Promise<PageTab> {
+    const target = await createCdpTab(this.port);
+    if (url) {
+      const meta = await this.navigate(url, target.id);
+      return { id: target.id, url: meta.url, title: meta.title };
+    }
+    return { id: target.id, url: target.url };
   }
 
   async navigate(url: string, tabId?: string): Promise<{ url: string; title: string }> {

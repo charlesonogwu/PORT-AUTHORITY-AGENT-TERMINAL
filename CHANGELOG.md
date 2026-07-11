@@ -11,6 +11,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.12] — conserve RAM: page_newtab + a RAM column
+
+The first-principles problem: every lane is a WHOLE browser (~0.5-1.5 GB),
+agents were opening one lane per subtask, and nothing made the cost visible.
+This release attacks both ends.
+
+### Added
+
+- **`page_newtab`** (MCP) / **`paat page newtab [--url]`** (CLI) — open an
+  additional tab in the lane's EXISTING browser instead of reserving another
+  lane. A tab costs ~100-200 MB; an extra lane costs a whole browser. Returns
+  the new tab's id/url/title; use that id as the `tab` argument of the other
+  page_* tools to drive each tab independently. Works on chrome/edge (CDP,
+  via PUT /json/new) and firefox (BiDi, browsingContext.create) with the
+  same wait-for-load navigation semantics as page_goto.
+- **RAM column on the dashboard** — each session row shows the working-set
+  memory of the lane's whole browser tree (parent + renderer processes),
+  amber when it crosses 1 GB. Comes from the same per-refresh process sweep
+  the dashboard already ran, so it costs nothing extra.
+- The MCP `open`/`reserve_lane` sessionId descriptions now steer agents:
+  extra sessions are whole browsers — use `page_newtab` when you just need
+  more pages.
+
+### Fixed
+
+- **Stale lanes no longer squat debug ports forever.** The allocator treated
+  every non-released lane's port as reserved — including stale lanes whose
+  browser died long ago — so abandoned lanes eventually consumed the whole
+  range and every `open` failed with "No free Chrome debug port" (observed
+  live: 74 stale lanes holding all 78 ports while 5 were listening). A stale
+  lane's port is now reusable unless something actually listens on it;
+  active/reserved lanes keep hard reservations, and an agent returning to a
+  reclaimed port gets a safe `unsafe-*` refusal from check_lane rather than
+  attaching to a stranger's browser.
+
 ## [0.3.11] — Browser column, default browser, more agents
 
 ### Added
