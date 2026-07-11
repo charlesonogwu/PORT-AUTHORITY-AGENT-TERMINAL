@@ -15,6 +15,22 @@ test("canonicalizeOwner: bare LLM name passes through unchanged", () => {
   }
 });
 
+test("canonicalizeOwner: goose and opencode are recognized owners", () => {
+  assert.deepEqual(canonicalizeOwner("goose"), { canonical: "goose" });
+  assert.deepEqual(canonicalizeOwner("Goose-task1"), { canonical: "goose", custom: "task1" });
+  assert.deepEqual(canonicalizeOwner("opencode"), { canonical: "opencode" });
+  assert.deepEqual(canonicalizeOwner("OpenCode_web"), { canonical: "opencode", custom: "web" });
+});
+
+test("canonicalizeOwner: names only match at word boundaries (no false positives inside words)", () => {
+  // "mongoose" contains "goose" but is NOT the goose agent.
+  assert.deepEqual(canonicalizeOwner("mongoose"), { canonical: "agent", custom: "mongoose" });
+  // "opencoder" contains "opencode" but with a trailing letter — not a match.
+  assert.deepEqual(canonicalizeOwner("opencoder"), { canonical: "agent", custom: "opencoder" });
+  // Boundary characters (separators) still match fine.
+  assert.deepEqual(canonicalizeOwner("my-goose"), { canonical: "goose", custom: "my" });
+});
+
 test("canonicalizeOwner: extracts custom suffix when LLM name is embedded", () => {
   assert.deepEqual(canonicalizeOwner("codex-test-alpha"), { canonical: "codex", custom: "test-alpha" });
   assert.deepEqual(canonicalizeOwner("claude-vend-site"),  { canonical: "claude", custom: "vend-site" });

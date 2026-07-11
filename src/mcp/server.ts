@@ -36,7 +36,7 @@ export function buildMcpServer(): McpServer {
         "All-in-one: reserves a lane (or reuses an existing one), launches Chrome bound to that lane's " +
         "debug port and dedicated user-data-dir, and navigates to the URL you supply. " +
         "USE THIS BEFORE OPENING A BROWSER OR CLAIMING BROWSER RESEARCH — calling it makes your session " +
-        "visible on the portpilot dashboard at http://127.0.0.1:7321/, so the user can see the real " +
+        "visible on the PortPilot dashboard (a native desktop app the user opens themselves), so the user can see the real " +
         "current page, agent owner, project folder, debug port, and pid in real time. " +
         "Idempotent: if a Chrome with the matching profile is already running on the lane's debug port, " +
         "this returns the existing session instead of launching a duplicate. " +
@@ -61,7 +61,7 @@ export function buildMcpServer(): McpServer {
           .string()
           .optional()
           .describe(
-            'Pass ONLY the LLM provider name: "claude", "codex", "gemini", "cursor", "windsurf", "copilot", "chatgpt", "openhands", or "aider". DO NOT add prefixes, suffixes, batch numbers, or per-task identifiers — for example "codex-test-alpha", "agent-random-1", and "batch2-agent-3" are all WRONG. If you need to distinguish multiple parallel sessions of the same agent, put that distinction in the `sessionId` field, not here. Server normalizes anyway: any custom suffix is stripped from this field and auto-promoted to sessionId.',
+            'Pass ONLY the LLM provider name: "claude", "codex", "gemini", "cursor", "windsurf", "copilot", "chatgpt", "openhands", "aider", "goose", or "opencode". DO NOT add prefixes, suffixes, batch numbers, or per-task identifiers — for example "codex-test-alpha", "agent-random-1", and "batch2-agent-3" are all WRONG. If you need to distinguish multiple parallel sessions of the same agent, put that distinction in the `sessionId` field, not here. Server normalizes anyway: any custom suffix is stripped from this field and auto-promoted to sessionId.',
           ),
         task: z.string().optional().describe("Short description of what you're doing."),
         sessionId: z.string().optional().describe("Optional parallel-session id when an agent runs multiple Chromes in the same project."),
@@ -75,7 +75,7 @@ export function buildMcpServer(): McpServer {
           .enum(["chrome", "firefox", "edge"])
           .optional()
           .describe(
-            "Browser backend. 'chrome' (default) = Chromium via CDP. 'edge' = Microsoft Edge — also Chromium, so the lane's debug port serves real Chrome CDP and all modes work; only the binary differs. 'firefox' = a real Firefox with its own dedicated PortPilot profile, exposing WebDriver BiDi on the lane's debug port (ws://127.0.0.1:<port>/session) — NOT Chrome CDP; drive it with a BiDi client (Playwright firefox / WebDriver). Every backend gets its own dedicated PortPilot profile — never the user's personal browser profile.",
+            "Browser backend. OMIT unless the user asked for a specific browser: when omitted, an existing lane for this (owner, cwd, session) keeps its browser, and new lanes use the user's configured default browser (dashboard 'Default browser' picker; falls back to chrome). 'chrome' = Chromium via CDP. 'edge' = Microsoft Edge — also Chromium, real CDP, all modes. 'firefox' = a real Firefox exposing WebDriver BiDi on the lane's debug port — NOT Chrome CDP; drive it with the page_* tools. Every backend gets its own dedicated PortPilot profile — never the user's personal browser profile.",
           ),
         headless: z
           .boolean()
@@ -86,15 +86,19 @@ export function buildMcpServer(): McpServer {
     },
     async (args) => {
       const owner = (args.owner ?? "agent").toString().trim() || "agent";
-      const browser: BrowserKind = normalizeBrowserKind(args.browser) ?? "chrome";
+      // Only pass browser through when the agent explicitly asked for one.
+      // Omitted → the allocator resolves it: an existing lane keeps its
+      // browser, else the user's configured defaultBrowser, else chrome.
+      const requestedBrowser = normalizeBrowserKind(args.browser);
       const reserve = await allocateLane({
         owner,
         cwd: args.cwd,
         sessionId: args.sessionId,
         task: args.task,
-        browser,
+        ...(requestedBrowser ? { browser: requestedBrowser } : {}),
       });
       const lane = reserve.lane;
+      const browser: BrowserKind = laneBrowser(lane);
       const label = browserLabel(browser);
       // Safety gate
       const result = await checkLane(lane);
@@ -113,7 +117,7 @@ export function buildMcpServer(): McpServer {
           alreadyRunning: true,
           browser,
           lane,
-          dashboardUrl: "http://127.0.0.1:7321/",
+          dashboard: "PortPilot dashboard app (native; the user opens it from their desktop or with: paat dashboard)",
           message: `${label} was already running with this lane's profile. Reusing it.`,
         });
       }
@@ -143,7 +147,7 @@ export function buildMcpServer(): McpServer {
         mode,
         lane: { ...lane, status: "active" },
         pid: launch.pid,
-        dashboardUrl: "http://127.0.0.1:7321/",
+        dashboard: "PortPilot dashboard app (native; the user opens it from their desktop or with: paat dashboard)",
         navigatedTo: args.url ?? null,
         ...(browser === "firefox"
           ? { note: "Firefox lane: debug port serves WebDriver BiDi (ws://127.0.0.1:" + lane.chromeDebugPort + "/session), not Chrome CDP. Drive it with the page_* tools (page_goto/page_text/page_eval/page_click/page_fill/page_screenshot) — they speak BiDi for you." }
@@ -159,7 +163,7 @@ export function buildMcpServer(): McpServer {
       description:
         "Reserve a coordination lane for an agent working in a project directory. Allocates a dedicated app port, " +
         "Chrome debug port, and Chrome user-data-dir for chrome.ts / CDP automation. The lane shows up on the " +
-        "portpilot dashboard at http://127.0.0.1:7321/ so the user can track which agent is working in which folder. " +
+        "PortPilot dashboard (native desktop app) so the user can track which agent is working in which folder. " +
         "Idempotent: returns the existing lane if one is already active for this (owner, cwd, sessionId). " +
         "Most callers should use the higher-level 'open' tool instead, which reserves AND launches Chrome AND " +
         "navigates in a single call.",
@@ -168,7 +172,7 @@ export function buildMcpServer(): McpServer {
           .string()
           .min(1)
           .describe(
-            'Pass ONLY the LLM provider name: "claude", "codex", "gemini", "cursor", "windsurf", "copilot", "chatgpt", "openhands", or "aider". Never add suffixes, batch numbers, or arbitrary identifiers (e.g. "codex-test-alpha", "agent-random-1", "batch2-agent-3" are all WRONG). Use `sessionId` for per-task distinctions. Server canonicalizes this field — anything beyond the LLM name is auto-promoted to sessionId.',
+            'Pass ONLY the LLM provider name: "claude", "codex", "gemini", "cursor", "windsurf", "copilot", "chatgpt", "openhands", "aider", "goose", or "opencode". Never add suffixes, batch numbers, or arbitrary identifiers (e.g. "codex-test-alpha", "agent-random-1", "batch2-agent-3" are all WRONG). Use `sessionId` for per-task distinctions. Server canonicalizes this field — anything beyond the LLM name is auto-promoted to sessionId.',
           ),
         cwd: z.string().min(1).describe("Project working directory absolute path."),
         sessionId: z
@@ -185,7 +189,7 @@ export function buildMcpServer(): McpServer {
         browser: z
           .enum(["chrome", "firefox", "edge"])
           .optional()
-          .describe("Browser backend for this lane. 'chrome' (default), 'edge' (Microsoft Edge — Chromium, real CDP), or 'firefox' (own dedicated profile; debug port serves WebDriver BiDi, not CDP). Lanes for the same (owner, cwd, sessionId) but different browsers are distinct and get separate profile dirs."),
+          .describe("Browser backend for this lane. OMIT unless the user asked for a specific browser — omitted means an existing lane keeps its browser and new lanes use the user's configured default (dashboard picker; falls back to chrome). 'chrome', 'edge' (Chromium, real CDP), or 'firefox' (WebDriver BiDi, not CDP). Explicit lanes for the same (owner, cwd, sessionId) but different browsers are distinct and get separate profile dirs."),
         browserScript: z.string().optional(),
       },
     },
@@ -298,7 +302,7 @@ export function buildMcpServer(): McpServer {
       title: "Launch Chrome for an existing portpilot chrome.ts lane",
       description:
         "Launch Chrome for an already-reserved portpilot lane, binding to that lane's debug port and dedicated " +
-        "user-data-dir. The launched session appears on the portpilot dashboard at http://127.0.0.1:7321/ as a " +
+        "user-data-dir. The launched session appears on the PortPilot dashboard (native desktop app) as a " +
         "live entry. Refuses to launch when the port is held by a foreign Chrome instance (different profile) or " +
         "a non-Chrome process — prevents one agent from accidentally driving another agent's browser. " +
         "Set dryRun=true to return the launch command without executing. Most callers should use the 'open' tool " +

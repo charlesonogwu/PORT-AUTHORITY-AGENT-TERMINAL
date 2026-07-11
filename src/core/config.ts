@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { totalmem } from "node:os";
-import { DEFAULT_APP_PORT_RANGE, DEFAULT_CHROME_DEBUG_RANGE, PortRange } from "./lane.js";
+import { BrowserKind, DEFAULT_APP_PORT_RANGE, DEFAULT_CHROME_DEBUG_RANGE, PortRange } from "./lane.js";
 import { atomicWriteJson } from "./lockfile.js";
 import { portpilotHome } from "./paths.js";
 import type { ChromeLaunchMode } from "./chrome.js";
@@ -41,6 +41,15 @@ export interface PortpilotConfig {
    * keep the historical headed-on-the-active-desktop behaviour.
    */
   chromeMode?: ChromeLaunchMode;
+  /**
+   * Browser backend used for NEW lanes when the caller doesn't ask for one
+   * ("chrome" | "edge" | "firefox"). Set from the dashboard's "Default
+   * browser" picker or `portpilot config set defaultBrowser <v>`.
+   * Precedence: an explicit per-call `browser` always wins, and an EXISTING
+   * lane for the same (owner, cwd, session) keeps its browser — this default
+   * only decides what brand-new lanes get. Omit = "chrome".
+   */
+  defaultBrowser?: BrowserKind;
 }
 
 export const CONFIG_VERSION = 1 as const;

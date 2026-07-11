@@ -1,4 +1,4 @@
-import { PortRange } from "./lane.js";
+import { BrowserKind, PortRange } from "./lane.js";
 import type { ChromeLaunchMode } from "./chrome.js";
 /**
  * Optional, machine-local configuration. When the file is absent, callers
@@ -35,6 +35,15 @@ export interface PortpilotConfig {
      * keep the historical headed-on-the-active-desktop behaviour.
      */
     chromeMode?: ChromeLaunchMode;
+    /**
+     * Browser backend used for NEW lanes when the caller doesn't ask for one
+     * ("chrome" | "edge" | "firefox"). Set from the dashboard's "Default
+     * browser" picker or `portpilot config set defaultBrowser <v>`.
+     * Precedence: an explicit per-call `browser` always wins, and an EXISTING
+     * lane for the same (owner, cwd, session) keeps its browser — this default
+     * only decides what brand-new lanes get. Omit = "chrome".
+     */
+    defaultBrowser?: BrowserKind;
 }
 export declare const CONFIG_VERSION: 1;
 export declare const DEFAULT_CONFIG: PortpilotConfig;
