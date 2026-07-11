@@ -11,6 +11,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.11] — Browser column, default browser, more agents
+
+### Added
+
+- **Browser column on the dashboard** (between Project and Current page):
+  each live session row shows which backend it runs — Chrome, Edge, or
+  Firefox — as plain text matching the rest of the UI. The tooltip states
+  the driving protocol (Chrome/Edge over CDP, Firefox over WebDriver BiDi),
+  and the expanded row shows backend + protocol alongside the version.
+  The inline Firefox/Edge badges next to the agent name are gone; the
+  browser is now a first-class column whether it was chosen by the LLM in
+  the MCP call or because the user told the agent which browser to use.
+- **"Default browser" picker on the dashboard** (and
+  `paat config set defaultBrowser chrome|edge|firefox`). Decides which
+  browser an agent gets when it calls PortPilot WITHOUT naming one — i.e.
+  the user never told the agent which browser to use. Resolution order:
+  1. an explicit `browser` in the call always wins,
+  2. an existing lane for the same (owner, cwd, session) keeps its browser
+     — changing the default never rebinds or duplicates existing lanes,
+  3. the configured `defaultBrowser`,
+  4. `chrome`.
+  Stored in `~/.portpilot/config.json`; a junk value falls back to chrome.
+- **goose and opencode recognized as agent owners.** Lanes opened by Block's
+  Goose or OpenCode now show under their own name in the dashboard's AGENT
+  column instead of the generic "agent". Owner-name matching is now
+  word-boundary aware, so short names can't false-match inside unrelated
+  words ("mongoose" is not goose, "opencoder" is not opencode).
+
+### Fixed
+
+- **Stopped advertising the dead `http://127.0.0.1:7321/` web dashboard.**
+  That URL has been dead since the dashboard became a native app in 0.2.0,
+  but MCP tool responses, `paat help`, and the installer still pointed users
+  and agents at it (agents forwarded it as a broken link). All three now
+  describe the native dashboard app. The legacy `dashboard`
+  `--port/--host/--allow-remote/--no-open` flags remain accepted-but-ignored
+  so old shortcuts don't break.
+- **The published `paat-dashboard.exe` no longer embeds the build machine's
+  home path.** The Tauri build now remaps source path prefixes
+  (`--remap-path-prefix`), so panic-location metadata in the shipped binary
+  reads `/build/home/...` instead of `C:\Users\<builder>\...`.
+
+### Docs
+
+- README brought up to date with everything since 0.3.6: the three browser
+  backends table, the `page_*` tool family, `paat open` / `paat page` CLI,
+  updated drop-in agent prompt (browser choice, BiDi-vs-CDP guidance,
+  current owner list), safety-verdict wording, and storage layout.
+
+---
+
 ## [0.3.10] — dashboard: Firefox rows fixed (dedupe + readable note)
 
 ### Fixed

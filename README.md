@@ -5,20 +5,22 @@
 # Port Authority Agent Terminal (`PAAT`)
 
 > **Air-traffic control for the AI agents that use your web browser.**
-> Give Claude, Codex, Cursor and friends each their own Chrome, with its own
-> port, profile, and window, so they never collide on the same machine.
+> Give Claude, Codex, Cursor and friends each their own browser — Chrome,
+> Edge, or Firefox — with its own port, profile, and window, so they never
+> collide on the same machine.
 
 A fast-growing share of what happens in a web browser is now driven by AI
 agents, not people. They log into sites, fill out forms, shop, and pull data,
-and to do any of it they each need to drive a real Chrome browser. Run several
+and to do any of it they each need to drive a real browser. Run several
 agents on one machine and they start fighting over the same browser: one ends up
 steering another's window, breaks a login, or reports on the wrong page.
 
 `PAAT` is a small CLI, MCP server, and native dashboard you run locally. Before
 any agent opens a browser, it asks `PAAT` for a **lane**: its own app port, its
-own Chrome remote-debugging port, and its own dedicated Chrome profile. `PAAT`
-then guarantees, on every check, that an agent only ever attaches to the Chrome
-running its own profile, never a sibling agent's.
+own remote-debugging port, and its own dedicated browser profile (Chrome, Edge,
+or Firefox). `PAAT` then guarantees, on every check, that an agent only ever
+attaches to the browser running its own profile, never a sibling agent's — and
+its `page_*` tools drive all three backends through one interface.
 
 <p align="center">
   <img src="assets/demo.gif" alt="Port Pilot dashboard: four AI agents, four isolated Chrome lanes" width="900" />
@@ -109,23 +111,51 @@ command = "paat"
 args = ["mcp"]
 ```
 
-Restart the app and the agent has these tools: `open` (reserve + launch +
-navigate in one call, the one to reach for), plus `reserve_lane`, `check_lane`,
-`release_lane`, `launch_chrome_lane`, `list_lanes`, `find_free_lane`,
-`scan_ports`, and `doctor`.
+Restart the app and the agent has these tools:
+
+- **`open`** — reserve + launch + navigate in one call, the one to reach for.
+  Takes `browser: "chrome" | "edge" | "firefox"` (default chrome, or whatever
+  you picked as the dashboard's default browser).
+- Lane management: `reserve_lane`, `check_lane`, `release_lane`,
+  `launch_browser_lane` (any backend), `launch_chrome_lane` (kept for
+  back-compat), `list_lanes`, `find_free_lane`, `scan_ports`, `doctor`.
+- **Page control** — drive the lane's browser through one uniform interface,
+  whatever the backend: `page_tabs`, `page_goto` (navigate + wait for load),
+  `page_eval` (JS expression → JSON value), `page_text`, `page_click`,
+  `page_fill`, `page_screenshot`. Chrome/Edge are driven over CDP, Firefox
+  over WebDriver BiDi — the tools hide the difference. Page control only ever
+  touches the lane's own browser (safe-attach verdict required), never your
+  personal one.
 
 Then a prompt like *"Open https://example.com via PAAT in this folder"* just works:
 the agent calls `open` and the session appears on the dashboard.
 
-## Chrome launch modes
+## Browser backends
 
-`open` and `launch_chrome_lane` (and `paat launch-chrome`) take a `mode`:
+Every lane has a browser backend — pass `browser` to `open` / `reserve_lane`,
+or set a default in the dashboard (used only when the agent doesn't ask for
+one explicitly):
+
+| Backend | Protocol on the debug port | Modes | Tab list on dashboard |
+|---|---|---|---|
+| `chrome` *(default)* | Chrome DevTools Protocol (CDP) | visible, background, headless | yes |
+| `edge` | CDP (Edge is Chromium) | visible, background, headless | yes |
+| `firefox` | **WebDriver BiDi** (`ws://127.0.0.1:<port>/session`) — NOT CDP | visible, headless (`background` is refused: Firefox has no off-screen positioning) | no — use `page_tabs` |
+
+Each backend gets its own dedicated PortPilot profile (never your personal
+browser), and chrome/edge/firefox lanes for the same (owner, cwd, session) are
+three distinct lanes. Agents with their own CDP tooling can drive chrome/edge
+directly; for firefox, use the `page_*` tools — they speak BiDi for you.
+
+## Launch modes
+
+`open` and `launch_browser_lane` (and `paat open` / `paat launch-chrome`) take a `mode`:
 
 | Mode | Window | Use it for |
 |---|---|---|
 | `visible` *(default)* | Normal window on your desktop | Manual steps: logging in, solving a captcha |
-| `background` | **Real headed Chrome rendered fully off-screen.** Never appears on a monitor, never steals focus | Non-interactive read/click automation. Same cookies, extensions, and anti-bot fingerprint as a normal browser. |
-| `headless` | No window (`--headless=new`) | Lowest footprint, but many sites detect and block headless Chrome. |
+| `background` | **Real headed browser rendered fully off-screen.** Never appears on a monitor, never steals focus | Non-interactive read/click automation. Same cookies, extensions, and anti-bot fingerprint as a normal browser. Chrome/Edge only. |
+| `headless` | No window (`--headless=new`; `-headless` on Firefox) | Lowest footprint, but many sites detect and block headless browsers. |
 
 Set a machine-wide default with `chromeMode` in `~/.portpilot/config.json` or the
 `PORTPILOT_CHROME_MODE` env var. Precedence: **per-call `mode` > env var > config
@@ -143,45 +173,55 @@ Running several agents across different folders? Paste this into any of them
 
 ```text
 This machine runs multiple AI agents in parallel across different project
-folders. Whenever a task here needs to drive a real Chrome browser (logging
-into a site, scraping, clicking through a web app or dashboard, or any
-DevTools-Protocol / puppeteer-core / Playwright-over-CDP automation), go
-through PortPilot instead of launching Chrome yourself on a hardcoded debug
-port. PortPilot hands you your own debug port and an isolated Chrome profile
+folders. Whenever a task here needs to drive a real browser (logging into a
+site, scraping, clicking through a web app or dashboard, or any automation),
+go through PortPilot instead of launching a browser yourself on a hardcoded
+debug port. PortPilot hands you your own debug port and an isolated profile
 so you never collide with another agent's browser, and the human can watch
 every live session on a dashboard.
 
 How to use it:
 
 1. Claim a browser in one call. Use the `open` MCP tool with:
-   - owner: identify WHICH LLM YOU ARE and pass that name only. If you are
+   - owner: identify WHICH AGENT YOU ARE and pass that name only. If you are
      Claude use "claude", if you are Codex use "codex", likewise "cursor",
-     "gemini", "windsurf", "copilot", etc. This is how the dashboard shows the
-     human which model is driving each browser, so be honest about your own
-     identity. No suffixes, batch numbers, or task IDs; put any per-task
-     distinction in sessionId instead.
+     "gemini", "windsurf", "copilot", "goose", "opencode", etc. This is how
+     the dashboard shows the human which agent is driving each browser, so be
+     honest about your own identity. No suffixes, batch numbers, or task IDs;
+     put any per-task distinction in sessionId instead.
    - cwd: this project's absolute path.
+   - browser (optional): "chrome", "edge", or "firefox". Omit it unless the
+     human asked for a specific browser — the human's configured default
+     applies when you don't specify.
    - url (optional): the first page to open.
    - mode: "background" for non-interactive read/click automation (a real
-     headed Chrome that stays off-screen and never steals focus); "visible"
-     when a human must log in or solve a captcha; "headless" only if you know
-     the target site allows it.
+     headed browser that stays off-screen and never steals focus; chrome/edge
+     only); "visible" when a human must log in or solve a captcha; "headless"
+     only if you know the target site allows it. Firefox supports visible and
+     headless only.
    - sessionId (optional): only when you need several separate browsers in
      this same project at once.
-2. Connect your CDP client (puppeteer-core browserURL, Playwright
-   connectOverCDP) to http://127.0.0.1:<chromeDebugPort> from the response.
+2. Drive the page. Two options:
+   - PortPilot's page_* tools work on EVERY backend: page_goto (navigate +
+     wait), page_eval (run a JS expression, get JSON back), page_text,
+     page_click, page_fill, page_screenshot, page_tabs. For FIREFOX lanes
+     these are the way — the debug port speaks WebDriver BiDi, not CDP.
+   - For chrome/edge lanes you may instead connect your own CDP client
+     (puppeteer-core browserURL, Playwright connectOverCDP) to
+     http://127.0.0.1:<chromeDebugPort> from the response.
 3. Respect the safety verdict: if check_lane returns unsafe-foreign-chrome or
    unsafe-unknown, that port belongs to another agent, so back off, do not
-   attach, and never force-kill someone else's Chrome.
+   attach, and never force-kill someone else's browser.
 4. Background-mode rule: if you launched in "background" mode, do NOT call
    Page.bringToFront() or Browser.setWindowBounds with on-screen coordinates,
    since both yank the window onto the user's screen.
-5. Release when finished: call release_lane (it does not kill Chrome).
+5. Release when finished: call release_lane (it does not kill the browser).
 
 No PortPilot MCP tools in this agent? Use the CLI instead:
-   paat reserve --owner <you> --cwd "<path>"
-   paat launch-chrome --owner <you> --cwd "<path>" --mode background
-then connect to the printed debug port. `paat dashboard` opens the live view.
+   paat open --owner <you> --cwd "<path>" --browser chrome --mode background
+   paat page goto --owner <you> --cwd "<path>" --url https://example.com
+then drive it with `paat page <tabs|goto|eval|text|click|fill|screenshot>`.
+`paat dashboard` opens the live view.
 ```
 
 The whole point is composability: every agent passes `owner = <its own name>`
@@ -203,8 +243,9 @@ account gated by SMS / billing / identity screens.
    A real Chrome window appears.
 2. **The human logs in once** in that window, including any first-time
    verification (phone, bank, captcha) the agent must not touch.
-3. The agent connects to the lane's debug port and drives the page over CDP:
-   reads the DOM, clicks, fills forms, uploads files.
+3. The agent drives the page — with the `page_*` tools (any backend), or its
+   own CDP client on chrome/edge lanes: reads the DOM, clicks, fills forms,
+   uploads files.
 4. **It keeps working.** The lane's dedicated profile is persistent, so the login
    survives across agent sessions. Come back hours later, reattach to the same
    debug port, still signed in, no re-auth.
@@ -214,9 +255,11 @@ indefinitely, without ever clobbering another agent's browser.
 
 ### Recipe 2: Raw CDP, no framework required
 
-You don't need Puppeteer or Playwright. Every lane exposes a standard Chrome
-DevTools-Protocol endpoint at `http://127.0.0.1:<chromeDebugPort>/json`, so a
-dozen lines in any language is enough:
+You don't need Puppeteer or Playwright. Every chrome/edge lane exposes a
+standard Chrome DevTools-Protocol endpoint at
+`http://127.0.0.1:<chromeDebugPort>/json`, so a dozen lines in any language is
+enough (Firefox lanes speak WebDriver BiDi instead — use the `page_*` MCP
+tools or `paat page`, which work on every backend):
 
 ```python
 import requests, json, asyncio, websockets
@@ -257,10 +300,10 @@ isn't connected.
 
 | Verdict from `check_lane` | Meaning |
 |---|---|
-| `safe-free`              | Debug port is free. You may launch Chrome with this lane's profile. |
-| `safe-attach`            | Debug port holds Chrome **with the matching profile**. You may attach. |
-| `unsafe-foreign-chrome`  | Debug port holds Chrome with a *different* profile. **Do not attach.** |
-| `unsafe-unknown`         | Debug port holds a non-Chrome process. **Do not attach.** |
+| `safe-free`              | Debug port is free. You may launch the lane's browser with its profile. |
+| `safe-attach`            | Debug port holds **the lane's browser with the matching profile**. You may attach. |
+| `unsafe-foreign-chrome`  | Debug port holds the right kind of browser but a *different* profile. **Do not attach.** |
+| `unsafe-unknown`         | Debug port holds some other process (for a Firefox lane, even a Chrome counts). **Do not attach.** |
 
 `unsafe-*` verdicts make `paat check` exit 3 and `launch-chrome` / `open` refuse.
 **`PAAT` never kills a process on its own.** The dashboard's manual Kill button is
@@ -275,7 +318,9 @@ the only path to termination, and it refuses anything that isn't Chromium-family
 | `paat reserve --owner <n> --cwd <p> --task <s>` | Reserve a lane (idempotent per owner+cwd+session) |
 | `paat check --owner <n> --cwd <p>`        | Verify the lane is safe to use right now |
 | `paat release --owner <n> --cwd <p>`      | Release a lane (does NOT kill Chrome) |
+| `paat open --owner <n> --cwd <p> [--browser chrome\|edge\|firefox] [--url <u>] [--mode ...]` | Reserve + launch + navigate in one step |
 | `paat launch-chrome --owner <n> --cwd <p> [--mode visible\|background\|headless]` | Launch Chrome bound to the lane |
+| `paat page <tabs\|goto\|eval\|text\|click\|fill\|screenshot> --owner <n> --cwd <p>` | Drive the lane's browser (CDP or BiDi, same commands) |
 | `paat next [--range 9322-9399]`           | Print the next free port in a range |
 | `paat doctor`                             | Audit registry vs. live ports |
 | `paat prune [--all] [--older-than 24h]`   | Garbage-collect released lanes |
@@ -297,10 +342,12 @@ costs nothing when you're not looking. No browser tab, no localhost server.
 
 ```
 ~/.portpilot/
-├── config.json     # per-machine cap, port ranges, default chrome mode
+├── config.json     # per-machine cap, port ranges, default mode + default browser
 ├── lanes.json      # the lane registry, single source of intent
 ├── lanes.json.lock # exclusive lock for safe concurrent writes
-└── profiles/       # one persistent Chrome --user-data-dir per lane
+├── profiles/       # one persistent browser profile per lane
+│                   # (--user-data-dir for chrome/edge, -profile for firefox)
+└── shots/          # PNGs saved by page_screenshot
 ```
 
 Override the location with `PORTPILOT_HOME=<path>`.
@@ -316,9 +363,9 @@ npm link           # exposes paat / port-authority / portpilot on PATH
 ```
 
 Just want the CLI + MCP without the dashboard? `npm run build:server` (TypeScript
-only, no Rust). `npm test` runs the full suite (220+ tests covering the allocator,
-registry, lockfile, Chrome safety verdicts, prune semantics, security validators,
-and end-to-end CLI integration).
+only, no Rust). `npm test` runs the full suite (300+ tests covering the allocator,
+registry, lockfile, browser safety verdicts, page-control JS generation, prune
+semantics, security validators, and end-to-end CLI integration).
 
 ## Architecture
 

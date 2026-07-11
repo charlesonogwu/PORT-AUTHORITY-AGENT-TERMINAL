@@ -42,6 +42,7 @@ pub fn run() {
             commands::snapshot::get_snapshot,
             commands::doctor::get_doctor,
             commands::config::get_config,
+            commands::config::set_default_browser,
             commands::kill::kill_chrome,
             commands::erase::erase_chrome,
             commands::focus::focus_chrome,

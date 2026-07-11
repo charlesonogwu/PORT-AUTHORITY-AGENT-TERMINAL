@@ -48,7 +48,8 @@ COMMANDS:
                         chromeMode field in ~/.portpilot/config.json)
   open --owner <n> --cwd <p>    Reserve + launch + navigate in ONE step, for Chrome, Edge, or Firefox
                   [--session <id>] [--task "..."] [--url <url>]
-                  [--browser chrome|edge|firefox]   default chrome
+                  [--browser chrome|edge|firefox]   omit = existing lane's browser,
+                       else the configured defaultBrowser (dashboard picker), else chrome
                   [--mode visible|background|headless]   firefox has no 'background'
                   [--dry-run] [--bin <path>] [--json]
                        Every browser gets a DEDICATED PortPilot profile — never your
@@ -80,15 +81,16 @@ COMMANDS:
                   recommend                  show RAM-based recommendation
                   init [--force]             write recommended config (preserves existing values)
                   set <key> <value>          set maxActiveLanes / warnAtActiveLanes / chromeDebugRange / appPortRange
+                                             / defaultBrowser (chrome|edge|firefox — used for NEW lanes when
+                                             the caller doesn't pass --browser; also settable from the dashboard)
                   path                       print the config file path
-  dashboard [--port 7321] [--host 127.0.0.1] [--no-open] [--allow-remote]
-                                Start a local dashboard at http://127.0.0.1:7321
-                                showing every lane, its current page, and live Chrome status.
-                                --allow-remote is required to bind --host to anything other
-                                than 127.0.0.1 / ::1 / localhost (the dashboard exposes POST
-                                endpoints; remote bind is a real attack surface).
+  dashboard                     Open the native PortPilot dashboard app, showing every lane,
+                                its current page, browser, and live status. No web server or
+                                port is involved — it is a desktop app, not a localhost URL.
+                                (The legacy --port / --host / --allow-remote / --no-open flags
+                                are accepted but ignored, kept only so old shortcuts don't break.)
   shortcut <subcommand>         Manage the Windows desktop shortcut for the dashboard
-                  install [--port 7321] [--icon "<dll>,<index>"]   create / refresh shortcut
+                  install [--icon "<dll>,<index>"]                 create / refresh shortcut
                   uninstall                                         remove the shortcut
                   status                                            show install state
   autostart <subcommand>        Auto-start the dashboard at Windows login

@@ -146,13 +146,24 @@ function maybeNpmInstallGui(env) {
 
 function buildTauri(env) {
   log("compiling Tauri release build (cargo tauri build --no-bundle) …");
+  // Privacy: rustc embeds absolute source paths (the project dir and
+  // C:\Users\<name>\.cargo\registry\…) into panic-location metadata, so a
+  // published binary would otherwise disclose the build machine's username
+  // and folder layout. Remap both roots to neutral names. Uses
+  // CARGO_ENCODED_RUSTFLAGS (\x1f-separated) so paths with spaces survive.
+  const remapFlags = [
+    `--remap-path-prefix=${os.homedir()}=/build/home`,
+    `--remap-path-prefix=${repoRoot}=/build/portpilot`,
+  ];
+  const priorFlags = (env.RUSTFLAGS ?? "").split(/\s+/).filter(Boolean);
+  const encodedFlags = [...priorFlags, ...remapFlags].join("\x1f");
   const build = spawnSync(
     cargoCmd(),
     ["tauri", "build", "--no-bundle"],
     {
       cwd: guiDir,
       stdio: "inherit",
-      env,
+      env: { ...env, CARGO_ENCODED_RUSTFLAGS: encodedFlags },
       // shell: false everywhere; we resolve npm.cmd / cargo.exe explicitly on
     // Windows via the .cmd extension because Node 22+ warns about shell:true
     // with args (DEP0190).

@@ -132,6 +132,8 @@ export const KNOWN_LLM_OWNERS = [
   "aider",
   "copilot",
   "chatgpt",
+  "goose",
+  "opencode",
 ] as const;
 
 export interface CanonicalOwner {
@@ -158,11 +160,28 @@ export interface CanonicalOwner {
  * "agent". The original user-supplied string is preserved in `custom` so
  * callers can promote it to `sessionId` automatically and not lose info.
  */
+/**
+ * Find `name` inside `haystack` at a WORD BOUNDARY: the characters on both
+ * sides (when present) must be non-alphanumeric. This is what keeps short
+ * agent names from false-matching inside unrelated words — "mongoose" must
+ * not canonicalize to "goose", "opencoder" must not become "opencode".
+ */
+function findBoundaryMatch(haystack: string, name: string): number {
+  let idx = haystack.indexOf(name);
+  while (idx !== -1) {
+    const beforeOk = idx === 0 || !/[a-z0-9]/.test(haystack[idx - 1]!);
+    const afterOk = idx + name.length >= haystack.length || !/[a-z0-9]/.test(haystack[idx + name.length]!);
+    if (beforeOk && afterOk) return idx;
+    idx = haystack.indexOf(name, idx + 1);
+  }
+  return -1;
+}
+
 export function canonicalizeOwner(raw: string | undefined | null): CanonicalOwner {
   const lower = (raw ?? "").trim().toLowerCase();
   if (lower.length === 0) return { canonical: "agent" };
   for (const name of KNOWN_LLM_OWNERS) {
-    const idx = lower.indexOf(name);
+    const idx = findBoundaryMatch(lower, name);
     if (idx === -1) continue;
     // Strip the matched LLM name from the raw value to keep any suffix.
     const stripped = (lower.slice(0, idx) + lower.slice(idx + name.length))

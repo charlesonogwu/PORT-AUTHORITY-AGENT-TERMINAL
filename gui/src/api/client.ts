@@ -130,3 +130,26 @@ export async function eraseChrome(
 ): Promise<EraseResult> {
   return await invoke<EraseResult>("erase_chrome", { pid, profileDir, laneId });
 }
+
+export type DefaultBrowser = "chrome" | "edge" | "firefox"
+
+export interface GetConfigResult {
+  ok: boolean
+  config: { version?: number; defaultBrowser?: DefaultBrowser } & Record<string, unknown>
+}
+
+/** Read ~/.portpilot/config.json (defaults when absent). */
+export async function getConfig(): Promise<GetConfigResult> {
+  return await invoke<GetConfigResult>("get_config")
+}
+
+/**
+ * Persist the "Default browser" pick. Applies to NEW lanes created by agent
+ * calls that don't name a browser; an explicit per-call browser always wins,
+ * and existing lanes keep the browser they were created with.
+ */
+export async function setDefaultBrowser(
+  browser: DefaultBrowser,
+): Promise<{ ok: boolean; defaultBrowser: DefaultBrowser }> {
+  return await invoke("set_default_browser", { browser })
+}

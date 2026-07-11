@@ -26,11 +26,14 @@ import type { DashboardSnapshot, LiveSession } from "@/types"
 import {
   eraseChrome,
   focusChrome,
+  getConfig,
   getSnapshot,
   hideChrome,
   killChrome,
+  setDefaultBrowser,
   setHiddenPids,
   unhideChrome,
+  type DefaultBrowser,
   type WindowPlacement,
 } from "@/api/client"
 import { cn } from "@/lib/utils"
@@ -565,6 +568,7 @@ function LiveSessions({
           <TableRow className="hover:bg-transparent">
             <TableHead className="w-[160px]">Agent</TableHead>
             <TableHead className="w-[180px]">Project</TableHead>
+            <TableHead className="w-[110px]">Browser</TableHead>
             <TableHead>Current page</TableHead>
             <TableHead className="w-[120px]">Port / pid</TableHead>
             <TableHead className="w-[110px]">Source</TableHead>
@@ -598,7 +602,7 @@ function SessionGroup({
   return (
     <>
       <TableRow className="border-y bg-muted/40 hover:bg-muted/40">
-        <TableCell colSpan={6} className="py-2 text-xs">
+        <TableCell colSpan={7} className="py-2 text-xs">
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center">
               <span className="mr-3 font-semibold text-foreground">
@@ -674,28 +678,13 @@ function SessionRow({
                 inferred
               </Badge>
             )}
-            {s.browser === "firefox" && (
-              <Badge
-                variant="outline"
-                className="border-orange-500/40 px-1.5 py-0 text-[9px] font-normal uppercase text-orange-600 dark:text-orange-400"
-                title="Firefox lane — debug port is WebDriver BiDi, not Chrome CDP"
-              >
-                Firefox
-              </Badge>
-            )}
-            {s.browser === "edge" && (
-              <Badge
-                variant="outline"
-                className="border-sky-500/40 px-1.5 py-0 text-[9px] font-normal uppercase text-sky-600 dark:text-sky-400"
-                title="Microsoft Edge lane — Chromium, real Chrome CDP on the debug port"
-              >
-                Edge
-              </Badge>
-            )}
           </div>
         </TableCell>
         <TableCell>
           <div className="font-medium">{s.project}</div>
+        </TableCell>
+        <TableCell>
+          <BrowserCell browser={s.browser} />
         </TableCell>
         <TableCell className="max-w-0">
           {s.primaryTabs[0] ? (
@@ -775,7 +764,7 @@ function SessionRow({
       </TableRow>
       {open && (
         <TableRow className="bg-muted/20 hover:bg-muted/20">
-          <TableCell colSpan={6} className="px-6 py-4">
+          <TableCell colSpan={7} className="px-6 py-4">
             <ExpandedRow s={s} />
           </TableCell>
         </TableRow>
@@ -789,7 +778,13 @@ function ExpandedRow({ s }: { s: LiveSession }) {
     <div className="grid gap-5 lg:grid-cols-2">
       <div className="space-y-3 text-[12px]">
         <Field label="profile dir" mono value={s.chromeProfileDir} />
-        <Field label="browser" value={s.browserVersion ?? "?"} />
+        <Field
+          label="browser"
+          value={`${BROWSER_META[s.browser ?? "chrome"].label} · ${
+            s.browser === "firefox" ? "WebDriver BiDi" : "Chrome CDP"
+          }`}
+        />
+        <Field label="browser version" value={s.browserVersion ?? "?"} />
         {s.task && <Field label="task (declared)" value={s.task} />}
         {s.appPort && <Field label="app port" mono value={`:${s.appPort}`} />}
         {s.laneId && <Field label="lane id" mono value={s.laneId} />}
@@ -860,6 +855,40 @@ function Field({
       <div className={cn("break-all text-foreground", mono && "font-mono")}>
         {value}
       </div>
+    </div>
+  )
+}
+
+// The three browser backends portpilot can drive, with the distinction the
+// user cares about: chrome/edge speak Chrome CDP, firefox speaks WebDriver
+// BiDi. Absent browser = chrome (pre-0.3.7 lanes). Shown as a dedicated
+// column so it's clear at a glance which browser each lane launched — whether
+// the LLM picked it via the MCP `open` call or the user asked for it.
+const BROWSER_META: Record<
+  "chrome" | "edge" | "firefox",
+  { label: string; title: string }
+> = {
+  chrome: {
+    label: "Chrome",
+    title: "Google Chrome — driven over Chrome DevTools Protocol (CDP)",
+  },
+  edge: {
+    label: "Edge",
+    title: "Microsoft Edge — Chromium, driven over Chrome DevTools Protocol (CDP)",
+  },
+  firefox: {
+    label: "Firefox",
+    title: "Firefox — driven over WebDriver BiDi (not Chrome CDP); use the page_* tools",
+  },
+}
+
+function BrowserCell({ browser }: { browser?: "chrome" | "edge" | "firefox" }) {
+  const meta = BROWSER_META[browser ?? "chrome"]
+  // Plain label in the standard cell font/color — matches Agent/Project text,
+  // no color dot or badge.
+  return (
+    <div className="font-medium" title={meta.title}>
+      {meta.label}
     </div>
   )
 }
@@ -1443,6 +1472,7 @@ export function App() {
             <div className="mb-3 flex items-center justify-between">
               <SectionLabel className="mb-0">Live Chrome sessions</SectionLabel>
               <div className="flex items-center gap-2">
+                <DefaultBrowserPicker />
                 <HideAllButton
                   sessions={snap.liveSessions}
                   hiddenApi={hiddenApi}
@@ -1474,6 +1504,59 @@ export function App() {
     </div>
   )
 }
+/**
+ * "Default browser" picker. Decides which browser NEW lanes get when an
+ * agent calls PortPilot without naming one (i.e. the user gave no browser
+ * instruction). An explicit per-call browser always wins, and lanes that
+ * already exist keep the browser they were created with — this only covers
+ * the "agent opened PortPilot fresh with no preference" case.
+ */
+function DefaultBrowserPicker() {
+  const [value, setValue] = useState<DefaultBrowser>("chrome")
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    getConfig()
+      .then((r) => {
+        const b = r.config?.defaultBrowser
+        if (b === "chrome" || b === "edge" || b === "firefox") setValue(b)
+      })
+      .catch(() => {
+        /* config unreadable — leave the chrome default */
+      })
+  }, [])
+  const onChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const next = e.target.value as DefaultBrowser
+    const prev = value
+    setValue(next)
+    setSaving(true)
+    try {
+      await setDefaultBrowser(next)
+    } catch {
+      setValue(prev) // write failed — don't lie about what's persisted
+    } finally {
+      setSaving(false)
+    }
+  }
+  return (
+    <label
+      className="flex items-center gap-2 text-xs text-muted-foreground"
+      title="Browser used when an agent opens a NEW lane without asking for a specific one. An explicit browser in the agent's call always wins; existing lanes keep their browser."
+    >
+      Default browser
+      <select
+        value={value}
+        onChange={onChange}
+        disabled={saving}
+        className="h-8 rounded-md border border-input bg-transparent px-2 text-xs font-medium text-foreground shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30 [&>option]:bg-neutral-900"
+      >
+        <option value="chrome">Chrome</option>
+        <option value="edge">Edge</option>
+        <option value="firefox">Firefox</option>
+      </select>
+    </label>
+  )
+}
+
 function SectionLabel({
   children,
   className,

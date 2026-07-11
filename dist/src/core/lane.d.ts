@@ -88,7 +88,7 @@ export declare function ownerSlug(owner: string): string;
  * Order matters: when an `owner` string contains multiple keywords (rare),
  * the earliest match wins. Keep more specific names first.
  */
-export declare const KNOWN_LLM_OWNERS: readonly ["claude", "codex", "gemini", "cursor", "windsurf", "openhands", "aider", "copilot", "chatgpt"];
+export declare const KNOWN_LLM_OWNERS: readonly ["claude", "codex", "gemini", "cursor", "windsurf", "openhands", "aider", "copilot", "chatgpt", "goose", "opencode"];
 export interface CanonicalOwner {
     /** The agent name we'll show in the dashboard AGENT column. Always one
      *  of KNOWN_LLM_OWNERS, or the literal "agent" fallback. */
@@ -97,21 +97,6 @@ export interface CanonicalOwner {
      *  "codex-test-alpha"). Useful as an automatic sessionId. */
     custom?: string;
 }
-/**
- * Distill a free-form `owner` string down to a canonical LLM provider name.
- *
- * Examples:
- *   "codex-test-alpha"  → { canonical: "codex",  custom: "test-alpha" }
- *   "agent-random-1"    → { canonical: "agent",  custom: "agent-random-1" }
- *   "claude"            → { canonical: "claude" }
- *   "ClAude_v2"         → { canonical: "claude", custom: "v2" }
- *   "batch2-agent-3"    → { canonical: "agent",  custom: "batch2-agent-3" }
- *   ""                  → { canonical: "agent" }
- *
- * Anything we can't recognize as a known LLM falls back to the literal
- * "agent". The original user-supplied string is preserved in `custom` so
- * callers can promote it to `sessionId` automatically and not lose info.
- */
 export declare function canonicalizeOwner(raw: string | undefined | null): CanonicalOwner;
 /**
  * Normalize and clamp a session id to safe filename characters. Empty or

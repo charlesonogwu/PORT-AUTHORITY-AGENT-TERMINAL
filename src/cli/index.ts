@@ -3,7 +3,7 @@ import process from "node:process";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
-import { Lane, isStale, normalizeCwd, nowIso } from "../core/lane.js";
+import { Lane, isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
 import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { scanPorts, hasSonar } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
@@ -292,19 +292,22 @@ async function cmdOpen(ctx: CliContext): Promise<void> {
   const task = flagString(ctx.args, "task");
   const url = flagString(ctx.args, "url");
   const browserFlag = flagString(ctx.args, "browser");
-  const browser = normalizeBrowserKind(browserFlag) ?? "chrome";
-  if (browserFlag && !normalizeBrowserKind(browserFlag)) {
+  const requestedBrowser = normalizeBrowserKind(browserFlag);
+  if (browserFlag && !requestedBrowser) {
     fail(ctx, `unknown --browser "${browserFlag}". Valid values: chrome, edge, firefox.`, 1);
   }
-  const label = browserLabel(browser);
+  // No --browser → the allocator resolves it (existing lane's browser, else
+  // the config defaultBrowser, else chrome).
   const reserve = await allocateLane({
     owner,
     cwd,
     ...(sessionId ? { sessionId } : {}),
     ...(task ? { task } : {}),
-    browser,
+    ...(requestedBrowser ? { browser: requestedBrowser } : {}),
   });
   const lane = reserve.lane;
+  const browser = laneBrowser(lane);
+  const label = browserLabel(browser);
   await mkdir(lane.chromeProfileDir, { recursive: true }).catch(() => {});
   const result = await checkLane(lane);
   if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
@@ -455,6 +458,7 @@ async function cmdConfig(ctx: CliContext): Promise<void> {
         ctx.stdout.write(`warnAtActiveLanes: ${cfg.warnAtActiveLanes ?? "(disabled)"}\n`);
         ctx.stdout.write(`chromeDebugRange:  ${cfg.chromeDebugRange ? `${cfg.chromeDebugRange.start}-${cfg.chromeDebugRange.end}` : "(default)"}\n`);
         ctx.stdout.write(`appPortRange:      ${cfg.appPortRange ? `${cfg.appPortRange.start}-${cfg.appPortRange.end}` : "(default)"}\n`);
+        ctx.stdout.write(`defaultBrowser:    ${cfg.defaultBrowser ?? "(chrome)"}\n`);
       }
       return;
     }
@@ -501,8 +505,12 @@ async function cmdConfig(ctx: CliContext): Promise<void> {
         const m = /^(\d+)-(\d+)$/.exec(value!);
         if (!m) fail(ctx, `${key} must be like 9322-9399`, 1);
         next[key] = { start: Number(m[1]), end: Number(m[2]) };
+      } else if (key === "defaultBrowser") {
+        const b = normalizeBrowserKind(value);
+        if (!b) fail(ctx, `defaultBrowser must be chrome, edge, or firefox`, 1);
+        next[key] = b;
       } else {
-        fail(ctx, `unknown key '${key}'. Allowed: maxActiveLanes, warnAtActiveLanes, chromeDebugRange, appPortRange`, 1);
+        fail(ctx, `unknown key '${key}'. Allowed: maxActiveLanes, warnAtActiveLanes, chromeDebugRange, appPortRange, defaultBrowser`, 1);
       }
       next.version = 1;
       await saveConfig(next as unknown as Parameters<typeof saveConfig>[0]);

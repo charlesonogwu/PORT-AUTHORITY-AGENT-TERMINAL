@@ -1,7 +1,7 @@
 import { laneBrowser, DEFAULT_APP_PORT_RANGE, DEFAULT_CHROME_DEBUG_RANGE, DEFAULT_SESSION_ID, canonicalizeOwner, isStale, laneSessionId, newLaneId, normalizeCwd, nowIso, ownerSlug, projectSlug, sessionSlug, } from "./lane.js";
 import { profileDirFor } from "./paths.js";
 import { isPortInUse, scanPorts } from "./scanner.js";
-import { evaluateBrowserAttach } from "./browsers.js";
+import { evaluateBrowserAttach, normalizeBrowserKind } from "./browsers.js";
 import { listLanes, updateRegistry } from "./registry.js";
 import { CapacityError, loadConfig } from "./config.js";
 function rangeIter(range) {
@@ -72,16 +72,38 @@ export function findExistingLane(lanes, owner, cwd, sessionId = DEFAULT_SESSION_
     return lanes.find((l) => {
         if (laneBrowser(l) !== browser)
             return false;
-        if (normalizeCwd(l.cwd) !== target)
-            return false;
-        if (laneSessionId(l) !== sessionId)
-            return false;
-        if (l.status === "released")
-            return false;
-        if (l.owner === owner)
-            return true;
-        return canonicalizeOwner(l.owner).canonical === owner;
+        return laneMatchesKey(l, owner, target, sessionId);
     });
+}
+function laneMatchesKey(l, owner, normalizedCwd, sessionId) {
+    if (normalizeCwd(l.cwd) !== normalizedCwd)
+        return false;
+    if (laneSessionId(l) !== sessionId)
+        return false;
+    if (l.status === "released")
+        return false;
+    if (l.owner === owner)
+        return true;
+    return canonicalizeOwner(l.owner).canonical === owner;
+}
+/**
+ * Find an existing lane for (owner, cwd, sessionId) regardless of browser.
+ * Used when a caller does NOT specify a browser: reconnecting to whatever
+ * lane it already has beats creating a second lane in the default browser.
+ * When the key has lanes in several browsers (created explicitly), prefer
+ * the `prefer` browser if one matches, else the most recently seen lane.
+ */
+export function findExistingLaneAnyBrowser(lanes, owner, cwd, sessionId = DEFAULT_SESSION_ID, prefer) {
+    const target = normalizeCwd(cwd);
+    const matches = lanes.filter((l) => laneMatchesKey(l, owner, target, sessionId));
+    if (matches.length === 0)
+        return undefined;
+    if (prefer) {
+        const hit = matches.find((l) => laneBrowser(l) === prefer);
+        if (hit)
+            return hit;
+    }
+    return matches.reduce((a, b) => (a.lastSeen >= b.lastSeen ? a : b));
 }
 /**
  * Reserve a lane for `owner` working in `cwd`. If an active reservation
@@ -129,8 +151,28 @@ export async function allocateLane(opts) {
             }
             return lane;
         });
-        const browser = opts.browser ?? "chrome";
-        const existing = findExistingLane(lanes, ownerCanonical, opts.cwd, sessionId, browser);
+        // Browser resolution, in priority order:
+        //   1. explicit opts.browser — the agent (or the user's instruction to
+        //      it) said which browser; always wins.
+        //   2. an existing lane for this (owner, cwd, session) — a reconnecting
+        //      caller keeps its lane's browser, whatever the default says.
+        //   3. config.defaultBrowser — the dashboard's "Default browser" picker.
+        //   4. "chrome".
+        // The config value is user-edited JSON, so validate before trusting it.
+        const cfgDefault = normalizeBrowserKind(config.defaultBrowser);
+        let browser;
+        let existing;
+        if (opts.browser) {
+            browser = opts.browser;
+            existing = findExistingLane(lanes, ownerCanonical, opts.cwd, sessionId, browser);
+        }
+        else {
+            // Prefer the configured default when several lanes exist for this key;
+            // with no default configured, prefer chrome (the historical behaviour)
+            // so pre-existing chrome lanes keep winning ambiguous reconnects.
+            existing = findExistingLaneAnyBrowser(lanes, ownerCanonical, opts.cwd, sessionId, cfgDefault ?? "chrome");
+            browser = existing ? laneBrowser(existing) : (cfgDefault ?? "chrome");
+        }
         if (existing) {
             alreadyExisted = true;
             // Re-activate stale lanes when the caller comes back. This is what

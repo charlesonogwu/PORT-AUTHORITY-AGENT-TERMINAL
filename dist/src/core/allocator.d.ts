@@ -28,9 +28,10 @@ export interface AllocateOptions {
     status?: LaneStatus;
     /** Optional browser script path the agent will use to talk to Chrome. */
     browserScript?: string;
-    /** Browser backend for this lane. Default "chrome". Firefox lanes get a
-     *  distinct profile dir (suffix "-firefox") so the two backends can never
-     *  share one. */
+    /** Browser backend for this lane. Omit to let the allocator resolve it:
+     *  an existing lane for the same key keeps its browser, else the config's
+     *  defaultBrowser, else "chrome". Non-chrome lanes get a distinct profile
+     *  dir suffix (e.g. "-firefox") so backends can never share one. */
     browser?: BrowserKind;
 }
 export interface AllocateResult {
@@ -43,6 +44,14 @@ export interface AllocateResult {
     activeLaneCount?: number;
 }
 export declare function findExistingLane(lanes: Lane[], owner: string, cwd: string, sessionId?: string, browser?: BrowserKind): Lane | undefined;
+/**
+ * Find an existing lane for (owner, cwd, sessionId) regardless of browser.
+ * Used when a caller does NOT specify a browser: reconnecting to whatever
+ * lane it already has beats creating a second lane in the default browser.
+ * When the key has lanes in several browsers (created explicitly), prefer
+ * the `prefer` browser if one matches, else the most recently seen lane.
+ */
+export declare function findExistingLaneAnyBrowser(lanes: Lane[], owner: string, cwd: string, sessionId?: string, prefer?: BrowserKind): Lane | undefined;
 /**
  * Reserve a lane for `owner` working in `cwd`. If an active reservation
  * already exists for this (owner, cwd, sessionId) tuple, it is returned

@@ -20,7 +20,7 @@ import {
 import { profileDirFor } from "./paths.js";
 import { PortObservation, isPortInUse, scanPorts } from "./scanner.js";
 import { ChromeAttachVerdict } from "./chrome.js";
-import { evaluateBrowserAttach } from "./browsers.js";
+import { evaluateBrowserAttach, normalizeBrowserKind } from "./browsers.js";
 import { listLanes, updateRegistry } from "./registry.js";
 import { CapacityError, loadConfig } from "./config.js";
 
@@ -51,9 +51,10 @@ export interface AllocateOptions {
   status?: LaneStatus;
   /** Optional browser script path the agent will use to talk to Chrome. */
   browserScript?: string;
-  /** Browser backend for this lane. Default "chrome". Firefox lanes get a
-   *  distinct profile dir (suffix "-firefox") so the two backends can never
-   *  share one. */
+  /** Browser backend for this lane. Omit to let the allocator resolve it:
+   *  an existing lane for the same key keeps its browser, else the config's
+   *  defaultBrowser, else "chrome". Non-chrome lanes get a distinct profile
+   *  dir suffix (e.g. "-firefox") so backends can never share one. */
   browser?: BrowserKind;
 }
 
@@ -148,12 +149,40 @@ export function findExistingLane(
   // would hand a Firefox caller a Chrome profile dir.
   return lanes.find((l) => {
     if (laneBrowser(l) !== browser) return false;
-    if (normalizeCwd(l.cwd) !== target) return false;
-    if (laneSessionId(l) !== sessionId) return false;
-    if (l.status === "released") return false;
-    if (l.owner === owner) return true;
-    return canonicalizeOwner(l.owner).canonical === owner;
+    return laneMatchesKey(l, owner, target, sessionId);
   });
+}
+
+function laneMatchesKey(l: Lane, owner: string, normalizedCwd: string, sessionId: string): boolean {
+  if (normalizeCwd(l.cwd) !== normalizedCwd) return false;
+  if (laneSessionId(l) !== sessionId) return false;
+  if (l.status === "released") return false;
+  if (l.owner === owner) return true;
+  return canonicalizeOwner(l.owner).canonical === owner;
+}
+
+/**
+ * Find an existing lane for (owner, cwd, sessionId) regardless of browser.
+ * Used when a caller does NOT specify a browser: reconnecting to whatever
+ * lane it already has beats creating a second lane in the default browser.
+ * When the key has lanes in several browsers (created explicitly), prefer
+ * the `prefer` browser if one matches, else the most recently seen lane.
+ */
+export function findExistingLaneAnyBrowser(
+  lanes: Lane[],
+  owner: string,
+  cwd: string,
+  sessionId: string = DEFAULT_SESSION_ID,
+  prefer?: BrowserKind,
+): Lane | undefined {
+  const target = normalizeCwd(cwd);
+  const matches = lanes.filter((l) => laneMatchesKey(l, owner, target, sessionId));
+  if (matches.length === 0) return undefined;
+  if (prefer) {
+    const hit = matches.find((l) => laneBrowser(l) === prefer);
+    if (hit) return hit;
+  }
+  return matches.reduce((a, b) => (a.lastSeen >= b.lastSeen ? a : b));
 }
 
 /**
@@ -207,8 +236,27 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
       return lane;
     });
 
-    const browser: BrowserKind = opts.browser ?? "chrome";
-    const existing = findExistingLane(lanes, ownerCanonical, opts.cwd, sessionId, browser);
+    // Browser resolution, in priority order:
+    //   1. explicit opts.browser — the agent (or the user's instruction to
+    //      it) said which browser; always wins.
+    //   2. an existing lane for this (owner, cwd, session) — a reconnecting
+    //      caller keeps its lane's browser, whatever the default says.
+    //   3. config.defaultBrowser — the dashboard's "Default browser" picker.
+    //   4. "chrome".
+    // The config value is user-edited JSON, so validate before trusting it.
+    const cfgDefault = normalizeBrowserKind(config.defaultBrowser);
+    let browser: BrowserKind;
+    let existing: Lane | undefined;
+    if (opts.browser) {
+      browser = opts.browser;
+      existing = findExistingLane(lanes, ownerCanonical, opts.cwd, sessionId, browser);
+    } else {
+      // Prefer the configured default when several lanes exist for this key;
+      // with no default configured, prefer chrome (the historical behaviour)
+      // so pre-existing chrome lanes keep winning ambiguous reconnects.
+      existing = findExistingLaneAnyBrowser(lanes, ownerCanonical, opts.cwd, sessionId, cfgDefault ?? "chrome");
+      browser = existing ? laneBrowser(existing) : (cfgDefault ?? "chrome");
+    }
     if (existing) {
       alreadyExisted = true;
       // Re-activate stale lanes when the caller comes back. This is what
