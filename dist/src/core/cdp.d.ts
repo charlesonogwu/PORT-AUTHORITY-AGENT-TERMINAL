@@ -19,6 +19,11 @@ export interface CdpTarget {
 }
 /** List page-type targets on a CDP port. */
 export declare function listCdpPages(port: number, timeoutMs?: number): Promise<CdpTarget[]>;
+/** Open a NEW tab via the HTTP endpoint and return its target descriptor.
+ *  Modern Chrome/Edge require PUT for /json/new (GET is rejected). The tab
+ *  opens on about:blank; navigation is the caller's job so the wait-for-load
+ *  semantics stay identical to every other navigate. */
+export declare function createCdpTab(port: number, timeoutMs?: number): Promise<CdpTarget>;
 export declare class CdpClient {
     private ws;
     private nextId;

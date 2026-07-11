@@ -416,6 +416,12 @@ function useSnapshot(intervalMs = POLL_MS) {
 /* -------------------------------------------------------------------------- */
 /*  Utilities                                                                 */
 /* -------------------------------------------------------------------------- */
+/** 639 -> "639 MB", 1478 -> "1.4 GB". Amber styling kicks in at >= 1 GB. */
+function formatMB(mb: number): string {
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
+  return `${mb} MB`
+}
+
 function shortUrl(u?: string) {
   if (!u) return ""
   if (u.length <= 80) return u
@@ -571,6 +577,7 @@ function LiveSessions({
             <TableHead className="w-[110px]">Browser</TableHead>
             <TableHead>Current page</TableHead>
             <TableHead className="w-[120px]">Port / pid</TableHead>
+            <TableHead className="w-[80px]">RAM</TableHead>
             <TableHead className="w-[110px]">Source</TableHead>
             <TableHead className="w-[90px] text-right">Action</TableHead>
           </TableRow>
@@ -602,7 +609,7 @@ function SessionGroup({
   return (
     <>
       <TableRow className="border-y bg-muted/40 hover:bg-muted/40">
-        <TableCell colSpan={7} className="py-2 text-xs">
+        <TableCell colSpan={8} className="py-2 text-xs">
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center">
               <span className="mr-3 font-semibold text-foreground">
@@ -735,6 +742,21 @@ function SessionRow({
           </div>
         </TableCell>
         <TableCell>
+          {s.memoryMB !== undefined ? (
+            <div
+              className={cn(
+                "font-mono text-sm",
+                s.memoryMB >= 1024 && "font-semibold text-amber-500"
+              )}
+              title="Working-set RAM of this lane's whole browser tree (parent + renderer processes)"
+            >
+              {formatMB(s.memoryMB)}
+            </div>
+          ) : (
+            <div className="text-xs text-muted-foreground">—</div>
+          )}
+        </TableCell>
+        <TableCell>
           <SourcePill session={s} />
           {s.hasSavedData && (
             <div
@@ -764,7 +786,7 @@ function SessionRow({
       </TableRow>
       {open && (
         <TableRow className="bg-muted/20 hover:bg-muted/20">
-          <TableCell colSpan={7} className="px-6 py-4">
+          <TableCell colSpan={8} className="px-6 py-4">
             <ExpandedRow s={s} />
           </TableCell>
         </TableRow>

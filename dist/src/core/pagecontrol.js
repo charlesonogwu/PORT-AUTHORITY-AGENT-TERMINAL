@@ -5,7 +5,7 @@ import { portpilotHome } from "./paths.js";
 import { checkLane } from "./allocator.js";
 import { isSafeInitialUrl } from "./chrome.js";
 import { BidiClient } from "./bidi.js";
-import { CdpClient, CdpError, listCdpPages } from "./cdp.js";
+import { CdpClient, CdpError, createCdpTab, listCdpPages } from "./cdp.js";
 import { clickExpr, evalWrapperExpr, fillExpr, metaExpr, textExpr } from "./pagejs.js";
 /**
  * The uniform page-control façade: ONE interface for driving a lane's
@@ -101,6 +101,14 @@ class BidiPageController {
         }
         return out;
     }
+    async newTab(url) {
+        const ctx = await this.client.createContext();
+        if (url) {
+            const meta = await this.navigate(url, ctx);
+            return { id: ctx, url: meta.url, title: meta.title };
+        }
+        return { id: ctx, url: "about:blank" };
+    }
     async navigate(url, tabId) {
         assertNavigableUrl(url);
         const ctx = await this.resolveContext(tabId);
@@ -171,6 +179,14 @@ class CdpPageController {
     async tabs() {
         const pages = await listCdpPages(this.port);
         return pages.map((p) => (p.title === undefined ? { id: p.id, url: p.url } : { id: p.id, url: p.url, title: p.title }));
+    }
+    async newTab(url) {
+        const target = await createCdpTab(this.port);
+        if (url) {
+            const meta = await this.navigate(url, target.id);
+            return { id: target.id, url: meta.url, title: meta.title };
+        }
+        return { id: target.id, url: target.url };
     }
     async navigate(url, tabId) {
         assertNavigableUrl(url);

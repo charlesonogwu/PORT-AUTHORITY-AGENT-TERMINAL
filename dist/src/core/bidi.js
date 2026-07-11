@@ -111,6 +111,14 @@ export class BidiClient {
         const contexts = result.contexts ?? [];
         return contexts.map((c) => ({ id: c.context, url: c.url }));
     }
+    /** Open a NEW top-level context (tab) and return its id. */
+    async createContext() {
+        const result = await this.send("browsingContext.create", { type: "tab" });
+        const context = result.context;
+        if (!context)
+            throw new BidiError("browsingContext.create returned no context id");
+        return context;
+    }
     /** Navigate a context and wait for the load to complete. */
     async navigate(contextId, url) {
         const result = await this.send("browsingContext.navigate", { context: contextId, url, wait: "complete" });

@@ -65,6 +65,9 @@ export interface LiveSession {
      *  dashboard shows a "saved" marker for these rows. Cheap to compute (a few
      *  stat calls), unlike a full size walk. */
     hasSavedData: boolean;
+    /** Working-set RAM of this lane's whole browser tree (parent + renderers),
+     *  in MB. Absent when the process snapshot has no memory data. */
+    memoryMB?: number;
     browserVersion?: string;
     /** All non-internal CDP targets we found. Empty for pipe-mode Chromes. */
     tabs: CdpTab[];

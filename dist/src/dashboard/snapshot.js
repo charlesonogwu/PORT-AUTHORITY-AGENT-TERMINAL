@@ -18,7 +18,7 @@ import { portpilotHome, registryPath } from "../core/paths.js";
 import { markStaleLanes } from "../core/registry.js";
 import { profileHasSavedData } from "../core/profiles.js";
 import { findAllAgentChromes, findAllAgentFirefoxes, findLiveChromes, inferCwdFromProfile, inferOwnerFromProfile, inferProjectFromProfile, readPortpilotLanes, } from "./sources.js";
-import { collectProcessSnapshot } from "./process-info.js";
+import { collectProcessSnapshot, sumTreeMemoryMB } from "./process-info.js";
 import { inferAgentFromLiveChrome, walkParentChain } from "./agent-inference.js";
 import { BirthRegistry } from "./chrome-births.js";
 async function fetchJson(url, timeoutMs) {
@@ -308,6 +308,11 @@ export async function buildSnapshot(opts = {}) {
             };
         const session = buildLiveSession(live, ppLane, cdp, processSnap, births);
         session.hasSavedData = session.chromeProfileDir ? await profileHasSavedData(session.chromeProfileDir) : false;
+        if (live.pid !== undefined) {
+            const mem = sumTreeMemoryMB(live.pid, processSnap.processes);
+            if (mem !== undefined)
+                session.memoryMB = mem;
+        }
         return session;
     }));
     // Sort: with-pages first, then by agent name, then by port.

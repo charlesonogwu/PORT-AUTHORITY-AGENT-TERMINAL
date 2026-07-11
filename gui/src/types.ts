@@ -32,6 +32,9 @@ export interface LiveSession {
   debugMode: "port" | "pipe"
   /** Which browser backend this lane runs. Absent/"chrome" is the default. */
   browser?: "chrome" | "firefox" | "edge"
+  /** Working-set RAM of this lane's whole browser tree, in MB. Absent when
+   *  the snapshot has no memory data (non-Windows). */
+  memoryMB?: number
   appPort?: number
   chromeProfileDir: string
   /** True when the profile already holds a login/cookie/localStorage store —

@@ -24,6 +24,10 @@ export declare class PageControlError extends Error {
 export interface PageController {
     browser: BrowserKind;
     tabs(): Promise<PageTab[]>;
+    /** Open a NEW tab in this lane's EXISTING browser (the RAM-friendly
+     *  alternative to reserving another lane — a tab costs ~100-200 MB, a whole
+     *  extra lane costs ~0.5-1.5 GB). Navigates it when `url` is given. */
+    newTab(url?: string): Promise<PageTab>;
     navigate(url: string, tabId?: string): Promise<{
         url: string;
         title: string;

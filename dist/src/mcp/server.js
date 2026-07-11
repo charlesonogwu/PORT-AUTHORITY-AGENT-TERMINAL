@@ -51,7 +51,7 @@ export function buildMcpServer() {
                 .optional()
                 .describe('Pass ONLY the LLM provider name: "claude", "codex", "gemini", "cursor", "windsurf", "copilot", "chatgpt", "openhands", "aider", "goose", or "opencode". DO NOT add prefixes, suffixes, batch numbers, or per-task identifiers — for example "codex-test-alpha", "agent-random-1", and "batch2-agent-3" are all WRONG. If you need to distinguish multiple parallel sessions of the same agent, put that distinction in the `sessionId` field, not here. Server normalizes anyway: any custom suffix is stripped from this field and auto-promoted to sessionId.'),
             task: z.string().optional().describe("Short description of what you're doing."),
-            sessionId: z.string().optional().describe("Optional parallel-session id when an agent runs multiple Chromes in the same project."),
+            sessionId: z.string().optional().describe("Optional parallel-session id — ONLY when you truly need a second independent browser in the same project (e.g. two different logins). Every extra sessionId launches a WHOLE separate browser (~0.5-1.5 GB RAM). If you just need more pages, reuse your existing lane and open tabs with page_newtab instead (~100-200 MB per tab)."),
             mode: z
                 .enum(["visible", "background", "headless"])
                 .optional()
@@ -152,7 +152,7 @@ export function buildMcpServer() {
             sessionId: z
                 .string()
                 .optional()
-                .describe("Optional parallel session id. Different sessions for the same (owner, cwd) get different ports and profile dirs, so one agent can run multiple concurrent Chrome instances. Omit for the implicit 'default' session."),
+                .describe("Optional parallel session id. Different sessions for the same (owner, cwd) get different ports and profile dirs, so one agent can run multiple concurrent browser instances. Omit for the implicit 'default' session. RAM note: each extra session is a whole separate browser (~0.5-1.5 GB); if you only need more pages, use page_newtab on your existing lane instead."),
             task: z.string().optional().describe("Short description of the task this lane is for."),
             appPortRange: z.object(portRangeShape).optional(),
             chromeDebugRange: z.object(portRangeShape).optional(),
@@ -377,6 +377,20 @@ export function buildMcpServer() {
             "Tab ids feed the optional 'tab' argument of the other page_* tools. The lane's browser must already be running (use 'open').",
         inputSchema: { owner: pageToolTarget.owner, cwd: pageToolTarget.cwd, sessionId: pageToolTarget.sessionId },
     }, async (args) => withPage(args, async (page) => ({ tabs: await page.tabs() })));
+    server.registerTool("page_newtab", {
+        title: "Open a new tab in a lane's EXISTING browser (RAM-friendly)",
+        description: "Open an additional tab in the lane's already-running browser and (optionally) navigate it, returning the new tab's id/url/title. " +
+            "PREFER THIS over reserving extra lanes with new sessionIds when you need several pages in the same project: a tab costs " +
+            "~100-200 MB, while every extra lane is a WHOLE separate browser (~0.5-1.5 GB of RAM). Drive each tab independently via the " +
+            "'tab' argument of the other page_* tools — on chrome/edge the returned tab id stays valid across calls; on firefox BiDi ids " +
+            "are per-call, so address tabs by 0-based index ('1') or a url/title substring instead. Works on all lane browsers.",
+        inputSchema: {
+            owner: pageToolTarget.owner,
+            cwd: pageToolTarget.cwd,
+            sessionId: pageToolTarget.sessionId,
+            url: z.string().optional().describe("Optional http/https/about/file/data URL to open in the new tab (waits for load)."),
+        },
+    }, async (args) => withPage(args, async (page) => ({ tab: await page.newTab(args.url) })));
     server.registerTool("page_goto", {
         title: "Navigate a lane's browser tab and wait for the load to finish",
         description: "Navigate the lane's browser to a URL and wait until the document load completes, then return the final url + title as confirmation. " +

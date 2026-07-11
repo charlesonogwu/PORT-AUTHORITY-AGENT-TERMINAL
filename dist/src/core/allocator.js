@@ -26,6 +26,17 @@ function buildContext(observations, lanes) {
     for (const lane of lanes) {
         if (lane.status === "released")
             continue;
+        // A STALE lane only holds its ports while something actually listens
+        // there (the `occupied` set already blocks live ports). A stale lane
+        // with a dead browser is a leftover, not a reservation — without this
+        // rule abandoned lanes accumulate until they squat the entire range and
+        // every allocation fails with "No free ... port" (observed live: 74
+        // stale lanes holding all 78 debug ports while only 5 were listening).
+        // If an agent later returns to a reclaimed port, check_lane's safety
+        // verdict refuses the attach — a safe, loud failure for one lane
+        // instead of a global allocation outage for everyone.
+        if (lane.status === "stale")
+            continue;
         if (typeof lane.appPort === "number")
             reservedAppPorts.add(lane.appPort);
         if (typeof lane.chromeDebugPort === "number")
