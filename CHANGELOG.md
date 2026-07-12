@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.13] — atomic port reclaim (fixes the two-lanes-one-port conflict)
+
+### Fixed
+
+- **Reclaiming a stale lane's port now retires the stale lane's claim in the
+  same transaction.** 0.3.12 let new lanes reuse ports held by stale lanes
+  whose browser was gone, but left the port on the stale lane's registry
+  record — so both lanes claimed the port and the dashboard (correctly)
+  reported "2 reservations claim port …" plus a profile-mismatch conflict.
+  The stale lane keeps its identity and profile; only the port reference is
+  dropped.
+- **A lane that comes back after losing its port gets a fresh one.** The
+  existing-lane (reconnect) path now tops up any port this call needs and
+  the lane is missing — same lane id, same profile (logins survive), new
+  port, and never a double-claim. Lanes reserved with `--no-chrome-port` /
+  `--no-app-port` stay portless when the caller still opts out.
+
 ## [0.3.12] — conserve RAM: page_newtab + a RAM column
 
 The first-principles problem: every lane is a WHOLE browser (~0.5-1.5 GB),

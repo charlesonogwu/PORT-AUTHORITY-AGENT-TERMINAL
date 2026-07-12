@@ -110,6 +110,32 @@ function buildContext(observations: PortObservation[], lanes: Lane[]): PortPickC
   return { occupied, reservedAppPorts, reservedChromePorts };
 }
 
+/**
+ * Retire port claims we just handed to another lane from any STALE lane
+ * still bookkeeping them. Reclaiming (buildContext ignores stale holds) must
+ * also drop the stale lane's claim in the same transaction — otherwise the
+ * registry ends up with two lanes on one port and the dashboard reports a
+ * conflict (seen live: a stale drive-bench lane and a fresh lane both
+ * claiming 9322). The stale lane keeps its identity and profile; if its
+ * agent returns, allocateLane's existing-lane path mints it a fresh port.
+ */
+function stripReclaimedPorts(lanes: Lane[], claimantId: string, appPort?: number, chromeDebugPort?: number): Lane[] {
+  if (appPort === undefined && chromeDebugPort === undefined) return lanes;
+  return lanes.map((l) => {
+    if (l.status !== "stale" || l.id === claimantId) return l;
+    let out = l;
+    if (chromeDebugPort !== undefined && out.chromeDebugPort === chromeDebugPort) {
+      const { chromeDebugPort: _dropped, ...rest } = out;
+      out = rest as Lane;
+    }
+    if (appPort !== undefined && out.appPort === appPort) {
+      const { appPort: _dropped, ...rest } = out;
+      out = rest as Lane;
+    }
+    return out;
+  });
+}
+
 function buildProfileDir(
   owner: string,
   project: string,
@@ -269,12 +295,40 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
     }
     if (existing) {
       alreadyExisted = true;
-      // Re-activate stale lanes when the caller comes back. This is what
-      // "I'm reconnecting to my project" should do — same port, same
-      // profile, status flips back to active.
+      // Re-activate stale lanes when the caller comes back. Same profile
+      // (logins survive); usually the same ports too — but a lane that went
+      // stale may have had its port reclaimed by another lane in the
+      // meantime, so top up whatever this call needs and is missing.
       const reactivatedStatus: LaneStatus = existing.status === "stale" ? "active" : existing.status;
-      result = { ...existing, sessionId, lastSeen: nowIso(), status: reactivatedStatus };
-      return lanes.map((l) => (l.id === existing.id ? result! : l));
+      let appPort = existing.appPort;
+      let chromeDebugPort = existing.chromeDebugPort;
+      const needApp = appPort === undefined && opts.withAppPort !== false;
+      const needChrome = chromeDebugPort === undefined && opts.withChromePort !== false;
+      if (needApp || needChrome) {
+        const ctx = buildContext(observations, lanes);
+        if (needApp) {
+          const appRange = opts.appPortRange ?? config.appPortRange ?? DEFAULT_APP_PORT_RANGE;
+          appPort = pickPort(appRange, new Set<number>([...ctx.occupied, ...ctx.reservedAppPorts]));
+          if (appPort === undefined) throw new Error(`No free app port in range ${appRange.start}-${appRange.end}`);
+        }
+        if (needChrome) {
+          const chromeRange = opts.chromeDebugRange ?? config.chromeDebugRange ?? DEFAULT_CHROME_DEBUG_RANGE;
+          chromeDebugPort = pickPort(chromeRange, new Set<number>([...ctx.occupied, ...ctx.reservedChromePorts]));
+          if (chromeDebugPort === undefined) throw new Error(`No free Chrome debug port in range ${chromeRange.start}-${chromeRange.end}`);
+        }
+      }
+      result = {
+        ...existing,
+        sessionId,
+        lastSeen: nowIso(),
+        status: reactivatedStatus,
+        ...(appPort !== undefined ? { appPort } : {}),
+        ...(chromeDebugPort !== undefined ? { chromeDebugPort } : {}),
+      };
+      const updated = lanes.map((l) => (l.id === existing.id ? result! : l));
+      // Whether the ports are retained or freshly minted, no stale lane may
+      // keep claiming them — that's the two-lanes-one-port conflict.
+      return stripReclaimedPorts(updated, existing.id, appPort, chromeDebugPort);
     }
     // Capacity check — released AND stale lanes are paperwork, not
     // contested resources. They don't block new reservations.
@@ -331,7 +385,7 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
     ) {
       warning = `Approaching capacity: ${activeLaneCount} active lanes (warn at ${config.warnAtActiveLanes}, max ${config.maxActiveLanes ?? "unlimited"}).`;
     }
-    return [...lanes, lane];
+    return [...stripReclaimedPorts(lanes, lane.id, appPort, chromeDebugPort), lane];
   });
 
   if (!result) throw new Error("Allocation failed: no lane returned");
