@@ -11,6 +11,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.15] — belt-and-suspenders isolation from Windows shell URL hijack
+
+### Fixed
+
+- **Chrome and Edge lanes no longer silently install "default web apps"
+  into their profiles.** Edge's onboarding auto-installed Adblock Plus and
+  (on some profiles) other recommended extensions the moment a lane spawned
+  — a welcome tab and an extension background page appeared in the lane's
+  CDP tab list, which reads as "an external URL joined my lane" even though
+  it was really Edge's own onboarding. Every lane now launches with
+  `--disable-default-apps`, so a fresh lane's tab list contains only what
+  the agent asked for.
+
+### Hardened
+
+- **Additional isolation flags on every Chrome/Edge launch mode**
+  (`--disable-default-apps`, `--no-service-autorun`,
+  `--disable-background-networking`). None of these change what an agent
+  can do; each closes a specific vector a Windows-shell URL could reach the
+  lane's profile through (default-app registration, Windows Service
+  autorun, background networking). Applied BEFORE any caller `extraArgs`
+  so nothing can override them.
+- Firefox lanes already rely on `-no-remote`, Firefox's definitive
+  isolation switch — unchanged.
+
+### Investigation notes
+
+Four controlled reproduction attempts (visible + background mode; with and
+without Edge Startup Boost; with and without a running default-profile
+Edge) on Windows 11 + Edge 150 with the 0.3.14 flags all showed external
+URLs correctly spawning or reusing a fresh default-profile Edge, never
+joining a PortPilot lane. Primary isolation (Chromium's process singleton
+is a file lock per `--user-data-dir`) is working. The new flags are
+defense-in-depth against untested scenarios and — most importantly — fix
+the extension auto-install intrusion above, which we now believe is the
+actual symptom being reported.
+
+### Tests
+
+- New `tests/shell-url-isolation.test.ts` locks in the three isolation
+  invariants a refactor could easily weaken:
+  1. every launch plan sets `--user-data-dir` to the lane's dedicated
+     profile (never to an OS-default profile path);
+  2. every launch plan carries `--no-first-run --no-default-browser-check`
+     plus the hardening flags on every mode;
+  3. hardening flags come BEFORE caller `extraArgs` so a caller can't
+     override them by passing a duplicate.
+- 10 new tests; suite: 336 pass / 0 fail.
+
 ## [0.3.14] — dashboard Show works on background lanes
 
 ### Fixed
