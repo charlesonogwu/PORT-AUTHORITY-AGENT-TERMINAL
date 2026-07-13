@@ -11,6 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.14] — dashboard Show works on background lanes
+
+### Fixed
+
+- **"Show" now works for background-mode lanes.** Background lanes spawn
+  their browser parked off-screen AND with the initial window state hidden,
+  so the old lookup (Process.MainWindowHandle, visible-only) found nothing
+  and errored — Show had never worked for exactly the lanes users most want
+  to bring forward. The window is now located via EnumWindows including
+  hidden windows (real-sized, page-titled ones preferred over Chrome's
+  IME/compositor helpers), un-hidden, moved on-screen if parked, and
+  focused: Show literally means "show me this browser" for every launch
+  mode now.
+- **Readable window-action errors.** PowerShell's Write-Error prefixes the
+  entire embedded script to stderr, which rendered every Show/Hide/Unhide
+  failure toast as truncated "$ErrorActio…" garbage. Errors now emit just
+  the message (e.g. "PID 1234 has no browser window (headless browsers have
+  none)").
+
 ## [0.3.13] — atomic port reclaim (fixes the two-lanes-one-port conflict)
 
 ### Fixed
