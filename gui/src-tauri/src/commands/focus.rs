@@ -109,21 +109,34 @@ pub fn unhide_chrome(pid: u32, placement: WinPlacement) -> Result<Value, String>
 
 #[cfg(target_os = "windows")]
 fn run_focus(pid: u32) -> Result<(), String> {
-    // SW_RESTORE = 9 (restore + activate). Bring the window to the foreground.
-    let script = r#"$ErrorActionPreference='Stop'
-try {
-  $proc = Get-Process -Id __PID__ -ErrorAction Stop
-  $hwnd = $proc.MainWindowHandle
-  if ($hwnd -eq [System.IntPtr]::Zero) { Write-Error "no visible window for PID __PID__"; exit 1 }
-  Add-Type -Name PpFocus -Namespace PpNs -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindowAsync(System.IntPtr h, int n);
-[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h);
-'@
-  [void][PpNs.PpFocus]::ShowWindowAsync($hwnd, 9)
-  [void][PpNs.PpFocus]::SetForegroundWindow($hwnd)
+    // Show = "put this browser in front of me", whatever state it's in:
+    //   - Windows are found via EnumWindows (PPWIN_PREAMBLE), NOT
+    //     Process.MainWindowHandle — the latter returns 0 for windows parked
+    //     off-screen (background-mode lanes), which made Show error out on
+    //     exactly the lanes users most want to see.
+    //   - A window parked off-screen (background launch) is first moved to a
+    //     sane on-screen rect; then SW_RESTORE + SetForegroundWindow.
+    //   - Errors go through [Console]::Error.WriteLine, NOT Write-Error:
+    //     Write-Error prefixes the entire script text to stderr, which turned
+    //     every toast into unreadable "$ErrorActio…" garbage.
+    let script = format!(
+        r#"$ErrorActionPreference='Stop'
+try {{
+{preamble}
+  $h = [PpWin]::BestShowTarget([uint32]{pid})
+  if ($h -eq [System.IntPtr]::Zero) {{ [Console]::Error.WriteLine("PID {pid} has no browser window (headless browsers have none)"); exit 1 }}
+  $r = New-Object "PpWin+RECT"
+  [void][PpWin]::GetWindowRect($h, [ref]$r)
+  if ($r.Left -le -30000 -or $r.Top -le -30000) {{
+    [void][PpWin]::SetWindowPos($h, [System.IntPtr]::Zero, 80, 80, 1280, 1000, 0x4)
+  }}
+  [void][PpWin]::ShowWindow($h, 9)
+  [void][PpWin]::SetForegroundWindow($h)
   exit 0
-} catch { Write-Error $_.Exception.Message; exit 1 }"#
-        .replace("__PID__", &pid.to_string());
+}} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"#,
+        pid = pid,
+        preamble = PPWIN_PREAMBLE,
+    );
     run_powershell(&script).map(|_| ())
 }
 
@@ -149,6 +162,7 @@ public class PpWin {
   [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT p);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int X, int Y, int cx, int cy, uint f);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   [StructLayout(LayoutKind.Sequential)] public struct WINDOWPLACEMENT { public int length; public int flags; public int showCmd; public POINT a; public POINT b; public RECT rcNormalPosition; }
@@ -156,6 +170,18 @@ public class PpWin {
     var list = new List<IntPtr>();
     EnumWindows((h,l)=>{ uint p; GetWindowThreadProcessId(h, out p); if (p!=pid) return true; if (!IsWindowVisible(h)) return true; RECT r; GetWindowRect(h, out r); if (r.Right-r.Left<=0 || r.Bottom-r.Top<=0) return true; list.Add(h); return true; }, IntPtr.Zero);
     return list.ToArray();
+  }
+  [DllImport("user32.dll")] static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
+  // The window Show should target. INCLUDES HIDDEN windows: background-mode
+  // lanes spawn Chrome with the initial show-state SW_HIDE, so the real
+  // browser window is invisible AND off-screen. Filter to real-sized windows
+  // (>=200x200 — excludes IME/compositor helpers) and prefer a titled one
+  // (Chrome's actual browser window carries the page title; its similarly
+  // sized compositor sibling does not).
+  public static IntPtr BestShowTarget(uint pid) {
+    IntPtr first = IntPtr.Zero; IntPtr titled = IntPtr.Zero;
+    EnumWindows((h,l)=>{ uint p; GetWindowThreadProcessId(h, out p); if (p!=pid) return true; RECT r; GetWindowRect(h, out r); if (r.Right-r.Left<200 || r.Bottom-r.Top<200) return true; if (first==IntPtr.Zero) first=h; if (titled==IntPtr.Zero) { var sb=new System.Text.StringBuilder(4); GetWindowText(h, sb, 4); if (sb.Length>0) titled=h; } return true; }, IntPtr.Zero);
+    return titled != IntPtr.Zero ? titled : first;
   }
 }
 '@
@@ -190,7 +216,7 @@ try {{
     @{{ showCmd=$mainWp.showCmd; left=$mainWp.rcNormalPosition.Left; top=$mainWp.rcNormalPosition.Top; right=$mainWp.rcNormalPosition.Right; bottom=$mainWp.rcNormalPosition.Bottom }} | ConvertTo-Json -Compress | Write-Output
   }} else {{ Write-Output '{{}}' }}
   exit 0
-}} catch {{ Write-Error $_.Exception.Message; exit 1 }}"#,
+}} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"#,
         pid = pid,
         preamble = PPWIN_PREAMBLE,
     );
@@ -219,7 +245,7 @@ fn windows_unhide(pid: u32, show_cmd: i32, left: i32, top: i32, right: i32, bott
 try {
   $proc = Get-Process -Id __PID__ -ErrorAction Stop
   $hwnd = $proc.MainWindowHandle
-  if ($hwnd -eq [System.IntPtr]::Zero) { Write-Error "no window for PID __PID__"; exit 1 }
+  if ($hwnd -eq [System.IntPtr]::Zero) { [Console]::Error.WriteLine("no window for PID __PID__"); exit 1 }
   Add-Type -Name PpShow -Namespace PpNs -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetWindowPos(System.IntPtr h, System.IntPtr after, int X, int Y, int cx, int cy, uint f);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int n);
@@ -232,7 +258,7 @@ try {
   if (__SHOWCMD__ -eq 3) { [void][PpNs.PpShow]::ShowWindow($hwnd, $SW_SHOWMAXIMIZED) } else { [void][PpNs.PpShow]::ShowWindow($hwnd, $SW_SHOWNORMAL) }
   [void][PpNs.PpShow]::SetForegroundWindow($hwnd)
   exit 0
-} catch { Write-Error $_.Exception.Message; exit 1 }"#
+} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"#
         .replace("__PID__", &pid.to_string())
         .replace("__SHOWCMD__", &show_cmd.to_string())
         .replace("__LEFT__", &left.to_string())
