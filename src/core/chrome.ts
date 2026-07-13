@@ -114,6 +114,44 @@ export const OFFSCREEN_WINDOW_ARGS: readonly string[] = [
   "--window-size=1280,1000",
 ];
 
+/**
+ * Flags that harden a lane against Windows shell "URL-hijack" scenarios where
+ * a URL the user clicks in an external app (Terminal, chat window, PDF) could
+ * be routed to a PortPilot lane instead of a fresh default-profile browser.
+ *
+ * A dedicated --user-data-dir already gives per-profile isolation (Chromium's
+ * process singleton is a file lock inside the user-data-dir), and in every
+ * scenario we reproduced on Windows 11 with Edge 150 an external URL correctly
+ * spawned a fresh default-profile browser rather than joining a PortPilot
+ * lane. These flags are belt-and-suspenders on top of that:
+ *
+ *   --no-default-browser-check          (already set) suppresses the "make me
+ *                                       default" prompt on first run.
+ *   --disable-default-apps              stops Chrome/Edge from auto-installing
+ *                                       the built-in "default web apps" pack
+ *                                       (Adblock Plus in Edge, Docs offline in
+ *                                       Chrome, etc.) into the lane's profile
+ *                                       — those install pages showing up in
+ *                                       the CDP tab list is the visible
+ *                                       symptom that looks like a "URL joined
+ *                                       my lane" report.
+ *   --no-service-autorun                opts out of Windows Service Autorun
+ *                                       registration (Chromium may otherwise
+ *                                       register a background updater/handler
+ *                                       under the running profile).
+ *   --disable-background-networking     stops the Google Update / Edge
+ *                                       Autofill background pings that also
+ *                                       touch the profile's cookie jar.
+ *
+ * We do NOT touch tools/probes (--enable-automation stays off; agents may
+ * want it and can pass it via extraArgs).
+ */
+export const HARDENING_ARGS: readonly string[] = [
+  "--disable-default-apps",
+  "--no-service-autorun",
+  "--disable-background-networking",
+];
+
 /** Coerce an arbitrary value into a ChromeLaunchMode, or undefined if it is
  *  not one of the three recognised modes (case-insensitive, trimmed). */
 export function normalizeChromeMode(value: unknown): ChromeLaunchMode | undefined {
@@ -304,6 +342,9 @@ export function buildLaunchPlan(lane: Lane, opts: LaunchChromeOptions = {}): Lau
     `--user-data-dir=${lane.chromeProfileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
+    // Defensive hardening against Windows shell URL-hijack scenarios (see
+    // HARDENING_ARGS docstring). Safe to apply to every launch mode.
+    ...HARDENING_ARGS,
     // Mode flags (off-screen for background, --headless=new for headless,
     // nothing for visible) go before any caller extraArgs and the URL.
     ...modeLaunchArgs(mode),
