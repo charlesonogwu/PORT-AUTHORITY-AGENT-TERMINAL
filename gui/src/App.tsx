@@ -623,13 +623,18 @@ function SessionGroup({
                 {group.sessions.length > 1 ? "s" : ""}
               </Badge>
             </div>
-            <div
-              className="flex shrink-0 items-center gap-1.5"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <HideAllButton sessions={group.sessions} hiddenApi={hiddenApi} />
-              <KillAllButton sessions={group.sessions} onKilled={onKilled} />
-            </div>
+            {/* "Hide all" / "Kill all" are group-level shortcuts — redundant
+                when the group has only one session (that row already has its
+                own Hide/Kill buttons). Show them only for 2+ sessions. */}
+            {group.sessions.length > 1 && (
+              <div
+                className="flex shrink-0 items-center gap-1.5"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <HideAllButton sessions={group.sessions} hiddenApi={hiddenApi} />
+                <KillAllButton sessions={group.sessions} onKilled={onKilled} />
+              </div>
+            )}
           </div>
         </TableCell>
       </TableRow>
@@ -1495,14 +1500,21 @@ export function App() {
               <SectionLabel className="mb-0">Live Chrome sessions</SectionLabel>
               <div className="flex items-center gap-2">
                 <DefaultBrowserPicker />
-                <HideAllButton
-                  sessions={snap.liveSessions}
-                  hiddenApi={hiddenApi}
-                />
-                <KillAllButton
-                  sessions={snap.liveSessions}
-                  onKilled={refresh}
-                />
+                {/* Top-level "Hide all" / "Kill all" — redundant with the
+                    per-row controls when there's only one live session
+                    (single row already has Hide/Kill). Show only for 2+. */}
+                {snap.liveSessions.length > 1 && (
+                  <>
+                    <HideAllButton
+                      sessions={snap.liveSessions}
+                      hiddenApi={hiddenApi}
+                    />
+                    <KillAllButton
+                      sessions={snap.liveSessions}
+                      onKilled={refresh}
+                    />
+                  </>
+                )}
               </div>
             </div>
             <LiveSessions
