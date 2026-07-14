@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.16] — dashboard: bulk buttons only when there's something to bulk
+
+### Changed
+
+- **"Hide all (1)" / "Kill all (1)" no longer render for single-session
+  groups** — with one lane, the row's own Show/Hide/Kill/Erase buttons
+  already cover it, so the group-header bulk buttons were pure noise. They
+  appear only when a project directory has 2+ live sessions. Same rule for
+  the top-level Hide all / Kill all next to the Default-browser picker:
+  hidden when only one session is live machine-wide.
+
 ## [0.3.15] — belt-and-suspenders isolation from Windows shell URL hijack
 
 ### Fixed
