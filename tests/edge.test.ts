@@ -111,9 +111,13 @@ test("buildEdgeLaunchPlan: headless adds --headless=new", () => {
 });
 
 test("buildEdgeLaunchPlan: safe initialUrl passes, a flag-as-url is refused", () => {
-  const ok = buildEdgeLaunchPlan(laneWith(), { initialUrl: "https://example.com", binaryPath: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" });
+  const binaryPath = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
+  const ok = buildEdgeLaunchPlan(laneWith(), { initialUrl: "https://example.com", binaryPath });
   assert.equal(ok.args[ok.args.length - 1], "https://example.com");
-  assert.throws(() => buildEdgeLaunchPlan(laneWith(), { initialUrl: "--load-extension=C:/evil" }), UnsafeChromeArgError);
+  assert.throws(
+    () => buildEdgeLaunchPlan(laneWith(), { initialUrl: "--load-extension=C:/evil", binaryPath }),
+    UnsafeChromeArgError,
+  );
 });
 
 // ── edge binary gate ─────────────────────────────────────────────────────────
