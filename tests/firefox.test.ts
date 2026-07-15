@@ -160,6 +160,23 @@ test("evaluateFirefoxAttach: different -profile → unsafe-foreign", () => {
   assert.equal(v.kind, "unsafe-foreign-chrome");
 });
 
+test("evaluateFirefoxAttach: Firefox without -profile is refused", () => {
+  const v = evaluateFirefoxAttach(laneWith({ chromeDebugPort: 9350 }), [
+    obs(9350, "firefox", "firefox --remote-debugging-port 9350"),
+  ]);
+  assert.equal(v.kind, "unsafe-foreign-chrome");
+});
+
+test("evaluateFirefoxAttach: Firefox without a command line is refused", () => {
+  const v = evaluateFirefoxAttach(laneWith({ chromeDebugPort: 9350 }), [{
+    port: 9350,
+    source: "native",
+    protocol: "tcp",
+    command: "firefox",
+  }]);
+  assert.equal(v.kind, "unsafe-foreign-chrome");
+});
+
 test("evaluateFirefoxAttach: a non-firefox process on the port → unsafe-unknown", () => {
   const v = evaluateFirefoxAttach(laneWith({ chromeDebugPort: 9350 }), [obs(9350, "node.exe", "node server.js")]);
   assert.equal(v.kind, "unsafe-unknown");

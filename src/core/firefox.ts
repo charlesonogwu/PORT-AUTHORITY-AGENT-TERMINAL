@@ -1,9 +1,13 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { posix } from "node:path";
 import { Lane, normalizeCwd } from "./lane.js";
 import { PortObservation, observationsForPort } from "./scanner.js";
 import {
   ChromeAttachVerdict,
+  BrowserBinaryNotFoundError,
   ChromeLaunchMode,
   LaunchResult,
   UnsafeChromeArgError,
@@ -67,9 +71,15 @@ const DEFAULT_FIREFOX_BINARIES: Record<string, string[]> = {
     "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
     "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe",
   ],
-  darwin: ["/Applications/Firefox.app/Contents/MacOS/firefox"],
+  darwin: macOsFirefoxCandidates(),
   linux: ["firefox", "firefox-esr"],
 };
+
+export function macOsFirefoxCandidates(home = homedir()): string[] {
+  const apps = ["/Applications", posix.join(home, "Applications")];
+  const bundles = ["Firefox.app", "Firefox Developer Edition.app", "Firefox Nightly.app"];
+  return apps.flatMap((appDir) => bundles.map((bundle) => posix.join(appDir, bundle, "Contents", "MacOS", "firefox")));
+}
 
 export function resolveFirefoxBinary(explicit?: string): string {
   if (explicit && explicit.length > 0) {
@@ -84,6 +94,11 @@ export function resolveFirefoxBinary(explicit?: string): string {
   const envBin = process.env.PORTPILOT_FIREFOX_BIN ?? process.env.FIREFOX_PATH;
   if (envBin && envBin.length > 0) return envBin;
   const candidates = DEFAULT_FIREFOX_BINARIES[process.platform] ?? DEFAULT_FIREFOX_BINARIES.linux!;
+  if (process.platform === "darwin") {
+    const found = candidates.find((candidate) => existsSync(candidate));
+    if (found) return found;
+    throw new BrowserBinaryNotFoundError("Firefox", candidates);
+  }
   return candidates[0]!;
 }
 

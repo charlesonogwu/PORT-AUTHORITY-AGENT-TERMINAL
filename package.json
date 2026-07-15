@@ -1,6 +1,6 @@
 {
   "name": "port-authority-agent-terminal-mcp",
-  "version": "0.3.17",
+  "version": "0.4.0",
   "description": "Cross-platform (Windows + macOS) lane coordinator for AI coding agents (Claude, Codex, etc.) — keeps multiple local agents from colliding on dev-server ports, Chrome debug ports, and Chrome user profiles. Includes a CLI, an MCP server, and a native Tauri dashboard (no localhost server).",
   "license": "MIT",
   "author": "charlesonogwu",
@@ -98,7 +98,7 @@
     "dashboard"
   ],
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.4.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -108,6 +108,7 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4"
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^4.4.3"
   }
 }

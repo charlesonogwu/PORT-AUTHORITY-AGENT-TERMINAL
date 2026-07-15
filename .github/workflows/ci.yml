@@ -23,22 +23,18 @@ concurrency:
 
 jobs:
   test:
-    name: Test on ${{ matrix.os }} (Node ${{ matrix.node }})
+    name: Test on ${{ matrix.os }} generic hosted runner (Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
 
     strategy:
       fail-fast: false
       matrix:
-        # Node 18 was dropped 2026-05-10:
-        # - Reached end-of-life April 2025 (no security patches upstream).
-        # - Ships with an npm version that has bug npm/cli#4828 (rollup
-        #   native binding install fails for vite). Vite build fails with
-        #   "Cannot find native binding" on Windows runners. The bug is
-        #   fixed in npm bundled with Node 20+, so dropping the version is
-        #   strictly easier than maintaining a workaround for an EOL Node.
+        # Node 22.4 is the supported runtime floor: CDP and WebDriver BiDi use
+        # Node's native WebSocket. macos-latest is a generic hosted runner, not
+        # an Apple-silicon compatibility claim.
         os: [windows-latest, macos-latest]
-        node: ["20.x", "22.x"]
+        node: ["22.x", "24.x"]
 
     steps:
       - name: Checkout
@@ -49,6 +45,10 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+
+      - name: Report generic macOS runner architecture
+        if: runner.os == 'macOS'
+        run: uname -m && sw_vers
 
       - name: Install root deps
         run: npm ci --no-audit --no-fund

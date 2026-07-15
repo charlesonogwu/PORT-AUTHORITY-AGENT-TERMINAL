@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { canonicalizeOwner, KNOWN_LLM_OWNERS } from "../src/core/lane.js";
 import { allocateLane } from "../src/core/allocator.js";
+import { findLane } from "../src/core/registry.js";
 import { withTempHome } from "./helpers.js";
 import { PortObservation } from "../src/core/scanner.js";
 
@@ -70,6 +71,14 @@ test("allocateLane stores canonical owner, not the raw string", async () => {
     assert.equal(r.lane.owner, "codex");
     // Custom suffix auto-promoted to sessionId since none was supplied.
     assert.equal(r.lane.sessionId, "test-alpha");
+  });
+});
+
+test("findLane accepts the same custom owner string used to allocate a lane", async () => {
+  await withTempHome(async () => {
+    await allocateLane({ owner: "mac-validation", cwd: "/tmp/vend", observations: [] });
+    const found = await findLane({ owner: "mac-validation", cwd: "/tmp/vend" });
+    assert.equal(found?.owner, "agent");
   });
 });
 

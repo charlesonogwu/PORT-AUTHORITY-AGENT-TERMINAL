@@ -11,6 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] — macOS browser safety/runtime foundation
+
+### Added
+
+- macOS listener scanning enriches `lsof` records with an argument-safe `ps`
+  command-line lookup, allowing Chrome, Edge, and Firefox profile ownership to
+  be proven before attachment.
+- Browser discovery covers `/Applications`, `~/Applications`, and common
+  Chrome, Edge, and Firefox variants. Missing Edge never falls back to Chrome.
+
+### Changed
+
+- Node.js **22.4+** is required because CDP and WebDriver BiDi use Node's
+  native WebSocket implementation. `zod` is now a direct runtime dependency.
+- macOS CI is labeled as a generic hosted runner and logs its architecture; it
+  does not claim Apple-silicon coverage.
+
+### Safety
+
+- Missing, malformed, or unverifiable process command lines fail closed:
+  PortPilot refuses attachment instead of guessing a browser profile.
+
+### Limitations
+
+- This release does not add a macOS `.app`, signing/notarization, Dock or
+  Applications integration, LaunchAgents, or macOS Show/Hide parity.
+
 ## [0.3.17] — reliable Windows Show and dashboard shortcut recovery
 
 ### Fixed

@@ -147,6 +147,9 @@ export interface LaunchPlan {
     profileDir: string;
     port: number;
 }
+/** Candidate Chrome-family binaries on macOS. Kept pure so discovery can be
+ * tested without inspecting a developer's actual Applications folders. */
+export declare function macOsChromeCandidates(home?: string): string[];
 /**
  * Returns true iff `p` looks like a Chromium-family browser binary by its
  * basename (case-insensitive). Used to gate caller-supplied `binaryPath`
@@ -167,6 +170,9 @@ export declare function isChromeBinaryPath(p: string | undefined): boolean;
 export declare function isSafeInitialUrl(url: string | undefined): boolean;
 export declare class UnsafeChromeArgError extends Error {
     constructor(message: string);
+}
+export declare class BrowserBinaryNotFoundError extends Error {
+    constructor(browser: string, candidates: string[]);
 }
 export declare function resolveChromeBinary(explicit?: string): string;
 /**

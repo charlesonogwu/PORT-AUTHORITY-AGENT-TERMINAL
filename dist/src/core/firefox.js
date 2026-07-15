@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { posix } from "node:path";
 import { normalizeCwd } from "./lane.js";
 import { observationsForPort } from "./scanner.js";
-import { UnsafeChromeArgError, isSafeInitialUrl, } from "./chrome.js";
+import { BrowserBinaryNotFoundError, UnsafeChromeArgError, isSafeInitialUrl, } from "./chrome.js";
 /**
  * Firefox backend.
  *
@@ -54,9 +57,14 @@ const DEFAULT_FIREFOX_BINARIES = {
         "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
         "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe",
     ],
-    darwin: ["/Applications/Firefox.app/Contents/MacOS/firefox"],
+    darwin: macOsFirefoxCandidates(),
     linux: ["firefox", "firefox-esr"],
 };
+export function macOsFirefoxCandidates(home = homedir()) {
+    const apps = ["/Applications", posix.join(home, "Applications")];
+    const bundles = ["Firefox.app", "Firefox Developer Edition.app", "Firefox Nightly.app"];
+    return apps.flatMap((appDir) => bundles.map((bundle) => posix.join(appDir, bundle, "Contents", "MacOS", "firefox")));
+}
 export function resolveFirefoxBinary(explicit) {
     if (explicit && explicit.length > 0) {
         if (!isFirefoxBinaryPath(explicit)) {
@@ -69,6 +77,12 @@ export function resolveFirefoxBinary(explicit) {
     if (envBin && envBin.length > 0)
         return envBin;
     const candidates = DEFAULT_FIREFOX_BINARIES[process.platform] ?? DEFAULT_FIREFOX_BINARIES.linux;
+    if (process.platform === "darwin") {
+        const found = candidates.find((candidate) => existsSync(candidate));
+        if (found)
+            return found;
+        throw new BrowserBinaryNotFoundError("Firefox", candidates);
+    }
     return candidates[0];
 }
 export function isFirefoxProcess(o) {

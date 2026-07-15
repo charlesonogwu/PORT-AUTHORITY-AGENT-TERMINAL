@@ -5,17 +5,16 @@ This document covers how to set up the repo and what we expect from a clean PR.
 
 ## Scope reminder
 
-`paat` is **Windows-first**. The Mac/Linux fallback branches in
-`src/core/scanner.ts` and `src/dashboard/kill.ts` are kept as best-effort but
-are not part of CI. PRs that improve them are welcome; PRs that break Windows
-to make Mac/Linux nicer will not merge.
+`paat` supports Windows and macOS. Preserve Windows behavior while improving
+macOS; generic hosted macOS CI is not a substitute for physical Apple-silicon
+validation.
 
 ## Local setup
 
 You need:
 
-- Windows 10 or 11
-- Node.js 20 or newer (Node 18 reached end-of-life in April 2025 and is no longer supported)
+- Windows 10/11 or macOS
+- Node.js 22.4 or newer
 - Git
 - Google Chrome (or Chromium / Edge / Brave) installed in a default path
 
@@ -23,7 +22,7 @@ You need:
 git clone https://github.com/charlesonogwu/port-authority-agent-terminal.git
 cd port-authority-agent-terminal
 npm install
-npm --prefix dashboard-ui/portpilot-dashboard install
+npm --prefix gui install
 npm run build
 npm link
 ```

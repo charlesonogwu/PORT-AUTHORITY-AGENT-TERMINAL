@@ -25,6 +25,7 @@ export declare class UnsupportedFirefoxModeError extends Error {
 /** True iff `p` looks like a Firefox-family binary by basename. Gates
  *  caller-supplied binaryPath values coming in via MCP/CLI. */
 export declare function isFirefoxBinaryPath(p: string | undefined): boolean;
+export declare function macOsFirefoxCandidates(home?: string): string[];
 export declare function resolveFirefoxBinary(explicit?: string): string;
 export declare function isFirefoxProcess(o: PortObservation): boolean;
 /**
