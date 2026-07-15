@@ -15,12 +15,91 @@
 // on-screen rect) and returns it so the dashboard can persist it and restore
 // the window to exactly where it was on Unhide.
 //
-// Windows: PowerShell + Win32 P/Invoke via Add-Type (the established pattern).
+// Windows: native Win32 for Show; PowerShell + Win32 P/Invoke for Hide/Unhide.
 // macOS/Linux: best-effort (set-visible / wmctrl); the durable off-screen-move
 //   analog is a documented follow-up.
 
 use crate::cli::quiet_command;
 use serde_json::{json, Value};
+
+/// The small amount of window metadata needed to decide whether a top-level
+/// HWND is Chrome's real browser frame rather than one of its helper windows.
+/// Kept platform-neutral so the selection rule is unit-testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowCandidate {
+    class_name: String,
+    title: String,
+    width: i32,
+    height: i32,
+}
+
+/// Higher is a better Show target. A real browser frame may be temporarily
+/// represented by Windows as a 160x28 minimized placeholder, so size alone
+/// cannot reject it.
+fn browser_window_rank(candidate: &WindowCandidate) -> Option<u8> {
+    if candidate.width <= 0 || candidate.height <= 0 {
+        return None;
+    }
+
+    // Chrome/Edge's tabbed browser frame is Chrome_WidgetWin_1. Its helper
+    // surfaces use other classes (including Chrome_WidgetWin_0) and must never
+    // be shown in place of the user's actual tabbed browser.
+    if candidate.class_name != "Chrome_WidgetWin_1" {
+        return None;
+    }
+
+    if candidate.title.trim().is_empty() {
+        Some(2)
+    } else {
+        Some(3)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{browser_window_rank, WindowCandidate};
+
+    fn candidate(class_name: &str, title: &str, width: i32, height: i32) -> WindowCandidate {
+        WindowCandidate {
+            class_name: class_name.into(),
+            title: title.into(),
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn selects_a_minimized_titled_chrome_frame() {
+        // Windows reports a minimized Chrome browser as this 160x28 placeholder.
+        // It is still the user's real tabbed frame and Show must restore it.
+        assert_eq!(
+            browser_window_rank(&candidate(
+                "Chrome_WidgetWin_1",
+                "Project Cooler - Google Chrome",
+                160,
+                28,
+            )),
+            Some(3),
+        );
+    }
+
+    #[test]
+    fn rejects_chrome_helper_windows() {
+        assert_eq!(
+            browser_window_rank(&candidate("Chrome_WidgetWin_0", "", 160, 28)),
+            None,
+        );
+    }
+
+    #[test]
+    fn rejects_zero_sized_windows() {
+        assert_eq!(
+            browser_window_rank(&candidate("Chrome_WidgetWin_1", "Chrome", 0, 0)),
+            None,
+        );
+    }
+
+}
 
 /* -------------------------------------------------------------------------- */
 /*  focus_chrome (unchanged behavior): bring a window to the foreground.       */
@@ -109,35 +188,113 @@ pub fn unhide_chrome(pid: u32, placement: WinPlacement) -> Result<Value, String>
 
 #[cfg(target_os = "windows")]
 fn run_focus(pid: u32) -> Result<(), String> {
-    // Show = "put this browser in front of me", whatever state it's in:
-    //   - Windows are found via EnumWindows (PPWIN_PREAMBLE), NOT
-    //     Process.MainWindowHandle — the latter returns 0 for windows parked
-    //     off-screen (background-mode lanes), which made Show error out on
-    //     exactly the lanes users most want to see.
-    //   - A window parked off-screen (background launch) is first moved to a
-    //     sane on-screen rect; then SW_RESTORE + SetForegroundWindow.
-    //   - Errors go through [Console]::Error.WriteLine, NOT Write-Error:
-    //     Write-Error prefixes the entire script text to stderr, which turned
-    //     every toast into unreadable "$ErrorActio…" garbage.
-    let script = format!(
-        r#"$ErrorActionPreference='Stop'
-try {{
-{preamble}
-  $h = [PpWin]::BestShowTarget([uint32]{pid})
-  if ($h -eq [System.IntPtr]::Zero) {{ [Console]::Error.WriteLine("PID {pid} has no browser window (headless browsers have none)"); exit 1 }}
-  $r = New-Object "PpWin+RECT"
-  [void][PpWin]::GetWindowRect($h, [ref]$r)
-  if ($r.Left -le -30000 -or $r.Top -le -30000) {{
-    [void][PpWin]::SetWindowPos($h, [System.IntPtr]::Zero, 80, 80, 1280, 1000, 0x4)
-  }}
-  [void][PpWin]::ShowWindow($h, 9)
-  [void][PpWin]::SetForegroundWindow($h)
-  exit 0
-}} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"#,
-        pid = pid,
-        preamble = PPWIN_PREAMBLE,
-    );
-    run_powershell(&script).map(|_| ())
+    // Native Show path: find the actual Chrome tabbed frame, restore it before
+    // moving it on-screen, then raise it. Unlike the old PowerShell path, this
+    // never opens a console host.
+    win_focus::focus_browser_window(pid)
+}
+
+#[cfg(target_os = "windows")]
+mod win_focus {
+    use super::{browser_window_rank, WindowCandidate};
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, SetForegroundWindow, SetWindowPos, ShowWindow,
+        SWP_NOZORDER, SW_RESTORE,
+    };
+
+    struct FoundWindow {
+        hwnd: HWND,
+        candidate: WindowCandidate,
+    }
+
+    struct Collected {
+        target_pid: u32,
+        windows: Vec<FoundWindow>,
+    }
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut Collected);
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != ctx.target_pid {
+            return TRUE;
+        }
+
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return TRUE;
+        }
+        let mut class_name = [0_u16; 256];
+        let mut title = [0_u16; 512];
+        let class_len = GetClassNameW(hwnd, &mut class_name).max(0) as usize;
+        let title_len = GetWindowTextW(hwnd, &mut title).max(0) as usize;
+        ctx.windows.push(FoundWindow {
+            hwnd,
+            candidate: WindowCandidate {
+                class_name: String::from_utf16_lossy(&class_name[..class_len]),
+                title: String::from_utf16_lossy(&title[..title_len]),
+                width: rect.right - rect.left,
+                height: rect.bottom - rect.top,
+            },
+        });
+        TRUE
+    }
+
+    pub fn focus_browser_window(pid: u32) -> Result<(), String> {
+        unsafe {
+            let target = find_browser_window(pid)?;
+
+            // Windows first represents a minimized Chrome browser as a small
+            // placeholder at -32000. Restore it before checking/moving bounds;
+            // moving that placeholder does not move the restored browser.
+            let _ = ShowWindow(target, SW_RESTORE);
+
+            let mut rect = RECT::default();
+            GetWindowRect(target, &mut rect)
+                .map_err(|e| format!("could not read browser window bounds: {e}"))?;
+            if rect.left <= -30000 || rect.top <= -30000 {
+                SetWindowPos(target, HWND::default(), 80, 80, 1280, 1000, SWP_NOZORDER)
+                    .map_err(|e| format!("could not move browser window on-screen: {e}"))?;
+            }
+
+            let _ = BringWindowToTop(target);
+            let _ = SetForegroundWindow(target);
+            Ok(())
+        }
+    }
+
+    fn find_browser_window(pid: u32) -> Result<HWND, String> {
+        unsafe {
+            let mut ctx = Collected {
+                target_pid: pid,
+                windows: Vec::new(),
+            };
+            EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize))
+                .map_err(|e| format!("could not enumerate browser windows: {e}"))?;
+            let found = ctx
+                .windows
+                .iter()
+                .map(|window| format!(
+                    "{} {:?} {}x{}",
+                    window.candidate.class_name,
+                    window.candidate.title,
+                    window.candidate.width,
+                    window.candidate.height
+                ))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ctx.windows
+                .into_iter()
+                .filter_map(|found| browser_window_rank(&found.candidate).map(|rank| (rank, found)))
+                .max_by_key(|(rank, _)| *rank)
+                .map(|(_, found)| found.hwnd)
+                .ok_or_else(|| format!(
+                    "PID {pid} has no Chrome browser window (headless browsers have none; found: {found})"
+                ))
+        }
+    }
 }
 
 // The Win32 helper class + Park() routine shared by hide and park_windows.

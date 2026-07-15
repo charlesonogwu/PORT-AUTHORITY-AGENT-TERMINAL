@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.17] — reliable Windows Show and dashboard shortcut recovery
+
+### Fixed
+
+- **Dashboard Show now restores minimized Chromium windows correctly.** Windows
+  reports a minimized Chrome/Edge tabbed frame as a tiny off-screen placeholder;
+  the old Show path rejected it and went through PowerShell, which could leave a
+  blank black window instead of the browser. Show now finds the real tabbed
+  frame, restores it before repositioning it, then raises it with native Win32
+  calls. It never launches a PowerShell console.
+- **Windows shortcut recovery is verified against the stable dashboard install
+  path.** Reinstalling the package stages the dashboard and its icon together
+  in `%LOCALAPPDATA%\\PAAT`, so the desktop and Start Menu shortcuts do not
+  depend on a transient package-cache path.
+
+### Tests
+
+- Rust unit tests cover selection of the real minimized Chrome frame and
+  rejection of blank/zero-sized helper windows.
+
+---
+
 ## [0.3.16] — dashboard: bulk buttons only when there's something to bulk
 
 ### Changed
