@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { posix } from "node:path";
 import { isWindows } from "./paths.js";
 import { normalizeCwd } from "./lane.js";
 import { observationsForPort } from "./scanner.js";
@@ -159,11 +162,7 @@ const DEFAULT_CHROME_BINARIES = {
         "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
         "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
     ],
-    darwin: [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    ],
+    darwin: macOsChromeCandidates(),
     linux: ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"],
 };
 /**
@@ -177,6 +176,9 @@ const CHROMIUM_FAMILY_BASENAMES = new Set([
     "chrome.exe",
     "chrome",
     "google chrome", // macOS .app bundle binary
+    "google chrome beta",
+    "google chrome dev",
+    "google chrome canary",
     "chromium.exe",
     "chromium",
     "chromium-browser",
@@ -193,6 +195,19 @@ const CHROMIUM_FAMILY_BASENAMES = new Set([
     "google-chrome",
     "google-chrome-stable",
 ]);
+/** Candidate Chrome-family binaries on macOS. Kept pure so discovery can be
+ * tested without inspecting a developer's actual Applications folders. */
+export function macOsChromeCandidates(home = homedir()) {
+    const apps = ["/Applications", posix.join(home, "Applications")];
+    const bundles = [
+        ["Google Chrome.app", "Google Chrome"],
+        ["Google Chrome Beta.app", "Google Chrome Beta"],
+        ["Google Chrome Dev.app", "Google Chrome Dev"],
+        ["Google Chrome Canary.app", "Google Chrome Canary"],
+        ["Chromium.app", "Chromium"],
+    ];
+    return apps.flatMap((appDir) => bundles.map(([bundle, binary]) => posix.join(appDir, bundle, "Contents", "MacOS", binary)));
+}
 function basenameLower(p) {
     return (p.split(/[\\/]+/).pop() ?? "").toLowerCase();
 }
@@ -230,6 +245,12 @@ export class UnsafeChromeArgError extends Error {
         this.name = "UnsafeChromeArgError";
     }
 }
+export class BrowserBinaryNotFoundError extends Error {
+    constructor(browser, candidates) {
+        super(`${browser} was not found. Checked: ${candidates.join(", ")}. Install ${browser}, place it in /Applications or ~/Applications, or set the documented PORTPILOT_*_BIN override.`);
+        this.name = "BrowserBinaryNotFoundError";
+    }
+}
 export function resolveChromeBinary(explicit) {
     if (explicit && explicit.length > 0) {
         if (!isChromeBinaryPath(explicit)) {
@@ -242,6 +263,12 @@ export function resolveChromeBinary(explicit) {
     if (envBin && envBin.length > 0)
         return envBin;
     const candidates = DEFAULT_CHROME_BINARIES[process.platform] ?? DEFAULT_CHROME_BINARIES.linux;
+    if (process.platform === "darwin") {
+        const found = candidates.find((candidate) => existsSync(candidate));
+        if (found)
+            return found;
+        throw new BrowserBinaryNotFoundError("Chrome", candidates);
+    }
     return candidates[0];
 }
 /**

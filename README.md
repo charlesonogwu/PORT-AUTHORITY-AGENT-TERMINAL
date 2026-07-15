@@ -28,7 +28,7 @@ its `page_*` tools drive all three backends through one interface.
   <em>Four agents (Cloudflare API keys, AWS IAM, eBay, Newegg), each in its own isolated Chrome lane on one live dashboard. &nbsp;<a href="assets/demo.mp4">▶ Watch as video (MP4)</a></em>
 </p>
 
-[![Windows-first](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4?logo=windows)]()
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%2B%20macOS-0078d4)]()
 [![CI](https://img.shields.io/github/actions/workflow/status/charlesonogwu/port-authority-agent-terminal/ci.yml?branch=main)](https://github.com/charlesonogwu/port-authority-agent-terminal/actions)
 [![npm](https://img.shields.io/npm/v/port-authority-agent-terminal-mcp.svg)](https://www.npmjs.com/package/port-authority-agent-terminal-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -37,7 +37,7 @@ its `page_*` tools drive all three backends through one interface.
 
 ## Install
 
-**Prereq:** Node.js ≥ 20 (from <https://nodejs.org/>).
+**Prereq:** Node.js ≥ 22.4 (from <https://nodejs.org/>). CDP and Firefox BiDi use Node's native WebSocket client.
 
 ```
 npm install -g port-authority-agent-terminal-mcp
@@ -58,8 +58,11 @@ Codex Desktop / Claude Code if any are installed. Upgrading is the same command.
 
 </details>
 
-> **Platform.** Windows 10/11 is the officially tested target. macOS/Linux
-> fallback branches exist but aren't covered by CI. PRs welcome.
+> **Platform.** Windows and macOS have CI coverage. On macOS, PortPilot only
+> attaches after `lsof` plus `ps` proves the browser command line contains the
+> lane's dedicated profile. Unknown, personal, and foreign profiles are refused.
+> Native macOS `.app` packaging, signing, Dock integration, and login-start are
+> not included yet.
 
 ---
 

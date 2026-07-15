@@ -94,7 +94,7 @@ test("profileDirFor: session then edge suffix order", () => {
 
 test("buildEdgeLaunchPlan: edge binary + Chrome-style args (--user-data-dir, CDP port)", () => {
   const lane = laneWith({ chromeDebugPort: 9360, chromeProfileDir: "C:/pp/edge" });
-  const plan = buildEdgeLaunchPlan(lane, { mode: "visible" });
+  const plan = buildEdgeLaunchPlan(lane, { mode: "visible", binaryPath: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" });
   assert.match(plan.binary.toLowerCase(), /msedge|microsoft.edge/);
   assert.ok(plan.args.includes("--remote-debugging-port=9360"));
   assert.ok(plan.args.includes("--user-data-dir=C:/pp/edge"));
@@ -102,16 +102,16 @@ test("buildEdgeLaunchPlan: edge binary + Chrome-style args (--user-data-dir, CDP
 });
 
 test("buildEdgeLaunchPlan: background mode injects the off-screen window args", () => {
-  const plan = buildEdgeLaunchPlan(laneWith(), { mode: "background" });
+  const plan = buildEdgeLaunchPlan(laneWith(), { mode: "background", binaryPath: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" });
   for (const a of OFFSCREEN_WINDOW_ARGS) assert.ok(plan.args.includes(a), `missing ${a}`);
 });
 
 test("buildEdgeLaunchPlan: headless adds --headless=new", () => {
-  assert.ok(buildEdgeLaunchPlan(laneWith(), { mode: "headless" }).args.includes("--headless=new"));
+  assert.ok(buildEdgeLaunchPlan(laneWith(), { mode: "headless", binaryPath: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" }).args.includes("--headless=new"));
 });
 
 test("buildEdgeLaunchPlan: safe initialUrl passes, a flag-as-url is refused", () => {
-  const ok = buildEdgeLaunchPlan(laneWith(), { initialUrl: "https://example.com" });
+  const ok = buildEdgeLaunchPlan(laneWith(), { initialUrl: "https://example.com", binaryPath: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" });
   assert.equal(ok.args[ok.args.length - 1], "https://example.com");
   assert.throws(() => buildEdgeLaunchPlan(laneWith(), { initialUrl: "--load-extension=C:/evil" }), UnsafeChromeArgError);
 });
@@ -147,6 +147,18 @@ test("evaluateEdgeAttach: matching --user-data-dir on an msedge process → safe
 test("evaluateEdgeAttach: edge with a different profile → unsafe-foreign", () => {
   const lane = laneWith({ chromeDebugPort: 9360, chromeProfileDir: "C:/pp/edge" });
   const v = evaluateEdgeAttach(lane, [obs(9360, "msedge.exe", "msedge.exe --user-data-dir=C:/other --remote-debugging-port=9360")]);
+  assert.equal(v.kind, "unsafe-foreign-chrome");
+});
+
+test("evaluateEdgeAttach: Edge without --user-data-dir is refused", () => {
+  const lane = laneWith({ chromeDebugPort: 9360, chromeProfileDir: "C:/pp/edge" });
+  const v = evaluateEdgeAttach(lane, [obs(9360, "msedge", "msedge --remote-debugging-port=9360")]);
+  assert.equal(v.kind, "unsafe-foreign-chrome");
+});
+
+test("evaluateEdgeAttach: Edge without a command line is refused", () => {
+  const lane = laneWith({ chromeDebugPort: 9360, chromeProfileDir: "C:/pp/edge" });
+  const v = evaluateEdgeAttach(lane, [{ port: 9360, source: "native", protocol: "tcp", command: "msedge" }]);
   assert.equal(v.kind, "unsafe-foreign-chrome");
 });
 

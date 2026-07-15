@@ -100,7 +100,7 @@ test("Chrome lane hardening: flags come BEFORE any caller extraArgs (caller can'
 // ── Edge: same plan, so isolation carries through ───────────────────────────
 
 test("Edge lane launch: inherits the same three isolation invariants", () => {
-  const plan = buildEdgeLaunchPlan(laneWith({ chromeProfileDir: "C:/pp/profiles/edge-x" }));
+  const plan = buildEdgeLaunchPlan(laneWith({ chromeProfileDir: "C:/pp/profiles/edge-x" }), { binaryPath: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" });
   assert.equal(plan.args.find((a) => a.startsWith("--user-data-dir=")), "--user-data-dir=C:/pp/profiles/edge-x");
   assert.ok(plan.args.includes("--no-default-browser-check"));
   for (const flag of HARDENING_ARGS) {
@@ -128,7 +128,7 @@ test("Firefox lane launch: -no-remote is set (the definitive isolation flag)", (
 
 test("no launch plan points at an OS-default profile path (regression guard)", () => {
   const chromePlan = buildLaunchPlan(laneWith());
-  const edgePlan = buildEdgeLaunchPlan(laneWith());
+  const edgePlan = buildEdgeLaunchPlan(laneWith(), { binaryPath: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" });
   const ffPlan = buildFirefoxLaunchPlan(laneWith());
   const forbidden = [
     /Local[\\/]Microsoft[\\/]Edge[\\/]User Data/i, // Edge default on Windows

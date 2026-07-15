@@ -1,4 +1,6 @@
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { posix } from "node:path";
 import { Lane, normalizeCwd } from "./lane.js";
 import { PortObservation, observationsForPort } from "./scanner.js";
 import {
@@ -7,6 +9,7 @@ import {
   LaunchPlan,
   LaunchResult,
   UnsafeChromeArgError,
+  BrowserBinaryNotFoundError,
   buildLaunchPlan,
   extractUserDataDir,
   launchChromeForLane,
@@ -58,9 +61,20 @@ const DEFAULT_EDGE_BINARIES: Record<string, string[]> = {
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
   ],
-  darwin: ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+  darwin: macOsEdgeCandidates(),
   linux: ["microsoft-edge", "microsoft-edge-stable"],
 };
+
+export function macOsEdgeCandidates(home = homedir()): string[] {
+  const apps = ["/Applications", posix.join(home, "Applications")];
+  const bundles: Array<[string, string]> = [
+    ["Microsoft Edge.app", "Microsoft Edge"],
+    ["Microsoft Edge Beta.app", "Microsoft Edge Beta"],
+    ["Microsoft Edge Dev.app", "Microsoft Edge Dev"],
+    ["Microsoft Edge Canary.app", "Microsoft Edge Canary"],
+  ];
+  return apps.flatMap((appDir) => bundles.map(([bundle, binary]) => posix.join(appDir, bundle, "Contents", "MacOS", binary)));
+}
 
 export function resolveEdgeBinary(explicit?: string): string {
   if (explicit && explicit.length > 0) {
@@ -79,6 +93,7 @@ export function resolveEdgeBinary(explicit?: string): string {
     const found = candidates.find((c) => existsSync(c));
     if (found) return found;
   }
+  if (process.platform === "darwin") throw new BrowserBinaryNotFoundError("Microsoft Edge", candidates);
   return candidates[0]!;
 }
 

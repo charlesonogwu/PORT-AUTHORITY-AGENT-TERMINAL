@@ -137,6 +137,43 @@ interface ProcessLookup {
   byPid: Map<number, { command?: string; commandLine?: string }>;
 }
 
+/** Parse `ps -o pid= -o command=` output without invoking a shell. The command
+ * column deliberately stays intact: browser profile flags are what make an
+ * attachment safe, so truncating it would be worse than returning nothing. */
+export function parseUnixPsOutput(stdout: string): Map<number, { command?: string; commandLine?: string }> {
+  const byPid = new Map<number, { command?: string; commandLine?: string }>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const commandLine = match[2];
+    if (!Number.isInteger(pid) || pid <= 0 || !commandLine) continue;
+    // lsof already supplies the process name. `command` can begin with an
+    // unquoted path containing spaces on macOS, so only trust ps for the full
+    // command line used by profile verification.
+    byPid.set(pid, { commandLine });
+  }
+  return byPid;
+}
+
+async function lookupUnixProcesses(pids: Iterable<number>): Promise<ProcessLookup> {
+  const byPid = new Map<number, { command?: string; commandLine?: string }>();
+  const wanted = Array.from(new Set(Array.from(pids).filter((pid) => Number.isInteger(pid) && pid > 0)));
+  // Keep argv small on hosts with many listeners. Values are numeric PIDs only;
+  // runCommand uses spawn(cmd, args), never a shell.
+  for (let start = 0; start < wanted.length; start += 100) {
+    const batch = wanted.slice(start, start + 100);
+    try {
+      const res = await runCommand("ps", ["-ww", "-p", batch.join(","), "-o", "pid=", "-o", "command="], { timeoutMs: 8_000 });
+      for (const [pid, meta] of parseUnixPsOutput(res.stdout)) byPid.set(pid, meta);
+    } catch {
+      // Best effort only. Callers refuse browser attachment without a profile
+      // command line, so an unavailable ps can never cause a blind attach.
+    }
+  }
+  return { byPid };
+}
+
 async function lookupWindowsProcesses(pids: Iterable<number>): Promise<ProcessLookup> {
   const byPid = new Map<number, { command?: string; commandLine?: string }>();
   const wanted = Array.from(new Set(Array.from(pids).filter((p) => Number.isInteger(p) && p > 0)));
@@ -233,11 +270,21 @@ async function scanWindowsNative(_opts: ScanOptions): Promise<PortObservation[]>
 }
 
 async function scanUnixNative(_opts: ScanOptions): Promise<PortObservation[]> {
-  // lsof gives us process info in one call.
+  // lsof gives us listener PID/name; ps supplies the complete argv needed to
+  // prove a Chromium --user-data-dir or Firefox -profile belongs to a lane.
   try {
     const res = await runCommand("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"], { timeoutMs: 6000 });
     if (res.stdout.trim()) {
-      return parseLsofOutput(res.stdout);
+      const observations = parseLsofOutput(res.stdout);
+      const lookup = await lookupUnixProcesses(observations.map((observation) => observation.pid).filter((pid): pid is number => typeof pid === "number"));
+      for (const observation of observations) {
+        if (typeof observation.pid !== "number") continue;
+        const meta = lookup.byPid.get(observation.pid);
+        if (!meta) continue;
+        observation.command ??= meta.command;
+        observation.commandLine = meta.commandLine;
+      }
+      return observations;
     }
   } catch {
     // fall through to ss

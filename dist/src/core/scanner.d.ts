@@ -27,6 +27,13 @@ export interface ScanResult {
  */
 export declare function hasSonar(): Promise<boolean>;
 export declare function scanWithSonar(opts?: ScanOptions): Promise<PortObservation[]>;
+/** Parse `ps -o pid= -o command=` output without invoking a shell. The command
+ * column deliberately stays intact: browser profile flags are what make an
+ * attachment safe, so truncating it would be worse than returning nothing. */
+export declare function parseUnixPsOutput(stdout: string): Map<number, {
+    command?: string;
+    commandLine?: string;
+}>;
 export declare function scanNative(opts?: ScanOptions): Promise<PortObservation[]>;
 /**
  * Run a port scan, preferring sonar when available and falling back to

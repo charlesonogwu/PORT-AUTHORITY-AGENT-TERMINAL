@@ -4,6 +4,7 @@ import { ChromeAttachVerdict, LaunchChromeOptions, LaunchPlan, LaunchResult } fr
 /** True iff `p` looks like an Edge-family binary by basename. Gates
  *  caller-supplied binaryPath values coming in via MCP/CLI. */
 export declare function isEdgeBinaryPath(p: string | undefined): boolean;
+export declare function macOsEdgeCandidates(home?: string): string[];
 export declare function resolveEdgeBinary(explicit?: string): string;
 export declare function isEdgeProcess(o: PortObservation): boolean;
 /**

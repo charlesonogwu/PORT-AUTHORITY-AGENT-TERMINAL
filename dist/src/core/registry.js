@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { REGISTRY_VERSION, isStale, laneSessionId, normalizeCwd, nowIso, } from "./lane.js";
+import { REGISTRY_VERSION, isStale, laneSessionId, canonicalizeOwner, normalizeCwd, nowIso, } from "./lane.js";
 import { lockPath, registryPath } from "./paths.js";
 import { atomicWriteJson, withLock } from "./lockfile.js";
 const EMPTY = { version: REGISTRY_VERSION, lanes: [] };
@@ -33,8 +33,9 @@ export function filterLanes(lanes, filter) {
             : null;
     const cwd = filter.cwd ? normalizeCwd(filter.cwd) : null;
     const wantSession = typeof filter.sessionId === "string" ? filter.sessionId : null;
+    const owner = filter.owner ? canonicalizeOwner(filter.owner).canonical : null;
     return lanes.filter((lane) => {
-        if (filter.owner && lane.owner !== filter.owner)
+        if (owner && canonicalizeOwner(lane.owner).canonical !== owner)
             return false;
         if (cwd && normalizeCwd(lane.cwd) !== cwd)
             return false;
