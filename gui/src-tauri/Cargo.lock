@@ -2094,6 +2094,7 @@ checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.11.1",
  "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",
@@ -2295,15 +2296,16 @@ dependencies = [
 
 [[package]]
 name = "paat-dashboard"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "objc2",
+ "objc2-app-kit",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
- "which",
  "windows 0.58.0",
 ]
 
@@ -4288,15 +4290,6 @@ dependencies = [
  "thiserror 2.0.18",
  "windows 0.61.3",
  "windows-core 0.61.2",
-]
-
-[[package]]
-name = "which"
-version = "8.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81995fafaaaf6ae47a7d0cc83c67caf92aeb7e5331650ae6ff856f7c0c60c459"
-dependencies = [
- "libc",
 ]
 
 [[package]]

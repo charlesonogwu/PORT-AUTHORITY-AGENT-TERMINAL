@@ -24,6 +24,8 @@ export interface LiveSession {
   cwdConfidence: Confidence
   task?: string
   pid: number
+  /** macOS process creation identity used to reject stale PID reuse. */
+  processStart?: string
   chromeDebugPort: number
   /**
    * "port" — TCP debug port reachable from the dashboard

@@ -19,8 +19,16 @@ async function readRegistryRaw(): Promise<RegistryFile> {
   try {
     const raw = await readFile(registryPath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<RegistryFile>;
-    if (!parsed || parsed.version !== REGISTRY_VERSION || !Array.isArray(parsed.lanes)) {
-      return { version: REGISTRY_VERSION, lanes: [] };
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("invalid PortPilot lane registry: expected a JSON object");
+    }
+    if (parsed.version !== REGISTRY_VERSION) {
+      throw new Error(
+        `incompatible PortPilot lane registry schema version: expected ${REGISTRY_VERSION}, found ${String(parsed.version)}`,
+      );
+    }
+    if (!Array.isArray(parsed.lanes)) {
+      throw new Error("invalid PortPilot lane registry: lanes must be an array");
     }
     return { version: REGISTRY_VERSION, lanes: parsed.lanes };
   } catch (err: unknown) {

@@ -2,7 +2,7 @@ import { BrowserKind, KNOWN_LLM_OWNERS, Lane, LaneStatus, isStale, laneBrowser, 
 import { listLanes } from "../core/registry.js";
 import { PortObservation } from "../core/scanner.js";
 import { extractUserDataDir, isChromeProcess } from "../core/chrome.js";
-import { extractFirefoxProfileDir } from "../core/firefox.js";
+import { extractFirefoxProfileDir, isFirefoxProcess } from "../core/firefox.js";
 
 /**
  * Where the dashboard sourced this entry. portpilot is the canonical
@@ -124,6 +124,52 @@ export function findLiveChromes(observations: PortObservation[]): LiveChrome[] {
   return out;
 }
 
+function isFirefoxContentProcess(commandLine: string): boolean {
+  return /(?:^|\s)-contentproc(?:\s|$)/.test(commandLine);
+}
+
+function hasFirefoxNoRemote(commandLine: string): boolean {
+  return /(?:^|\s)-no-remote(?:\s|$)/.test(commandLine);
+}
+
+/**
+ * Discover isolated Firefox parent processes from the native TCP scanner.
+ * This is the macOS/Linux counterpart to findAllAgentFirefoxes: those
+ * platforms do not currently provide the Windows process snapshot, so the
+ * lsof observation enriched with ps is the authoritative source.
+ *
+ * Fail closed. A listener is dashboard-safe only when its complete command
+ * line proves both an explicit profile and -no-remote. This prevents a normal
+ * Firefox instance, an unverifiable process, or a content helper from being
+ * mistaken for a PortPilot lane.
+ */
+export function findLiveFirefoxes(observations: PortObservation[]): LiveChrome[] {
+  const seen = new Set<string>();
+  const out: LiveChrome[] = [];
+  for (const o of observations) {
+    if (!isFirefoxProcess(o)) continue;
+    const cl = o.commandLine ?? "";
+    if (!cl || isFirefoxContentProcess(cl)) continue;
+    if (!hasFirefoxNoRemote(cl)) continue;
+    const profileDir = extractFirefoxProfileDir(cl);
+    if (!profileDir) continue;
+    const key = `${o.port}:${o.pid ?? 0}:${profileDir}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const live: LiveChrome = {
+      port: o.port,
+      debugMode: "port",
+      profileDir,
+      browser: "firefox",
+    };
+    if (o.pid !== undefined) live.pid = o.pid;
+    if (o.command !== undefined) live.command = o.command;
+    live.commandLine = cl;
+    out.push(live);
+  }
+  return out;
+}
+
 const CHROMIUM_NAMES = new Set([
   "chrome.exe",
   "chromium.exe",
@@ -227,7 +273,8 @@ export function findAllAgentFirefoxes(snap: { processes: Map<number, { pid: numb
   for (const proc of snap.processes.values()) {
     if (!isFirefoxProcessName(proc.name)) continue;
     const cl = proc.commandLine ?? "";
-    if (/-contentproc/.test(cl)) continue; // Firefox child (renderer/gpu) process
+    if (isFirefoxContentProcess(cl)) continue; // Firefox child (renderer/gpu) process
+    if (!hasFirefoxNoRemote(cl)) continue; // never classify a normal/foreign Firefox profile
     const profileDir = extractFirefoxProfileDir(cl);
     if (!profileDir) continue; // only PortPilot-launched Firefoxes carry -profile
     if (seen.has(proc.pid)) continue;

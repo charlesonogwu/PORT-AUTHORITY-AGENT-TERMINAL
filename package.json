@@ -65,6 +65,8 @@
     "build:icons": "node scripts/build-icons.mjs",
     "build:dashboard": "node scripts/build-dashboard-tauri.cjs",
     "build:dashboard:strict": "node scripts/build-dashboard-tauri.cjs --strict",
+    "build:mac-app": "cd gui && npm exec tauri build -- --config src-tauri/tauri.macos.conf.json --bundles app --target aarch64-apple-darwin --no-sign",
+    "configure:mac-prototype-runtime": "node scripts/configure-macos-prototype-runtime.cjs",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "dev": "tsx src/cli/index.ts",
     "prepare": "node scripts/prepare.cjs",

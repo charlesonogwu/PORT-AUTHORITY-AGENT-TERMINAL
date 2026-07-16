@@ -22,18 +22,21 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { listen } from "@tauri-apps/api/event"
 import type { DashboardSnapshot, LiveSession } from "@/types"
 import {
   eraseChrome,
   focusChrome,
+  getRuntimeStatus,
   getConfig,
   getSnapshot,
   hideChrome,
   killChrome,
   setDefaultBrowser,
-  setHiddenPids,
+  setHiddenProcesses,
   unhideChrome,
   type DefaultBrowser,
+  type RuntimeStatus,
   type WindowPlacement,
 } from "@/api/client"
 import { cn } from "@/lib/utils"
@@ -51,13 +54,12 @@ const KILL_CONFIRM_MS = 3_000
 /*  Persistent "hide until unhide" state                                       */
 /* -------------------------------------------------------------------------- */
 /**
- * Hiding a Chrome here is durable. hide_chrome moves the window fully
- * off-screen and leaves it SHOWN there, so it stays invisible even as the
- * driving agent keeps raising it (position is untouched by bringToFront /
- * activation). We remember which sessions are hidden so the per-row button
- * flips to "Unhide" and the poll loop re-parks a window that comes back (e.g.
- * Chrome restarted). State is keyed by a PID-FREE stable key (lane id, else
- * port+profile) and mirrored to localStorage so it survives dashboard restarts.
+ * Hiding a browser here is durable. The native command uses the platform's
+ * persistent hide mechanism, while the watcher re-applies that state if the
+ * driving agent activates or restarts the browser. We remember which sessions
+ * are hidden so the per-row button flips to "Unhide". State is keyed by a
+ * PID-FREE stable key (lane id, else port+profile) and mirrored to localStorage
+ * so it survives dashboard restarts.
  */
 const HIDDEN_LS_KEY = "portpilot.hiddenSessions.v2"
 const ENFORCE_POOL = 4
@@ -210,19 +212,23 @@ function useHideEnforcement(
     const api = apiRef.current
     const live = snap?.liveSessions ?? []
     const liveKeys = new Set<string>()
-    const hiddenPids: number[] = []
+    const hiddenProcesses: Array<{ pid: number; processStart: string }> = []
     for (const s of live) {
       const key = stableKeyOf(s)
       liveKeys.add(key)
       const entry = api.map.get(key)
       if (!entry) continue
-      hiddenPids.push(s.pid)
+      // A replacement PID is not sent to the watcher until hideChrome has
+      // freshly revalidated it and patchEntry records that exact PID.
+      if (entry.lastPid === s.pid && s.processStart) {
+        hiddenProcesses.push({ pid: s.pid, processStart: s.processStart })
+      }
       // Chrome restarted for a hidden lane (new pid -> new on-screen window):
       // capture the fresh window's placement so a later Unhide restores right.
       // (The watcher already parks it via the pushed pid set below.)
       if (entry.lastPid !== s.pid && seenPidForKey.current.get(key) !== s.pid) {
         seenPidForKey.current.set(key, s.pid)
-        void hideChrome(s.pid)
+        void hideChrome(s.laneId, s.pid, s.processStart ?? "")
           .then((res) => {
             if (res.ok) {
               apiRef.current.patchEntry(key, {
@@ -239,7 +245,7 @@ function useHideEnforcement(
     }
 
     // Keep the native watcher's pid set in sync (empty array -> watcher idles).
-    void setHiddenPids(hiddenPids).catch(() => {})
+    void setHiddenProcesses(hiddenProcesses).catch(() => {})
   }, [snap, hiddenApi.map])
 }
 
@@ -259,73 +265,6 @@ function useHideEnforcement(
  * windows that JS opened, so this is best-effort — but the messaging
  * still tells the user what's going on).
  */
-function useSingleInstance(): { primary: boolean } {
-  const [primary, setPrimary] = useState<boolean>(true)
-  useEffect(() => {
-    if (typeof BroadcastChannel === "undefined") return
-    const channel = new BroadcastChannel("portpilot-dashboard-singleton")
-    let isPrimary = true
-    const myId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-
-    channel.onmessage = (ev: MessageEvent<{ type: string; from: string }>) => {
-      const msg = ev.data
-      if (!msg || typeof msg !== "object") return
-      if (msg.type === "hello" && msg.from !== myId) {
-        // Another tab just woke up. The older tab (us) replies "I'm here"
-        // and stays primary; the newcomer demotes itself.
-        if (isPrimary) channel.postMessage({ type: "claim", from: myId })
-      } else if (msg.type === "claim" && msg.from !== myId) {
-        // An older tab claimed the singleton — we're the duplicate.
-        isPrimary = false
-        setPrimary(false)
-      }
-    }
-    // Announce ourselves. If nobody replies within 250 ms we're primary.
-    channel.postMessage({ type: "hello", from: myId })
-
-    return () => {
-      try {
-        channel.close()
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [])
-  return { primary }
-}
-
-function DuplicateTabOverlay() {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-neutral-950/95 backdrop-blur">
-      <div className="mx-6 max-w-md rounded-lg border border-border/60 bg-card p-6 text-center shadow-xl">
-        <AlertTriangle className="mx-auto mb-3 size-8 text-amber-400" />
-        <h2 className="mb-2 text-base font-semibold">
-          Port Pilot is already open
-        </h2>
-        <p className="mb-4 text-sm text-muted-foreground">
-          You already have the Port Pilot dashboard open in another tab or
-          window. Close this duplicate so it only runs once.
-        </p>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            // window.close() only works on windows that JS opened, but
-            // it's still the cleanest hint we can give the user.
-            window.close()
-          }}
-        >
-          Close this tab
-        </Button>
-        <p className="mt-3 text-[11px] text-muted-foreground/70">
-          If the button doesn&apos;t do anything, your browser blocked it — just
-          close this tab manually.
-        </p>
-      </div>
-    </div>
-  )
-}
-
 /* -------------------------------------------------------------------------- */
 /*  Hook: poll /api/snapshot every 2s                                         */
 /* -------------------------------------------------------------------------- */
@@ -505,6 +444,10 @@ type GroupedSessions = {
   sessions: LiveSession[]
 }[]
 
+function isRegisteredActionLane(session: LiveSession): boolean {
+  return session.registeredBy === "portpilot" && Boolean(session.laneId)
+}
+
 function groupByCwd(sessions: LiveSession[]): GroupedSessions {
   const buckets = new Map<
     string,
@@ -554,13 +497,9 @@ function LiveSessions({
       <Card className="border-dashed">
         <CardContent className="py-12 text-center text-sm text-muted-foreground">
           <Activity className="mx-auto mb-2 size-6 text-muted-foreground/40" />
-          No live Chrome sessions.
+          No live browser sessions.
           <div className="mt-1 text-xs">
-            Waiting for an agent to launch Chrome with{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
-              --remote-debugging-port
-            </code>
-            .
+            Waiting for an agent to launch a browser through PortPilot.
           </div>
         </CardContent>
       </Card>
@@ -606,6 +545,7 @@ function SessionGroup({
   onKilled: () => void
   hiddenApi: HiddenApi
 }) {
+  const actionableSessions = group.sessions.filter(isRegisteredActionLane)
   return (
     <>
       <TableRow className="border-y bg-muted/40 hover:bg-muted/40">
@@ -626,13 +566,16 @@ function SessionGroup({
             {/* "Hide all" / "Kill all" are group-level shortcuts — redundant
                 when the group has only one session (that row already has its
                 own Hide/Kill buttons). Show them only for 2+ sessions. */}
-            {group.sessions.length > 1 && (
+            {actionableSessions.length > 1 && (
               <div
                 className="flex shrink-0 items-center gap-1.5"
                 onClick={(e) => e.stopPropagation()}
               >
-                <HideAllButton sessions={group.sessions} hiddenApi={hiddenApi} />
-                <KillAllButton sessions={group.sessions} onKilled={onKilled} />
+                <HideAllButton
+                  sessions={actionableSessions}
+                  hiddenApi={hiddenApi}
+                />
+                <KillAllButton sessions={actionableSessions} onKilled={onKilled} />
               </div>
             )}
           </div>
@@ -660,6 +603,8 @@ function SessionRow({
   hiddenApi: HiddenApi
 }) {
   const [open, setOpen] = useState(false)
+  const registeredAction = isRegisteredActionLane(s)
+  const actionReason = "Actions are disabled because this process is not an exact registered PortPilot lane."
   return (
     <>
       <TableRow
@@ -778,14 +723,26 @@ function SessionRow({
           aria-label="row actions"
         >
           <div className="inline-flex items-center gap-1">
-            {/* "Show" (focus) only restores + foregrounds; it can't move a
-                hidden window back on-screen, and the watcher would re-park it
-                anyway. So once a lane is hidden, the only bring-it-back action
-                is "Unhide" — hide the dead button to avoid the confusion. */}
-            {!hiddenApi.isHidden(s) && <FocusButton pid={s.pid} />}
-            <HideToggleButton s={s} hiddenApi={hiddenApi} />
-            <KillButton pid={s.pid} onKilled={onKilled} />
-            <EraseButton s={s} onErased={onKilled} />
+            {/* While a lane is hidden, Unhide is the single restore action.
+                Suppress the redundant Show button until the browser app has
+                been restored. */}
+            {!hiddenApi.isHidden(s) && (
+              <FocusButton
+                laneId={s.laneId}
+                pid={s.pid}
+                processStart={s.processStart ?? ""}
+                enabled={registeredAction}
+                disabledReason={actionReason}
+              />
+            )}
+            <HideToggleButton
+              s={s}
+              hiddenApi={hiddenApi}
+              enabled={registeredAction}
+              disabledReason={actionReason}
+            />
+            <KillButton laneId={s.laneId} pid={s.pid} processStart={s.processStart ?? ""} enabled={registeredAction} onKilled={onKilled} />
+            <EraseButton s={s} enabled={registeredAction} onErased={onKilled} />
           </div>
         </TableCell>
       </TableRow>
@@ -958,12 +915,24 @@ function SourcePill({ session }: { session: LiveSession }) {
 /*  Kill button — click to confirm                                            */
 /* -------------------------------------------------------------------------- */
 /**
- * Focus button — POST /api/focus to bring this Chrome window to the
+ * Focus button — POST /api/focus to bring this browser window to the
  * foreground on the user's desktop. Useful when ten Chromes are open
  * and the user wants to visually inspect one of them without hunting
  * through the taskbar.
  */
-function FocusButton({ pid }: { pid: number }) {
+function FocusButton({
+  laneId,
+  pid,
+  processStart,
+  enabled,
+  disabledReason,
+}: {
+  laneId?: string
+  pid: number
+  processStart: string
+  enabled: boolean
+  disabledReason: string
+}) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [shownAt, setShownAt] = useState<number | null>(null)
@@ -985,7 +954,7 @@ function FocusButton({ pid }: { pid: number }) {
     setBusy(true)
     setError(null)
     try {
-      const data = await focusChrome(pid)
+      const data = await focusChrome(laneId, pid, processStart)
       if (!data.ok) {
         setError(data.error ?? "focus failed")
       } else {
@@ -996,7 +965,7 @@ function FocusButton({ pid }: { pid: number }) {
     } finally {
       setBusy(false)
     }
-  }, [busy, pid])
+  }, [busy, laneId, pid, processStart])
 
   if (error) {
     return (
@@ -1010,10 +979,10 @@ function FocusButton({ pid }: { pid: number }) {
     <Button
       size="sm"
       variant="ghost"
-      disabled={busy}
+      disabled={busy || !enabled}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={`Bring Chrome pid ${pid} to the foreground`}
+      title={enabled ? `Bring verified browser pid ${pid} to the foreground` : disabledReason}
     >
       {busy ? (
         "showing…"
@@ -1027,18 +996,17 @@ function FocusButton({ pid }: { pid: number }) {
 }
 
 /**
- * Hide button — POST /api/hide to minimize this Chrome window. Same
- * effect as clicking the underscore in the title bar. The Chrome
- * process keeps running, but it gets out of the way of whatever you're
- * doing on the desktop.
+ * Hide button — asks the native backend to hide the verified browser
+ * application. The browser process keeps running, including full-screen
+ * Spaces and additional windows, but it gets out of the way until Unhide.
  */
 /**
  * Hide-All button — fires POST /api/hide for every visible session in
  * parallel. Useful when ten agent Chromes pop into your face at once
  * and you just want them gone so you can keep working.
  *
- * No confirmation dialog: hide is fully reversible (Show button or the
- * taskbar icon brings any window back) so the friction-free path wins.
+ * No confirmation dialog: hide is fully reversible with Unhide or the
+ * operating system's app launcher, so the friction-free path wins.
  */
 function HideAllButton({
   sessions,
@@ -1076,10 +1044,11 @@ function HideAllButton({
           if (allHidden) {
             const entry = hiddenApi.getEntry(s)
             hiddenApi.clearHidden(s)
-            const res = await unhideChrome(s.pid, entry?.placement)
+            const res = await unhideChrome(s.laneId, s.pid, s.processStart ?? "", entry?.placement)
             if (res.ok) ok++
+            else hiddenApi.markHidden(s, entry?.placement)
           } else {
-            const res = await hideChrome(s.pid)
+            const res = await hideChrome(s.laneId, s.pid, s.processStart ?? "")
             if (res.ok) {
               hiddenApi.markHidden(s, res.placement)
               ok++
@@ -1110,8 +1079,8 @@ function HideAllButton({
         n === 0
           ? "Nothing to hide"
           : allHidden
-            ? `Bring all ${n} hidden Chrome window${n === 1 ? "" : "s"} back on-screen`
-            : `Hide all ${n} Chrome window${n === 1 ? "" : "s"} off-screen until you unhide`
+            ? `Bring all ${n} hidden browser window${n === 1 ? "" : "s"} back on-screen`
+            : `Hide all ${n} browser window${n === 1 ? "" : "s"} until you unhide`
       }
     >
       {busy ? (
@@ -1185,7 +1154,7 @@ function KillAllButton({
     const responses = await Promise.all(
       sessions.map(async (s) => {
         try {
-          const data = await killChrome(s.pid)
+          const data = await killChrome(s.laneId, s.pid, s.processStart ?? "")
           return data.ok
         } catch {
           return false
@@ -1211,8 +1180,8 @@ function KillAllButton({
         sessions.length === 0
           ? "Nothing to kill"
           : confirming
-            ? `Click again to terminate all ${sessions.length} Chrome processes`
-            : `Terminate all ${sessions.length} Chrome processes (irreversible — click twice)`
+            ? `Click again to terminate all ${sessions.length} browser processes`
+            : `Terminate all ${sessions.length} browser processes (irreversible — click twice)`
       }
     >
       {busy ? (
@@ -1241,9 +1210,13 @@ function KillAllButton({
 function HideToggleButton({
   s,
   hiddenApi,
+  enabled,
+  disabledReason,
 }: {
   s: LiveSession
   hiddenApi: HiddenApi
+  enabled: boolean
+  disabledReason: string
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1265,10 +1238,13 @@ function HideToggleButton({
         // Clear the persistent flag FIRST, so a concurrent poll tick can't
         // re-park the window we are about to bring back.
         hiddenApi.clearHidden(s)
-        const res = await unhideChrome(s.pid, entry?.placement)
-        if (!res.ok) setError(res.error ?? "unhide failed")
+        const res = await unhideChrome(s.laneId, s.pid, s.processStart ?? "", entry?.placement)
+        if (!res.ok) {
+          hiddenApi.markHidden(s, entry?.placement)
+          setError(res.error ?? "unhide failed")
+        }
       } else {
-        const res = await hideChrome(s.pid)
+        const res = await hideChrome(s.laneId, s.pid, s.processStart ?? "")
         if (!res.ok) setError(res.error ?? "hide failed")
         else hiddenApi.markHidden(s, res.placement)
       }
@@ -1291,11 +1267,13 @@ function HideToggleButton({
     <Button
       size="sm"
       variant="ghost"
-      disabled={busy}
+      disabled={busy || !enabled}
       onClick={onClick}
       className={cn("h-7 px-2 text-[11px]", hidden && "text-sky-400")}
       title={
-        hidden
+        !enabled
+          ? disabledReason
+          : hidden
           ? "Bring this Chrome back on-screen where it was"
           : "Hide this Chrome and keep it off-screen until you click Unhide — even if the agent keeps raising it"
       }
@@ -1311,7 +1289,7 @@ function HideToggleButton({
   )
 }
 
-function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
+function KillButton({ laneId, pid, processStart, enabled, onKilled }: { laneId?: string; pid: number; processStart: string; enabled: boolean; onKilled: () => void }) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1336,7 +1314,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
     setBusy(true)
     setError(null)
     try {
-      const data = await killChrome(pid)
+      const data = await killChrome(laneId, pid, processStart)
       if (!data.ok) {
         setError(data.error ?? "unknown error")
         setBusy(false)
@@ -1349,7 +1327,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
       setBusy(false)
       setConfirming(false)
     }
-  }, [busy, confirming, pid, onKilled, reset])
+  }, [busy, confirming, laneId, pid, processStart, onKilled, reset])
 
   if (error) {
     return (
@@ -1363,10 +1341,10 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
     <Button
       size="sm"
       variant={confirming ? "destructive" : "ghost"}
-      disabled={busy}
+      disabled={busy || !enabled}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={`Terminate Chrome process pid ${pid}`}
+      title={enabled ? `Terminate verified browser process pid ${pid}` : "Kill is disabled for inferred or external processes."}
     >
       {busy ? (
         "killing…"
@@ -1387,7 +1365,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
 /*  history), then drops the lane so the row disappears. Two-click confirm     */
 /*  because, unlike Kill, this is irreversible login loss. Mirrors KillButton. */
 /* -------------------------------------------------------------------------- */
-function EraseButton({ s, onErased }: { s: LiveSession; onErased: () => void }) {
+function EraseButton({ s, enabled, onErased }: { s: LiveSession; enabled: boolean; onErased: () => void }) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1412,7 +1390,7 @@ function EraseButton({ s, onErased }: { s: LiveSession; onErased: () => void }) 
     setBusy(true)
     setError(null)
     try {
-      const data = await eraseChrome(s.pid, s.chromeProfileDir, s.laneId)
+      const data = await eraseChrome(s.pid, s.processStart ?? "", s.chromeProfileDir, s.laneId)
       if (!data.ok) {
         setError(data.error ?? "unknown error")
         setBusy(false)
@@ -1439,10 +1417,10 @@ function EraseButton({ s, onErased }: { s: LiveSession; onErased: () => void }) 
     <Button
       size="sm"
       variant={confirming ? "destructive" : "ghost"}
-      disabled={busy}
+      disabled={busy || !enabled}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title="Erase this session's saved logins, cookies & history. Closes Chrome and cannot be undone."
+      title={enabled ? "Erase this session's saved logins, cookies & history. Closes the browser and cannot be undone." : "Erase is disabled for inferred or external processes."}
     >
       {busy ? (
         "erasing…"
@@ -1469,22 +1447,50 @@ function EraseButton({ s, onErased }: { s: LiveSession; onErased: () => void }) 
 /* -------------------------------------------------------------------------- */
 export function App() {
   const { snap, error, refresh } = useSnapshot()
-  const { primary } = useSingleInstance()
   const hiddenApi = useHiddenSet()
+  const [runtime, setRuntime] = useState<RuntimeStatus | null>(null)
   useHideEnforcement(snap, hiddenApi)
 
-  if (!primary) {
-    return (
-      <div className="dark min-h-svh bg-neutral-950 text-foreground">
-        <DuplicateTabOverlay />
-      </div>
-    )
-  }
+  const checkRuntime = useCallback(async () => {
+    try {
+      setRuntime(await getRuntimeStatus())
+    } catch (cause) {
+      setRuntime({ ok: false, provider: "unavailable", error: String(cause) })
+    }
+  }, [])
+
+  useEffect(() => {
+    void checkRuntime()
+  }, [checkRuntime])
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void listen("refresh-dashboard", () => refresh()).then((stop) => {
+      unlisten = stop
+    })
+    return () => unlisten?.()
+  }, [refresh])
+
+  const actionableSessions = snap?.liveSessions.filter(isRegisteredActionLane) ?? []
 
   return (
     <div className="dark min-h-svh bg-neutral-950 text-foreground">
       <Header snap={snap} />
       <main className="mx-auto max-w-7xl px-6 py-6">
+        {runtime && !runtime.ok && (
+          <Alert variant="destructive" className="mb-6">
+            <AlertTriangle className="size-4" />
+            <AlertTitle>PortPilot runtime is unavailable</AlertTitle>
+            <AlertDescription className="mt-1 space-y-2 text-[12px]">
+              <div className="font-mono text-[11px]">
+                {runtime.error ?? "Configure a verified PortPilot runtime before using the dashboard."}
+              </div>
+              <Button size="sm" variant="outline" onClick={() => { void checkRuntime(); refresh() }}>
+                Retry
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
         {error && !snap && (
           <Alert variant="destructive" className="mb-6">
             <AlertTitle>Could not reach the dashboard server</AlertTitle>
@@ -1497,20 +1503,20 @@ export function App() {
           <>
             <ConflictsBanner snap={snap} />
             <div className="mb-3 flex items-center justify-between">
-              <SectionLabel className="mb-0">Live Chrome sessions</SectionLabel>
+              <SectionLabel className="mb-0">LIVE BROWSER SESSIONS</SectionLabel>
               <div className="flex items-center gap-2">
                 <DefaultBrowserPicker />
                 {/* Top-level "Hide all" / "Kill all" — redundant with the
                     per-row controls when there's only one live session
                     (single row already has Hide/Kill). Show only for 2+. */}
-                {snap.liveSessions.length > 1 && (
+                {actionableSessions.length > 1 && (
                   <>
                     <HideAllButton
-                      sessions={snap.liveSessions}
+                      sessions={actionableSessions}
                       hiddenApi={hiddenApi}
                     />
                     <KillAllButton
-                      sessions={snap.liveSessions}
+                      sessions={actionableSessions}
                       onKilled={refresh}
                     />
                   </>
@@ -1548,14 +1554,15 @@ export function App() {
 function DefaultBrowserPicker() {
   const [value, setValue] = useState<DefaultBrowser>("chrome")
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   useEffect(() => {
     getConfig()
       .then((r) => {
         const b = r.config?.defaultBrowser
         if (b === "chrome" || b === "edge" || b === "firefox") setValue(b)
       })
-      .catch(() => {
-        /* config unreadable — leave the chrome default */
+      .catch((cause) => {
+        setSaveError(`Could not read the saved browser setting: ${String(cause)}`)
       })
   }, [])
   const onChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -1563,31 +1570,43 @@ function DefaultBrowserPicker() {
     const prev = value
     setValue(next)
     setSaving(true)
+    setSaveError(null)
     try {
       await setDefaultBrowser(next)
-    } catch {
+    } catch (cause) {
       setValue(prev) // write failed — don't lie about what's persisted
+      setSaveError(`Could not save the default browser: ${String(cause)}`)
     } finally {
       setSaving(false)
     }
   }
   return (
-    <label
-      className="flex items-center gap-2 text-xs text-muted-foreground"
-      title="Browser used when an agent opens a NEW lane without asking for a specific one. An explicit browser in the agent's call always wins; existing lanes keep their browser."
-    >
-      Default browser
-      <select
-        value={value}
-        onChange={onChange}
-        disabled={saving}
-        className="h-8 rounded-md border border-input bg-transparent px-2 text-xs font-medium text-foreground shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30 [&>option]:bg-neutral-900"
+    <div className="flex items-center gap-2">
+      <label
+        className="flex items-center gap-2 text-xs text-muted-foreground"
+        title="Browser used when an agent opens a NEW lane without asking for a specific one. An explicit browser in the agent's call always wins; existing lanes keep their browser."
       >
-        <option value="chrome">Chrome</option>
-        <option value="edge">Edge</option>
-        <option value="firefox">Firefox</option>
-      </select>
-    </label>
+        Default browser
+        <span className="relative inline-flex shrink-0 items-center">
+          <select
+            aria-label="Default browser"
+            value={value}
+            onChange={onChange}
+            disabled={saving}
+            className="h-8 min-w-24 appearance-none rounded-md border border-input bg-background py-0 pr-8 pl-3 text-xs leading-none font-medium text-foreground shadow-xs outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30 [&>option]:bg-neutral-900"
+          >
+            <option value="chrome">Chrome</option>
+            <option value="edge">Edge</option>
+            <option value="firefox">Firefox</option>
+          </select>
+          <ChevronDown
+            aria-hidden="true"
+            className="pointer-events-none absolute right-2.5 size-3.5 text-muted-foreground"
+          />
+        </span>
+      </label>
+      {saveError && <span className="text-[10px] text-destructive" title={saveError}>× save failed</span>}
+    </div>
   )
 }
 

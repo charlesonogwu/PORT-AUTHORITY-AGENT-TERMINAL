@@ -1,6 +1,6 @@
 [package]
 name = "paat-dashboard"
-version = "0.2.0"
+version = "0.5.0"
 edition = "2021"
 description = "Port Authority Agent Terminal — dashboard"
 authors = ["charlesonogwu"]
@@ -14,16 +14,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# `devtools` enables F12 + right-click → Inspect Element in release builds.
-# v0.2.0/0.2.1 shipped without this so when the React UI failed to mount the
-# user saw a blank white window with no way to see what went wrong. v0.2.2
-# enables it permanently for easier user-side debugging.
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-which = "8"
 
 # Native window control for the hide-watcher thread (enumerate + move windows
 # off-screen in microseconds, no PowerShell). Windows-only.
@@ -32,3 +27,7 @@ windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication"] }

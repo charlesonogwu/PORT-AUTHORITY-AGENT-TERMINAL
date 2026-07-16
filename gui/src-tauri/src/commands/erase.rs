@@ -11,25 +11,34 @@
 // async + spawn_blocking so the multi-second kill+retry never freezes the UI
 // thread — same pattern as commands/snapshot.rs.
 
-use crate::cli::{quiet_command, run_cli_json};
+use crate::commands::action_safety::revalidate_lane_action;
+use crate::commands::kill::terminate_lane_process;
+use crate::runtime::RuntimeState;
 use serde_json::Value;
 use std::{thread, time::Duration};
+use tauri::State;
 
-fn kill_pid(pid: u32) {
-    let _ = if cfg!(target_os = "windows") {
-        quiet_command("taskkill.exe")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output()
-    } else {
-        quiet_command("kill").args(["-9", &pid.to_string()]).output()
-    };
-}
+fn erase_blocking(
+    pid: u32,
+    process_start: String,
+    profile_dir: String,
+    lane_id: String,
+    runtime: RuntimeState,
+) -> Result<Value, String> {
+    let validated = revalidate_lane_action(&runtime, &lane_id, pid, &process_start)?;
+    let validated_profile = validated
+        .get("lane")
+        .and_then(|lane| lane.get("chromeProfileDir"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "refused erase: validated lane has no profile path".to_string())?;
+    if validated_profile != profile_dir {
+        return Err("refused erase: requested profile does not match the revalidated lane".into());
+    }
+    // Revalidate once more inside the termination helper immediately before
+    // closing the process. A mismatched frontend path can never cause a kill.
+    terminate_lane_process(&runtime, &lane_id, pid, &process_start)?;
 
-fn erase_blocking(pid: u32, profile_dir: String, lane_id: Option<String>) -> Result<Value, String> {
-    // 1. Close Chrome so it releases the profile's file handles.
-    kill_pid(pid);
-
-    // 2. Erase via the CLI. The guarded delete + lane removal live in the
+    // Erase via the CLI. The guarded delete + lane removal live in the
     //    tested Node core; we just retry because Windows can keep the profile
     //    locked for a moment after the process dies.
     let mut args: Vec<String> = vec![
@@ -38,16 +47,12 @@ fn erase_blocking(pid: u32, profile_dir: String, lane_id: Option<String>) -> Res
         "--profile-dir".into(),
         profile_dir,
     ];
-    if let Some(id) = lane_id {
-        args.push("--lane".into());
-        args.push(id);
-    }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
+    args.push("--lane".into());
+    args.push(lane_id);
     let mut last_err = String::new();
     for attempt in 0u64..5 {
         thread::sleep(Duration::from_millis(300 * (attempt + 1)));
-        match run_cli_json(&arg_refs) {
+        match runtime.run_json(&args) {
             Ok(v) => return Ok(v),
             Err(e) => last_err = e,
         }
@@ -62,10 +67,15 @@ fn erase_blocking(pid: u32, profile_dir: String, lane_id: Option<String>) -> Res
 #[tauri::command]
 pub async fn erase_chrome(
     pid: u32,
+    process_start: String,
     profile_dir: String,
-    lane_id: Option<String>,
+    lane_id: String,
+    runtime: State<'_, RuntimeState>,
 ) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || erase_blocking(pid, profile_dir, lane_id))
-        .await
-        .map_err(|e| format!("erase worker join failed: {}", e))?
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        erase_blocking(pid, process_start, profile_dir, lane_id, runtime)
+    })
+    .await
+    .map_err(|e| format!("erase worker join failed: {}", e))?
 }

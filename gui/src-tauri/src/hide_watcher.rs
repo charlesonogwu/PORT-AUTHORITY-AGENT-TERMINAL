@@ -5,12 +5,11 @@
 // or the agent's Chrome restarts and comes up visible. A ~3s poll missed those
 // for up to a refresh cycle, so the user saw flashes.
 //
-// This module runs a single background thread that, every ~150 ms (imperceptible
-// to the eye, microseconds of work natively), enumerates every top-level window
-// and shoves any on-screen one owned by a *hidden* pid off-screen to
-// (-32000, -32000). The frontend keeps the hidden-pid set current (keyed by
-// debug-port + profile, so a restarted Chrome's new pid is re-hidden
-// automatically) via the `set_hidden_pids` command.
+// This module runs a single background thread every ~150 ms. The frontend keeps
+// the hidden-pid set current (keyed by debug-port + profile, so a restarted
+// browser's new pid is re-hidden automatically). Windows parks matching native
+// windows off-screen; macOS reissues NSRunningApplication::hide for the exact
+// revalidated PID.
 //
 // We move POSITION (never SW_HIDE / minimize): an off-screen window stays off
 // every monitor even when the agent raises it, because activation/z-order calls
@@ -18,6 +17,8 @@
 // z-order while still maximized first, drop to normal without activating, then
 // re-assert the off-screen position.
 
+use std::collections::HashMap;
+#[cfg(target_os = "windows")]
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,29 +27,48 @@ use tauri::State;
 
 /// Shared set of pids whose windows must be kept off-screen. Managed as Tauri
 /// state and read by the watcher thread.
-pub type HiddenPids = Arc<Mutex<HashSet<u32>>>;
+pub type HiddenPids = Arc<Mutex<HashMap<u32, String>>>;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiddenProcess {
+    pid: u32,
+    process_start: String,
+}
 
 const POLL_MS: u64 = 150;
 
 /// Replace the watcher's hidden-pid set. Called by the frontend whenever the
 /// hidden lanes (or their live pids) change.
 #[tauri::command]
-pub fn set_hidden_pids(pids: Vec<u32>, state: State<'_, HiddenPids>) -> Result<(), String> {
+pub fn set_hidden_processes(
+    targets: Vec<HiddenProcess>,
+    state: State<'_, HiddenPids>,
+) -> Result<(), String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
-    *s = pids.into_iter().collect();
+    *s = targets
+        .into_iter()
+        .map(|target| (target.pid, target.process_start))
+        .collect();
     Ok(())
 }
 
 /// Spawn the background watcher. Cheap no-op loop while nothing is hidden.
 pub fn spawn(state: HiddenPids) {
     std::thread::spawn(move || loop {
-        let pids: HashSet<u32> = match state.lock() {
+        let targets: HashMap<u32, String> = match state.lock() {
             Ok(g) => g.clone(),
-            Err(_) => HashSet::new(),
+            Err(_) => HashMap::new(),
         };
-        if !pids.is_empty() {
+        if !targets.is_empty() {
             #[cfg(target_os = "windows")]
-            win::park_on_screen(&pids);
+            win::park_on_screen(&targets.keys().copied().collect());
+            #[cfg(target_os = "macos")]
+            for (pid, process_start) in &targets {
+                if crate::process_identity::verify(*pid, process_start).is_ok() {
+                    let _ = crate::macos_application::park_on_screen(*pid);
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(POLL_MS));
     });
@@ -62,7 +82,7 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
         SetWindowPos, ShowWindow, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-        SW_SHOWNOACTIVATE, SW_SHOWMAXIMIZED, WINDOWPLACEMENT,
+        SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, WINDOWPLACEMENT,
     };
 
     const OFF: i32 = -32000;
@@ -86,7 +106,9 @@ mod win {
     /// Move every on-screen top-level window owned by a hidden pid off-screen.
     pub fn park_on_screen(pids: &HashSet<u32>) {
         unsafe {
-            let mut ctx = Collected { windows: Vec::new() };
+            let mut ctx = Collected {
+                windows: Vec::new(),
+            };
             if EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize)).is_err() {
                 return;
             }
@@ -115,7 +137,15 @@ mod win {
         let _ = GetWindowPlacement(hwnd, &mut wp);
         // 1) Off-screen + bottom-of-z-order while still maximized/snapped: any
         //    painted frame is occluded and unfocused.
-        let _ = SetWindowPos(hwnd, HWND_BOTTOM, OFF, OFF, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            OFF,
+            OFF,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        );
         // 2) Drop maximized -> normal WITHOUT activating, only if maximized.
         if wp.showCmd == SW_SHOWMAXIMIZED.0 as u32 {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);

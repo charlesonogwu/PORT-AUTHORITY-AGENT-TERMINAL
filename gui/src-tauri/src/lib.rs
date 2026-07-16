@@ -9,33 +9,110 @@
 mod cli;
 mod commands;
 mod hide_watcher;
+mod lifecycle;
+#[cfg(target_os = "macos")]
+mod macos_application;
 mod paths;
+mod process_identity;
+mod runtime;
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "macos")]
+use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+use tauri::Emitter;
+
+#[cfg(target_os = "macos")]
+fn install_macos_menu(app: &tauri::App) -> tauri::Result<()> {
+    let menu = Menu::default(app.handle())?;
+    let refresh = MenuItem::with_id(
+        app.handle(),
+        "refresh-dashboard",
+        "Refresh",
+        true,
+        Some("CommandOrControl+R"),
+    )?;
+    let show_portpilot = MenuItem::with_id(
+        app.handle(),
+        "show-portpilot",
+        "Show PortPilot",
+        true,
+        None::<&str>,
+    )?;
+    for item in menu.items()? {
+        if let MenuItemKind::Submenu(submenu) = item {
+            match submenu.text()?.as_str() {
+                "View" => submenu.prepend(&refresh)?,
+                "Window" => submenu.append_items(&[
+                    &PredefinedMenuItem::separator(app.handle())?,
+                    &PredefinedMenuItem::bring_all_to_front(app.handle(), None)?,
+                    &show_portpilot,
+                ])?,
+                _ => {}
+            }
+        }
+    }
+    app.set_menu(menu)?;
+    Ok(())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Shared set of pids the real-time watcher keeps off-screen.
-    let hidden_pids: hide_watcher::HiddenPids = Arc::new(Mutex::new(HashSet::new()));
+    let hidden_pids: hide_watcher::HiddenPids =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let runtime = runtime::RuntimeState::load(&paths::runtime_provider_config_path());
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         // Single-instance plugin: a second `paat-dashboard.exe` invocation
         // brings the existing window to front instead of spawning a duplicate.
         // Replaces the Go launcher's mutex logic from v0.1.x.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            use tauri::Manager;
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+            if lifecycle::decision(
+                lifecycle::LifecycleEvent::SecondLaunch,
+                cfg!(target_os = "macos"),
+            ) == lifecycle::LifecycleDecision::Restore
+            {
+                lifecycle::restore_main_window(app);
             }
         }))
         .manage(hidden_pids.clone())
-        .setup(move |_app| {
+        .manage(runtime)
+        .setup(move |app| {
             // Start the real-time hide watcher: keeps every window of every
             // hidden lane off-screen within ~150ms of it appearing.
             hide_watcher::spawn(hidden_pids.clone());
+            // macOS may launch an application without activating its first
+            // window (for example via Finder or `open`). Make first launch
+            // obey the same explicit restore contract as Dock reopen and a
+            // second invocation.
+            #[cfg(target_os = "macos")]
+            {
+                install_macos_menu(app)?;
+                lifecycle::restore_main_window(app.handle());
+            }
             Ok(())
+        })
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "refresh-dashboard" => {
+                let _ = app.emit("refresh-dashboard", ());
+            }
+            "show-portpilot" => lifecycle::restore_main_window(app),
+            _ => {}
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if lifecycle::decision(
+                    lifecycle::LifecycleEvent::CloseRequested,
+                    cfg!(target_os = "macos"),
+                ) == lifecycle::LifecycleDecision::Hide
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::lanes::list_lanes,
@@ -48,8 +125,19 @@ pub fn run() {
             commands::focus::focus_chrome,
             commands::focus::hide_chrome,
             commands::focus::unhide_chrome,
-            hide_watcher::set_hidden_pids,
+            hide_watcher::set_hidden_processes,
+            runtime::get_runtime_status,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running paat-dashboard");
+        .build(tauri::generate_context!())
+        .expect("error while building PortPilot");
+
+    app.run(|app_handle, event| {
+        #[cfg(target_os = "macos")]
+        if matches!(event, tauri::RunEvent::Reopen { .. })
+            && lifecycle::decision(lifecycle::LifecycleEvent::Reopen, true)
+                == lifecycle::LifecycleDecision::Restore
+        {
+            lifecycle::restore_main_window(app_handle);
+        }
+    });
 }

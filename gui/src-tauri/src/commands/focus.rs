@@ -16,15 +16,38 @@
 // the window to exactly where it was on Unhide.
 //
 // Windows: native Win32 for Show; PowerShell + Win32 P/Invoke for Hide/Unhide.
-// macOS/Linux: best-effort (set-visible / wmctrl); the durable off-screen-move
-//   analog is a documented follow-up.
+// macOS: exact-PID NSRunningApplication control with a revalidation watcher.
+// Linux: best-effort set-visible / wmctrl behavior.
 
+#[cfg(not(target_os = "macos"))]
 use crate::cli::quiet_command;
+use crate::commands::action_safety::revalidate_lane_action;
+use crate::runtime::RuntimeState;
 use serde_json::{json, Value};
+use tauri::State;
+
+async fn validation_error(
+    runtime: State<'_, RuntimeState>,
+    lane_id: String,
+    pid: u32,
+    process_start: String,
+) -> Option<String> {
+    let runtime = runtime.inner().clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        revalidate_lane_action(&runtime, &lane_id, pid, &process_start)
+    })
+    .await
+    {
+        Ok(Ok(_)) => None,
+        Ok(Err(error)) => Some(error),
+        Err(error) => Some(format!("lane validation worker failed: {error}")),
+    }
+}
 
 /// The small amount of window metadata needed to decide whether a top-level
 /// HWND is Chrome's real browser frame rather than one of its helper windows.
 /// Kept platform-neutral so the selection rule is unit-testable.
+#[cfg(any(target_os = "windows", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowCandidate {
     class_name: String,
@@ -36,6 +59,7 @@ struct WindowCandidate {
 /// Higher is a better Show target. A real browser frame may be temporarily
 /// represented by Windows as a 160x28 minimized placeholder, so size alone
 /// cannot reject it.
+#[cfg(any(target_os = "windows", test))]
 fn browser_window_rank(candidate: &WindowCandidate) -> Option<u8> {
     if candidate.width <= 0 || candidate.height <= 0 {
         return None;
@@ -98,7 +122,6 @@ mod tests {
             None,
         );
     }
-
 }
 
 /* -------------------------------------------------------------------------- */
@@ -106,7 +129,18 @@ mod tests {
 /* -------------------------------------------------------------------------- */
 
 #[tauri::command]
-pub fn focus_chrome(pid: u32) -> Result<Value, String> {
+pub async fn focus_chrome(
+    lane_id: String,
+    pid: u32,
+    process_start: String,
+    runtime: State<'_, RuntimeState>,
+) -> Result<Value, String> {
+    if let Some(error) = validation_error(runtime, lane_id, pid, process_start.clone()).await {
+        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
+    }
+    if let Err(error) = crate::process_identity::verify(pid, &process_start) {
+        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
+    }
     let result = run_focus(pid);
     Ok(match result {
         Ok(()) => json!({ "ok": true, "pid": pid }),
@@ -115,18 +149,36 @@ pub fn focus_chrome(pid: u32) -> Result<Value, String> {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  hide_chrome: persistent off-screen move; returns captured placement.       */
+/*  hide_chrome: persistent native hide; returns its safe restore state.       */
 /* -------------------------------------------------------------------------- */
 
 #[tauri::command]
-pub fn hide_chrome(pid: u32) -> Result<Value, String> {
+pub async fn hide_chrome(
+    lane_id: String,
+    pid: u32,
+    process_start: String,
+    runtime: State<'_, RuntimeState>,
+) -> Result<Value, String> {
+    if let Some(error) = validation_error(runtime, lane_id, pid, process_start.clone()).await {
+        return Ok(json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": error }));
+    }
+    if let Err(error) = crate::process_identity::verify(pid, &process_start) {
+        return Ok(json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": error }));
+    }
     #[cfg(target_os = "windows")]
     {
         Ok(windows_hide(pid))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        // Best-effort on macOS/Linux; no placement captured (UI falls back).
+        let result = crate::macos_application::hide(pid);
+        Ok(match result {
+            Ok(placement) => json!({ "ok": true, "pid": pid, "placement": placement }),
+            Err(e) => json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": e }),
+        })
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
         let result = unix_hide(pid);
         Ok(match result {
             Ok(()) => json!({ "ok": true, "pid": pid, "placement": Value::Null }),
@@ -136,12 +188,13 @@ pub fn hide_chrome(pid: u32) -> Result<Value, String> {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  unhide_chrome: restore the window to its saved on-screen placement.        */
+/*  unhide_chrome: reverse the native hide and restore placement when known.   */
 /* -------------------------------------------------------------------------- */
 
 /// Placement the dashboard passes back to restore a hidden window. Comes from
 /// the JSON hide_chrome returned, stored verbatim in the frontend. `showCmd`
 /// is the Win32 SW_* the window had before hiding (3 = maximized).
+#[cfg(target_os = "windows")]
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WinPlacement {
@@ -153,28 +206,56 @@ pub struct WinPlacement {
 }
 
 #[tauri::command]
-pub fn unhide_chrome(pid: u32, placement: WinPlacement) -> Result<Value, String> {
-    // Sanity-guard the saved rect: if it is degenerate or itself off-screen
-    // (lost/garbled state, monitor unplugged), never restore the window
-    // invisibly — fall back to a sensible on-screen box.
-    let invalid = placement.left <= -30000
-        || placement.top <= -30000
-        || placement.right - placement.left <= 0
-        || placement.bottom - placement.top <= 0;
-    let (sc, l, t, r, b) = if invalid {
-        (1, 80, 80, 80 + 1280, 80 + 1000)
-    } else {
-        (placement.show_cmd, placement.left, placement.top, placement.right, placement.bottom)
-    };
-
+pub async fn unhide_chrome(
+    lane_id: String,
+    pid: u32,
+    process_start: String,
+    placement: Value,
+    runtime: State<'_, RuntimeState>,
+) -> Result<Value, String> {
+    if let Some(error) = validation_error(runtime, lane_id, pid, process_start.clone()).await {
+        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
+    }
+    if let Err(error) = crate::process_identity::verify(pid, &process_start) {
+        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
+    }
     #[cfg(target_os = "windows")]
     {
+        let placement: WinPlacement = serde_json::from_value(placement)
+            .map_err(|e| format!("invalid Windows window placement: {e}"))?;
+        // Sanity-guard the saved rect: if it is degenerate or itself off-screen
+        // (lost/garbled state, monitor unplugged), never restore invisibly.
+        let invalid = placement.left <= -30000
+            || placement.top <= -30000
+            || placement.right - placement.left <= 0
+            || placement.bottom - placement.top <= 0;
+        let (sc, l, t, r, b) = if invalid {
+            (1, 80, 80, 80 + 1280, 80 + 1000)
+        } else {
+            (
+                placement.show_cmd,
+                placement.left,
+                placement.top,
+                placement.right,
+                placement.bottom,
+            )
+        };
         Ok(windows_unhide(pid, sc, l, t, r, b))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = (sc, l, t, r, b);
-        let result = run_focus(pid); // best-effort: just bring it back to front
+        let placement: crate::macos_application::MacPlacement = serde_json::from_value(placement)
+            .unwrap_or_else(|_| crate::macos_application::MacPlacement::application_hidden());
+        let result = crate::macos_application::restore(pid, placement);
+        Ok(match result {
+            Ok(()) => json!({ "ok": true, "pid": pid }),
+            Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
+        })
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        let _ = placement;
+        let result = run_focus(pid);
         Ok(match result {
             Ok(()) => json!({ "ok": true, "pid": pid }),
             Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
@@ -200,8 +281,8 @@ mod win_focus {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, SetForegroundWindow, SetWindowPos, ShowWindow,
-        SWP_NOZORDER, SW_RESTORE,
+        GetWindowThreadProcessId, SetForegroundWindow, SetWindowPos, ShowWindow, SWP_NOZORDER,
+        SW_RESTORE,
     };
 
     struct FoundWindow {
@@ -276,13 +357,15 @@ mod win_focus {
             let found = ctx
                 .windows
                 .iter()
-                .map(|window| format!(
-                    "{} {:?} {}x{}",
-                    window.candidate.class_name,
-                    window.candidate.title,
-                    window.candidate.width,
-                    window.candidate.height
-                ))
+                .map(|window| {
+                    format!(
+                        "{} {:?} {}x{}",
+                        window.candidate.class_name,
+                        window.candidate.title,
+                        window.candidate.width,
+                        window.candidate.height
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             ctx.windows
@@ -449,39 +532,12 @@ fn run_powershell(script: &str) -> Result<String, String> {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  macOS implementations (best-effort)                                        */
+/*  macOS implementation                                                       */
 /* -------------------------------------------------------------------------- */
 
 #[cfg(target_os = "macos")]
 fn run_focus(pid: u32) -> Result<(), String> {
-    let script = format!(
-        "tell application \"System Events\" to set frontmost of (first process whose unix id is {}) to true",
-        pid
-    );
-    run_osascript(&script)
-}
-
-#[cfg(target_os = "macos")]
-fn unix_hide(pid: u32) -> Result<(), String> {
-    // Durable-ish: move the front window off-screen rather than set-visible
-    // false (which the agent re-shows). Best-effort; not flash-hardened.
-    let script = format!(
-        "tell application \"System Events\" to set position of front window of (first process whose unix id is {}) to {{-32000, -32000}}",
-        pid
-    );
-    run_osascript(&script)
-}
-
-#[cfg(target_os = "macos")]
-fn run_osascript(script: &str) -> Result<(), String> {
-    let output = quiet_command("osascript")
-        .args(["-e", script])
-        .output()
-        .map_err(|e| format!("failed to spawn osascript: {}", e))?;
-    if !output.status.success() {
-        return Err(format!("osascript failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    Ok(())
+    crate::macos_application::focus(pid)
 }
 
 /* -------------------------------------------------------------------------- */
@@ -495,7 +551,10 @@ fn run_focus(pid: u32) -> Result<(), String> {
         .output()
         .map_err(|e| format!("wmctrl not available: {}", e))?;
     if !output.status.success() {
-        return Err(format!("wmctrl exit {}", output.status.code().unwrap_or(-1)));
+        return Err(format!(
+            "wmctrl exit {}",
+            output.status.code().unwrap_or(-1)
+        ));
     }
     Ok(())
 }
@@ -504,11 +563,21 @@ fn run_focus(pid: u32) -> Result<(), String> {
 fn unix_hide(pid: u32) -> Result<(), String> {
     // Best-effort: move off-screen via wmctrl -e (gravity,x,y,w,h = keep size).
     let output = quiet_command("wmctrl")
-        .args(["-i", "-x", "-p", &pid.to_string(), "-e", "0,-32000,-32000,-1,-1"])
+        .args([
+            "-i",
+            "-x",
+            "-p",
+            &pid.to_string(),
+            "-e",
+            "0,-32000,-32000,-1,-1",
+        ])
         .output()
         .map_err(|e| format!("wmctrl not available: {}", e))?;
     if !output.status.success() {
-        return Err(format!("wmctrl exit {}", output.status.code().unwrap_or(-1)));
+        return Err(format!(
+            "wmctrl exit {}",
+            output.status.code().unwrap_or(-1)
+        ));
     }
     Ok(())
 }
