@@ -49,14 +49,19 @@ test("native window actions remain lane- and process-identity-validated", () => 
   );
 });
 
-test("Show activates the exact displayed Chrome tab before raising its verified PID", () => {
+test("Show requests the exact displayed Chrome tab but always runs native recovery after validation", () => {
   assert.match(app, /tabId=\{s\.primaryTabs\[0\]\?\.id\}/);
   assert.match(client, /tab: tabId && debugPort \? \{ debugPort, browser, tabId \} : null/);
   assert.match(focusCommands, /checked_cdp_activation/);
   assert.match(focusCommands, /PUT \/json\/activate\/\{target_id\}/);
   assert.match(focusCommands, /requested_port != Some\(lane_port\)/);
   assert.match(focusCommands, /requested_browser != lane_browser/);
-  assert.match(focusCommands, /activate_exact_tab\(activation\)\.await/);
+  assert.match(focusCommands, /run_with_advisory_tab_activation/);
+  assert.match(focusCommands, /Exact tab unavailable; browser window was still restored/);
+  assert.match(focusCommands, /\|\| native_focus\(pid\)/);
+  assert.match(focusCommands, /\|\| native_unhide\(pid, placement\)/);
+  assert.match(client, /warning\?: string/);
+  assert.match(app, /shown ⚠/);
   assert.doesNotMatch(focusCommands, /Command::new\([^)]*(curl|osascript)/);
 });
 

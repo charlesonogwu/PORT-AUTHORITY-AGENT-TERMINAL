@@ -19,6 +19,7 @@ export interface FocusResult {
   ok: boolean;
   pid?: number;
   error?: string;
+  warning?: string;
 }
 
 /**
@@ -54,6 +55,7 @@ export interface UnhideResult {
   ok: boolean;
   pid?: number;
   error?: string;
+  warning?: string;
 }
 
 /** Polled every 2s by the main dashboard loop. */

@@ -16,7 +16,8 @@
 // the window to exactly where it was on Unhide.
 //
 // Windows: native Win32 for Show; PowerShell + Win32 P/Invoke for Hide/Unhide.
-// macOS: exact-PID NSRunningApplication control with a revalidation watcher.
+// macOS: exact-PID Process Manager control with NSRunningApplication state
+// verification and a revalidation watcher.
 // Linux: best-effort set-visible / wmctrl behavior.
 
 #[cfg(not(target_os = "macos"))]
@@ -25,12 +26,14 @@ use crate::commands::action_safety::revalidate_lane_action;
 use crate::runtime::RuntimeState;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::future::Future;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::time::{Duration, Instant};
 use tauri::State;
 
 const CDP_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(2);
+const TAB_ACTIVATION_WARNING_LIMIT: usize = 240;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,11 +73,26 @@ fn validate_cdp_target_id(target_id: &str) -> Result<(), String> {
 }
 
 fn activate_cdp_target_with_stream(
-    mut stream: TcpStream,
+    stream: TcpStream,
     port: u16,
     target_id: &str,
 ) -> Result<(), String> {
+    activate_cdp_target_with_stream_timeout(stream, port, target_id, CDP_ACTIVATION_TIMEOUT)
+}
+
+fn activate_cdp_target_with_stream_timeout(
+    mut stream: TcpStream,
+    port: u16,
+    target_id: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     validate_cdp_target_id(target_id)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("could not set browser response timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| format!("could not set browser request timeout: {error}"))?;
     let request = format!(
         "PUT /json/activate/{target_id} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
     );
@@ -89,7 +107,7 @@ fn activate_cdp_target_with_stream(
     // determined by the status line, so do not wait for EOF. On macOS a timed
     // or temporarily nonblocking read can surface as EAGAIN (OS error 35);
     // retry it only inside this short, bounded deadline.
-    let deadline = Instant::now() + CDP_ACTIVATION_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let mut response = Vec::with_capacity(256);
     loop {
         if let Some(newline) = response.iter().position(|byte| *byte == b'\n') {
@@ -135,12 +153,6 @@ fn activate_cdp_target(port: u16, target_id: &str) -> Result<(), String> {
         TcpStream::connect_timeout(&address.into(), CDP_ACTIVATION_TIMEOUT).map_err(|error| {
             format!("could not reach the verified browser tab on port {port}: {error}")
         })?;
-    stream
-        .set_read_timeout(Some(CDP_ACTIVATION_TIMEOUT))
-        .map_err(|error| format!("could not set browser response timeout: {error}"))?;
-    stream
-        .set_write_timeout(Some(CDP_ACTIVATION_TIMEOUT))
-        .map_err(|error| format!("could not set browser request timeout: {error}"))?;
     activate_cdp_target_with_stream(stream, port, target_id)
 }
 
@@ -192,6 +204,55 @@ async fn activate_exact_tab(activation: Option<(u16, String)>) -> Result<(), Str
         .map_err(|error| format!("browser tab activation worker failed: {error}"))?
 }
 
+fn bounded_tab_activation_warning(error: String) -> String {
+    let warning = format!("Exact tab unavailable; browser window was still restored: {error}");
+    if warning.chars().count() <= TAB_ACTIVATION_WARNING_LIMIT {
+        return warning;
+    }
+    let mut bounded = warning
+        .chars()
+        .take(TAB_ACTIVATION_WARNING_LIMIT - 1)
+        .collect::<String>();
+    bounded.push('…');
+    bounded
+}
+
+async fn run_with_advisory_tab_activation<A, ActivationFuture, N, NativeFuture>(
+    activation: A,
+    native_recovery: N,
+) -> (Result<(), String>, Option<String>)
+where
+    A: FnOnce() -> ActivationFuture,
+    ActivationFuture: Future<Output = Result<(), String>>,
+    N: FnOnce() -> NativeFuture,
+    NativeFuture: Future<Output = Result<(), String>>,
+{
+    let warning = activation().await.err().map(bounded_tab_activation_warning);
+    let native_result = native_recovery().await;
+    (native_result, warning)
+}
+
+fn action_result_json(pid: u32, result: Result<(), String>, warning: Option<String>) -> Value {
+    let mut response = match result {
+        Ok(()) => json!({ "ok": true, "pid": pid }),
+        Err(error) => json!({ "ok": false, "pid": pid, "error": error }),
+    };
+    if let Some(warning) = warning {
+        response["warning"] = Value::String(warning);
+    }
+    response
+}
+
+#[cfg(target_os = "macos")]
+async fn native_focus(pid: u32) -> Result<(), String> {
+    crate::macos_application::focus(pid).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn native_focus(pid: u32) -> Result<(), String> {
+    run_focus(pid)
+}
+
 /// The small amount of window metadata needed to decide whether a top-level
 /// HWND is Chrome's real browser frame rather than one of its helper windows.
 /// Kept platform-neutral so the selection rule is unit-testable.
@@ -230,10 +291,13 @@ fn browser_window_rank(candidate: &WindowCandidate) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        activate_cdp_target_with_stream, browser_window_rank, checked_cdp_activation,
-        validate_cdp_target_id, WindowCandidate,
+        action_result_json, activate_cdp_target, activate_cdp_target_with_stream,
+        activate_cdp_target_with_stream_timeout, browser_window_rank, checked_cdp_activation,
+        normalize_windows_placement, run_with_advisory_tab_activation, validate_cdp_target_id,
+        windows_unhide_script, WinPlacement, WindowCandidate,
     };
     use serde_json::json;
+    use std::cell::Cell;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
@@ -374,6 +438,109 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn cdp_activation_reports_loopback_connection_refusal() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let error = activate_cdp_target(port, "6D2D652F143283327CAB85B3373381BD")
+            .expect_err("a closed loopback port must refuse activation");
+        assert!(error.contains("could not reach the verified browser tab"));
+    }
+
+    #[test]
+    fn cdp_activation_timeout_is_bounded() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            thread::sleep(Duration::from_millis(150));
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        let started = Instant::now();
+        let error = activate_cdp_target_with_stream_timeout(
+            stream,
+            address.port(),
+            "6D2D652F143283327CAB85B3373381BD",
+            Duration::from_millis(40),
+        )
+        .expect_err("a silent CDP endpoint must time out");
+        assert!(error.contains("timed out reading"));
+        assert!(started.elapsed() < Duration::from_millis(140));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn stale_cdp_target_returns_non_200_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        let error = activate_cdp_target_with_stream(
+            stream,
+            address.port(),
+            "6D2D652F143283327CAB85B3373381BD",
+        )
+        .expect_err("a stale target must not report activation success");
+        assert!(error.contains("404 Not Found"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn show_continues_after_optional_tab_activation_failure_with_bounded_warning() {
+        let native_called = Cell::new(false);
+        let (native_result, warning) =
+            tauri::async_runtime::block_on(run_with_advisory_tab_activation(
+                || async { Err("connection refused ".repeat(100)) },
+                || async {
+                    native_called.set(true);
+                    Ok(())
+                },
+            ));
+
+        assert!(native_called.get());
+        assert!(native_result.is_ok());
+        let warning = warning.expect("activation failure must be returned as a warning");
+        assert!(warning.starts_with("Exact tab unavailable; browser window was still restored:"));
+        assert!(warning.chars().count() <= 240);
+        let response = action_result_json(4242, native_result, Some(warning.clone()));
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["pid"], 4242);
+        assert_eq!(response["warning"], warning);
+    }
+
+    #[test]
+    fn windows_unhide_preserves_valid_placement_and_maximized_state() {
+        let restored = normalize_windows_placement(WinPlacement {
+            show_cmd: 3,
+            left: 120,
+            top: 80,
+            right: 1560,
+            bottom: 980,
+        });
+        assert_eq!(restored.show_cmd, 3);
+        assert_eq!((restored.left, restored.top), (120, 80));
+        assert_eq!((restored.right, restored.bottom), (1560, 980));
+
+        let script = windows_unhide_script(4242, restored);
+        assert!(script.contains("Get-Process -Id 4242"));
+        assert!(script.contains("$L=120; $T=80; $W=(1560 - 120); $H=(980 - 80)"));
+        assert!(script.contains("if (3 -eq 3)"));
+        assert!(script.contains("$SW_SHOWMAXIMIZED"));
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -405,17 +572,10 @@ pub async fn focus_chrome(
         Ok(activation) => activation,
         Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
     };
-    if let Err(error) = activate_exact_tab(activation).await {
-        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
-    }
-    #[cfg(target_os = "macos")]
-    let result = crate::macos_application::focus(pid).await;
-    #[cfg(not(target_os = "macos"))]
-    let result = run_focus(pid);
-    Ok(match result {
-        Ok(()) => json!({ "ok": true, "pid": pid }),
-        Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
-    })
+    let (result, warning) =
+        run_with_advisory_tab_activation(|| activate_exact_tab(activation), || native_focus(pid))
+            .await;
+    Ok(action_result_json(pid, result, warning))
 }
 
 /* -------------------------------------------------------------------------- */
@@ -464,8 +624,8 @@ pub async fn hide_chrome(
 /// Placement the dashboard passes back to restore a hidden window. Comes from
 /// the JSON hide_chrome returned, stored verbatim in the frontend. `showCmd`
 /// is the Win32 SW_* the window had before hiding (3 = maximized).
-#[cfg(target_os = "windows")]
-#[derive(serde::Deserialize)]
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WinPlacement {
     pub show_cmd: i32,
@@ -473,6 +633,61 @@ pub struct WinPlacement {
     pub top: i32,
     pub right: i32,
     pub bottom: i32,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowsRestorePlacement {
+    show_cmd: i32,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn normalize_windows_placement(placement: WinPlacement) -> WindowsRestorePlacement {
+    let invalid = placement.left <= -30000
+        || placement.top <= -30000
+        || placement.right - placement.left <= 0
+        || placement.bottom - placement.top <= 0;
+    if invalid {
+        WindowsRestorePlacement {
+            show_cmd: 1,
+            left: 80,
+            top: 80,
+            right: 80 + 1280,
+            bottom: 80 + 1000,
+        }
+    } else {
+        WindowsRestorePlacement {
+            show_cmd: placement.show_cmd,
+            left: placement.left,
+            top: placement.top,
+            right: placement.right,
+            bottom: placement.bottom,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn native_unhide(pid: u32, placement: Value) -> Result<(), String> {
+    let placement: WinPlacement = serde_json::from_value(placement)
+        .map_err(|error| format!("invalid Windows window placement: {error}"))?;
+    windows_unhide(pid, normalize_windows_placement(placement))
+}
+
+#[cfg(target_os = "macos")]
+async fn native_unhide(pid: u32, placement: Value) -> Result<(), String> {
+    let placement: crate::macos_application::MacPlacement = serde_json::from_value(placement)
+        .unwrap_or_else(|_| crate::macos_application::MacPlacement::application_hidden());
+    crate::macos_application::restore(pid, placement).await
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+async fn native_unhide(pid: u32, placement: Value) -> Result<(), String> {
+    let _ = placement;
+    run_focus(pid)
 }
 
 #[tauri::command]
@@ -501,51 +716,12 @@ pub async fn unhide_chrome(
         Ok(activation) => activation,
         Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
     };
-    if let Err(error) = activate_exact_tab(activation).await {
-        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let placement: WinPlacement = serde_json::from_value(placement)
-            .map_err(|e| format!("invalid Windows window placement: {e}"))?;
-        // Sanity-guard the saved rect: if it is degenerate or itself off-screen
-        // (lost/garbled state, monitor unplugged), never restore invisibly.
-        let invalid = placement.left <= -30000
-            || placement.top <= -30000
-            || placement.right - placement.left <= 0
-            || placement.bottom - placement.top <= 0;
-        let (sc, l, t, r, b) = if invalid {
-            (1, 80, 80, 80 + 1280, 80 + 1000)
-        } else {
-            (
-                placement.show_cmd,
-                placement.left,
-                placement.top,
-                placement.right,
-                placement.bottom,
-            )
-        };
-        Ok(windows_unhide(pid, sc, l, t, r, b))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let placement: crate::macos_application::MacPlacement = serde_json::from_value(placement)
-            .unwrap_or_else(|_| crate::macos_application::MacPlacement::application_hidden());
-        let result = crate::macos_application::restore(pid, placement).await;
-        Ok(match result {
-            Ok(()) => json!({ "ok": true, "pid": pid }),
-            Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
-        })
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        let _ = placement;
-        let result = run_focus(pid);
-        Ok(match result {
-            Ok(()) => json!({ "ok": true, "pid": pid }),
-            Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
-        })
-    }
+    let (result, warning) = run_with_advisory_tab_activation(
+        || activate_exact_tab(activation),
+        || native_unhide(pid, placement),
+    )
+    .await;
+    Ok(action_result_json(pid, result, warning))
 }
 
 /* -------------------------------------------------------------------------- */
@@ -760,13 +936,13 @@ try {{
 // per-pid PowerShell loop. hide_chrome below is only the one-shot "Hide click"
 // that captures placement for a later Unhide and parks immediately.
 
-#[cfg(target_os = "windows")]
-fn windows_unhide(pid: u32, show_cmd: i32, left: i32, top: i32, right: i32, bottom: i32) -> Value {
+#[cfg(any(target_os = "windows", test))]
+fn windows_unhide_script(pid: u32, placement: WindowsRestorePlacement) -> String {
     // Reverse of hide: move back to the saved on-screen rect (no clamp issue,
     // coords are on-screen), restore the original show-state (re-maximize if it
     // was maximized; else normal), then bring to front + focus (intentional —
     // Unhide is a "show me this window" action).
-    let script = r#"$ErrorActionPreference='Stop'
+    r#"$ErrorActionPreference='Stop'
 try {
   $proc = Get-Process -Id __PID__ -ErrorAction Stop
   $hwnd = $proc.MainWindowHandle
@@ -785,16 +961,16 @@ try {
   exit 0
 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"#
         .replace("__PID__", &pid.to_string())
-        .replace("__SHOWCMD__", &show_cmd.to_string())
-        .replace("__LEFT__", &left.to_string())
-        .replace("__TOP__", &top.to_string())
-        .replace("__RIGHT__", &right.to_string())
-        .replace("__BOTTOM__", &bottom.to_string());
+        .replace("__SHOWCMD__", &placement.show_cmd.to_string())
+        .replace("__LEFT__", &placement.left.to_string())
+        .replace("__TOP__", &placement.top.to_string())
+        .replace("__RIGHT__", &placement.right.to_string())
+        .replace("__BOTTOM__", &placement.bottom.to_string())
+}
 
-    match run_powershell(&script) {
-        Ok(_) => json!({ "ok": true, "pid": pid }),
-        Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
-    }
+#[cfg(target_os = "windows")]
+fn windows_unhide(pid: u32, placement: WindowsRestorePlacement) -> Result<(), String> {
+    run_powershell(&windows_unhide_script(pid, placement)).map(|_| ())
 }
 
 /// Run a PowerShell script (console suppressed) and return trimmed stdout on

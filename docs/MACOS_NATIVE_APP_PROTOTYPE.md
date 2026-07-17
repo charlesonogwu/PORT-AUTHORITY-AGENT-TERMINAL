@@ -40,12 +40,15 @@ Spaces belonging to the same verified browser process are handled together
 without enumerating or moving individual windows. For Chrome and Edge, Show
 first activates the exact tab displayed in the lane's Current page column by
 calling `/json/activate/<target-id>` on the lane's revalidated loopback CDP
-port. A mismatched port, browser, invalid target ID, or non-200 response fails
-closed. PortPilot then marks the exact process visible and fronts only that
-process's leading non-floating window with Apple's user-caused option. Finally,
-it verifies that the exact PID actually became visible and frontmost instead of
-treating an immediate status code as proof of success. Repeated watcher
-requests are idempotent.
+port. A mismatched port, browser, or invalid target ID fails closed before any
+window action. Once those safety checks pass, connection failure, timeout, a
+stale target, or another non-200 response is advisory: PortPilot returns a
+bounded warning but still restores the verified browser process so an optional
+tab lookup cannot strand the window off-screen. PortPilot then marks the exact
+process visible and fronts only that process's leading non-floating window with
+Apple's user-caused option. Finally, it verifies that the exact PID actually
+became visible and frontmost instead of treating an immediate status code as
+proof of success. Repeated watcher requests are idempotent.
 
 The full-screen, multiple-window, minimized-window, restart-while-hidden, and
 Hide All paths still require physical Mac validation before this prototype is

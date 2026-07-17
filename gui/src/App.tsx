@@ -947,6 +947,7 @@ function FocusButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [warning, setWarning] = useState<string | null>(null)
   const [shownAt, setShownAt] = useState<number | null>(null)
 
   useEffect(() => {
@@ -961,10 +962,17 @@ function FocusButton({
     return () => window.clearTimeout(id)
   }, [error])
 
+  useEffect(() => {
+    if (warning === null) return
+    const id = window.setTimeout(() => setWarning(null), 3500)
+    return () => window.clearTimeout(id)
+  }, [warning])
+
   const onClick = useCallback(async () => {
     if (busy) return
     setBusy(true)
     setError(null)
+    setWarning(null)
     try {
       const data = await focusChrome(
         laneId,
@@ -977,6 +985,7 @@ function FocusButton({
       if (!data.ok) {
         setError(data.error ?? "focus failed")
       } else {
+        setWarning(data.warning ?? null)
         setShownAt(Date.now())
       }
     } catch (err) {
@@ -990,6 +999,14 @@ function FocusButton({
     return (
       <span className="text-[10px] text-amber-400" title={error}>
         × {error.slice(0, 30)}
+      </span>
+    )
+  }
+
+  if (warning) {
+    return (
+      <span className="text-[10px] text-amber-400" title={warning}>
+        shown ⚠
       </span>
     )
   }
@@ -1253,6 +1270,7 @@ function HideToggleButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [warning, setWarning] = useState<string | null>(null)
   const hidden = hiddenApi.isHidden(s)
 
   useEffect(() => {
@@ -1261,10 +1279,17 @@ function HideToggleButton({
     return () => window.clearTimeout(id)
   }, [error])
 
+  useEffect(() => {
+    if (warning === null) return
+    const id = window.setTimeout(() => setWarning(null), 3500)
+    return () => window.clearTimeout(id)
+  }, [warning])
+
   const onClick = useCallback(async () => {
     if (busy) return
     setBusy(true)
     setError(null)
+    setWarning(null)
     try {
       if (hidden) {
         const entry = hiddenApi.getEntry(s)
@@ -1283,6 +1308,8 @@ function HideToggleButton({
         if (!res.ok) {
           hiddenApi.markHidden(s, entry?.placement)
           setError(res.error ?? "unhide failed")
+        } else {
+          setWarning(res.warning ?? null)
         }
       } else {
         const res = await hideChrome(s.laneId, s.pid, s.processStart ?? "")
@@ -1300,6 +1327,14 @@ function HideToggleButton({
     return (
       <span className="text-[10px] text-amber-400" title={error}>
         × {error.slice(0, 30)}
+      </span>
+    )
+  }
+
+  if (warning) {
+    return (
+      <span className="text-[10px] text-amber-400" title={warning}>
+        shown ⚠
       </span>
     )
   }
