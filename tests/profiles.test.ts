@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, writeFile, readdir } from "node:fs/promises";
+import { mkdir, writeFile, readdir, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { withTempHome } from "./helpers.js";
 import {
   classifyProfile,
   selectPruneCandidates,
   assertWithinProfilesRoot,
+  assertSafeProfileDeletion,
   deleteProfileDir,
   listProfiles,
   profileHasSavedData,
@@ -128,6 +129,17 @@ test("assertWithinProfilesRoot: refuses the root itself and anything outside it"
     assert.throws(() => assertWithinProfilesRoot(profilesDir()));
     assert.throws(() => assertWithinProfilesRoot(join(profilesDir(), "..", "lanes.json")));
     assert.throws(() => assertWithinProfilesRoot("C:/Windows/System32"));
+  });
+});
+
+test("assertSafeProfileDeletion refuses a symlink profile", { skip: process.platform === "win32" }, async () => {
+  await withTempHome(async (home) => {
+    const outside = join(home, "outside-normal-profile");
+    const linked = join(profilesDir(), "linked-profile");
+    await mkdir(outside, { recursive: true });
+    await mkdir(profilesDir(), { recursive: true });
+    await symlink(outside, linked);
+    await assert.rejects(() => assertSafeProfileDeletion(linked), /symbolic-link/i);
   });
 });
 

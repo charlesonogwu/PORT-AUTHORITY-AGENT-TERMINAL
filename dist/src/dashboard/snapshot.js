@@ -17,7 +17,7 @@ import { loadConfig } from "../core/config.js";
 import { portpilotHome, registryPath } from "../core/paths.js";
 import { markStaleLanes } from "../core/registry.js";
 import { profileHasSavedData } from "../core/profiles.js";
-import { findAllAgentChromes, findAllAgentFirefoxes, findLiveChromes, inferCwdFromProfile, inferOwnerFromProfile, inferProjectFromProfile, readPortpilotLanes, } from "./sources.js";
+import { findAllAgentChromes, findAllAgentFirefoxes, findLiveChromes, findLiveFirefoxes, inferCwdFromProfile, inferOwnerFromProfile, inferProjectFromProfile, readPortpilotLanes, } from "./sources.js";
 import { collectProcessSnapshot, sumTreeMemoryMB } from "./process-info.js";
 import { inferAgentFromLiveChrome, walkParentChain } from "./agent-inference.js";
 import { BirthRegistry } from "./chrome-births.js";
@@ -259,6 +259,7 @@ export async function buildSnapshot(opts = {}) {
     const fromProcs = findAllAgentChromes(processSnap);
     const fromFirefox = findAllAgentFirefoxes(processSnap);
     const fromScan = findLiveChromes(scan.observations);
+    const fromScanFirefox = findLiveFirefoxes(scan.observations);
     const seenPids = new Set();
     const liveChromes = [];
     for (const lc of [...fromProcs, ...fromFirefox]) {
@@ -266,7 +267,7 @@ export async function buildSnapshot(opts = {}) {
             seenPids.add(lc.pid);
         liveChromes.push(lc);
     }
-    for (const lc of fromScan) {
+    for (const lc of [...fromScan, ...fromScanFirefox]) {
         if (lc.pid !== undefined && seenPids.has(lc.pid))
             continue;
         if (lc.pid !== undefined)

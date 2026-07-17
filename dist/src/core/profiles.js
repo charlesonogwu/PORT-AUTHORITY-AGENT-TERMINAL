@@ -1,4 +1,4 @@
-import { access, readdir, rm, stat } from "node:fs/promises";
+import { access, lstat, realpath, readdir, rm, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { isStale, normalizeCwd } from "./lane.js";
 import { profilesDir } from "./paths.js";
@@ -158,11 +158,29 @@ export function assertWithinProfilesRoot(target) {
         throw new Error(`refusing to delete a path outside ${root}: ${t}`);
     }
 }
+/** Filesystem-aware deletion guard. It rejects a symlink target and resolves
+ * every parent component before proving the profile remains under the active
+ * PortPilot profiles root. */
+export async function assertSafeProfileDeletion(target) {
+    assertWithinProfilesRoot(target);
+    const metadata = await lstat(target);
+    if (metadata.isSymbolicLink()) {
+        throw new Error(`refusing to delete a symbolic-link profile: ${target}`);
+    }
+    const [canonicalRoot, canonicalTarget] = await Promise.all([
+        realpath(profilesDir()),
+        realpath(target),
+    ]);
+    const rootWithSep = canonicalRoot.endsWith(sep) ? canonicalRoot : canonicalRoot + sep;
+    if (!canonicalTarget.toLowerCase().startsWith(rootWithSep.toLowerCase())) {
+        throw new Error(`refusing to delete a profile that resolves outside ${canonicalRoot}`);
+    }
+}
 /** Delete one profile directory, after verifying it is inside the profiles
  *  root. The guard makes it impossible to remove anything outside
  *  ~/.portpilot/profiles. */
 export async function deleteProfileDir(path) {
-    assertWithinProfilesRoot(path);
+    await assertSafeProfileDeletion(path);
     await rm(path, { recursive: true, force: true });
 }
 /**

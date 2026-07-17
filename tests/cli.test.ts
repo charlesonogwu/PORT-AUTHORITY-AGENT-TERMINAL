@@ -37,6 +37,36 @@ test("portpilot help prints usage", () => {
   assert.match(res.stdout, /reserve --owner/);
 });
 
+test("portpilot runtime-handshake reports a machine-readable compatible identity", async () => {
+  await withHome(async (home) => {
+    const res = runCli(["runtime-handshake", "--json"], home);
+    assert.equal(res.code, 0, res.stderr);
+    const parsed = JSON.parse(res.stdout);
+    assert.deepEqual(parsed, {
+      ok: true,
+      identity: "portpilot-runtime",
+      portpilotVersion: "0.4.0",
+      protocolVersion: 1,
+      registrySchemaVersion: 1,
+      platform: process.platform,
+      architecture: process.arch,
+    });
+  });
+});
+
+test("dashboard-action-check refuses an unknown lane instead of trusting a PID", async () => {
+  await withHome(async (home) => {
+    const res = runCli([
+      "dashboard-action-check",
+      "--lane", "missing-lane",
+      "--pid", "4242",
+      "--json",
+    ], home);
+    assert.notEqual(res.code, 0);
+    assert.match(JSON.parse(res.stdout).error, /lane.*not found/i);
+  });
+});
+
 test("portpilot list on empty registry", async () => {
   await withHome(async (home) => {
     const res = runCli(["list", "--json"], home);

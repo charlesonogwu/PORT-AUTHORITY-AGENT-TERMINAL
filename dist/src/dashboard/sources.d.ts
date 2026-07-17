@@ -68,6 +68,18 @@ export interface LiveChrome {
  */
 export declare function findLiveChromes(observations: PortObservation[]): LiveChrome[];
 /**
+ * Discover isolated Firefox parent processes from the native TCP scanner.
+ * This is the macOS/Linux counterpart to findAllAgentFirefoxes: those
+ * platforms do not currently provide the Windows process snapshot, so the
+ * lsof observation enriched with ps is the authoritative source.
+ *
+ * Fail closed. A listener is dashboard-safe only when its complete command
+ * line proves both an explicit profile and -no-remote. This prevents a normal
+ * Firefox instance, an unverifiable process, or a content helper from being
+ * mistaken for a PortPilot lane.
+ */
+export declare function findLiveFirefoxes(observations: PortObservation[]): LiveChrome[];
+/**
  * Enumerate every Chromium-family PARENT process on the box and return one
  * LiveChrome for each that's clearly being driven via CDP — whether by TCP
  * port or stdio pipe.

@@ -1,40 +1,96 @@
-// kill_chrome — terminate a process by PID. Cross-platform: taskkill on
-// Windows, `kill -9` on macOS/Linux. The dashboard calls this when the user
-// hits the "Kill" button on a lane that has stale or crashed Chrome.
-//
-// We deliberately do NOT validate that the PID is paat-owned here — the
-// dashboard UI only surfaces PIDs that came out of `paat status`, so by the
-// time a user clicks Kill we already know the PID is one of ours. If the
-// PID has already exited the OS-level kill is a no-op and we return ok.
-
+#[cfg(not(target_os = "macos"))]
 use crate::cli::quiet_command;
+use crate::commands::action_safety::revalidate_lane_action;
+use crate::runtime::RuntimeState;
 use serde_json::{json, Value};
+#[cfg(target_os = "macos")]
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
+use tauri::State;
 
-#[tauri::command]
-pub fn kill_chrome(pid: u32) -> Result<Value, String> {
-    // quiet_command() suppresses the brief CMD-window flash that
-    // std::process::Command::new("taskkill.exe") would otherwise pop on
-    // Windows. Same fix applied across cli.rs and focus.rs in 0.2.3.
-    let result = if cfg!(target_os = "windows") {
-        quiet_command("taskkill.exe")
+#[cfg(target_os = "macos")]
+fn process_exists(pid: u32) -> bool {
+    std::process::Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+pub(crate) fn terminate_lane_process(
+    runtime: &RuntimeState,
+    lane_id: &str,
+    pid: u32,
+    process_start: &str,
+) -> Result<Value, String> {
+    let validated = revalidate_lane_action(runtime, lane_id, pid, process_start)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let output = quiet_command("taskkill.exe")
             .args(["/F", "/PID", &pid.to_string()])
             .output()
-    } else {
-        // macOS + Linux: SIGKILL is universal. (CREATE_NO_WINDOW is a no-op
-        // here since quiet_command only sets it under #[cfg(windows)].)
-        quiet_command("kill")
+            .map_err(|e| format!("failed to terminate verified browser: {e}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let term = std::process::Command::new("/bin/kill")
+            .args(["-TERM", &pid.to_string()])
+            .output()
+            .map_err(|e| format!("failed to gracefully terminate verified browser: {e}"))?;
+        if !term.status.success() {
+            return Err(String::from_utf8_lossy(&term.stderr).trim().to_string());
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while process_exists(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(100));
+        }
+        if process_exists(pid) {
+            crate::process_identity::verify(pid, process_start)?;
+            let forced = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &pid.to_string()])
+                .output()
+                .map_err(|e| format!("failed to force-terminate verified browser: {e}"))?;
+            if !forced.status.success() {
+                return Err(String::from_utf8_lossy(&forced.stderr).trim().to_string());
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let output = quiet_command("kill")
             .args(["-9", &pid.to_string()])
             .output()
-    };
-
-    let output = result.map_err(|e| format!("failed to spawn kill command: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok(json!({
-            "ok": false,
-            "pid": pid,
-            "error": stderr.trim().to_string()
-        }));
+            .map_err(|e| format!("failed to terminate verified browser: {e}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
     }
-    Ok(json!({ "ok": true, "pid": pid }))
+
+    Ok(validated)
+}
+
+#[tauri::command]
+pub async fn kill_chrome(
+    lane_id: String,
+    pid: u32,
+    process_start: String,
+    runtime: State<'_, RuntimeState>,
+) -> Result<Value, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match terminate_lane_process(&runtime, &lane_id, pid, &process_start) {
+            Ok(_) => json!({ "ok": true, "pid": pid }),
+            Err(error) => json!({ "ok": false, "pid": pid, "error": error }),
+        }
+    })
+    .await
+    .map_err(|e| format!("kill worker failed: {e}"))
 }

@@ -69,6 +69,10 @@ export declare function selectPruneCandidates(profiles: ProfileEntry[], opts: Pr
  * cleaner away from the user's real Chrome profile and everything else on disk.
  */
 export declare function assertWithinProfilesRoot(target: string): void;
+/** Filesystem-aware deletion guard. It rejects a symlink target and resolves
+ * every parent component before proving the profile remains under the active
+ * PortPilot profiles root. */
+export declare function assertSafeProfileDeletion(target: string): Promise<void>;
 /** Delete one profile directory, after verifying it is inside the profiles
  *  root. The guard makes it impossible to remove anything outside
  *  ~/.portpilot/profiles. */

@@ -19,6 +19,7 @@ export interface FocusResult {
   ok: boolean;
   pid?: number;
   error?: string;
+  warning?: string;
 }
 
 /**
@@ -27,7 +28,7 @@ export interface FocusResult {
  * window had before hiding (3 = maximized); the rect is the normal on-screen
  * rectangle in virtual-desktop coordinates.
  */
-export interface WindowPlacement {
+export interface WindowsWindowPlacement {
   showCmd: number;
   left: number;
   top: number;
@@ -35,10 +36,17 @@ export interface WindowPlacement {
   bottom: number;
 }
 
+export interface MacWindowPlacement {
+  platform: "macos";
+  applicationHidden: true;
+}
+
+export type WindowPlacement = WindowsWindowPlacement | MacWindowPlacement;
+
 export interface HideResult {
   ok: boolean;
   pid?: number;
-  /** Present on Windows: the placement to pass back to `unhideChrome`. */
+  /** Native restore state returned by Hide and passed back to Unhide. */
   placement?: WindowPlacement | null;
   error?: string;
 }
@@ -47,6 +55,7 @@ export interface UnhideResult {
   ok: boolean;
   pid?: number;
   error?: string;
+  warning?: string;
 }
 
 /** Polled every 2s by the main dashboard loop. */
@@ -54,23 +63,50 @@ export async function getSnapshot(): Promise<DashboardSnapshot> {
   return await invoke<DashboardSnapshot>("get_snapshot");
 }
 
-/** Bring a Chrome window owned by a known PID to the foreground. */
-export async function focusChrome(pid: number): Promise<FocusResult> {
-  return await invoke<FocusResult>("focus_chrome", { pid });
+export interface RuntimeStatus {
+  ok: boolean;
+  provider: "installed" | "unavailable";
+  error?: string;
+  handshake?: {
+    portpilotVersion: string;
+    platform: string;
+    architecture: string;
+  };
+}
+
+/** Report whether the native shell accepted its explicitly configured runtime. */
+export async function getRuntimeStatus(): Promise<RuntimeStatus> {
+  return await invoke<RuntimeStatus>("get_runtime_status");
+}
+
+/** Activate the displayed lane tab, then bring its verified browser PID forward. */
+export async function focusChrome(
+  laneId: string | undefined,
+  pid: number,
+  processStart = "",
+  debugPort?: number,
+  browser = "chrome",
+  tabId?: string,
+): Promise<FocusResult> {
+  return await invoke<FocusResult>("focus_chrome", {
+    laneId: laneId ?? "",
+    pid,
+    processStart,
+    tab: tabId && debugPort ? { debugPort, browser, tabId } : null,
+  });
 }
 
 /**
- * Persistently hide a Chrome window: move it fully off-screen and leave it
- * there (it stays invisible even when the driving agent keeps raising it).
- * Returns the window's original placement so a later `unhideChrome` can put it
- * back exactly where it was.
+ * Persistently hide a browser with the platform's native implementation.
+ * Returns any captured placement plus the platform's restore mode so a later
+ * `unhideChrome` can safely reverse the same operation.
  */
-export async function hideChrome(pid: number): Promise<HideResult> {
-  return await invoke<HideResult>("hide_chrome", { pid });
+export async function hideChrome(laneId: string | undefined, pid: number, processStart = ""): Promise<HideResult> {
+  return await invoke<HideResult>("hide_chrome", { laneId: laneId ?? "", pid, processStart });
 }
 
 /** A sensible on-screen box used when no saved placement is available. */
-const FALLBACK_PLACEMENT: WindowPlacement = {
+const FALLBACK_PLACEMENT: WindowsWindowPlacement = {
   showCmd: 1,
   left: 80,
   top: 80,
@@ -79,35 +115,39 @@ const FALLBACK_PLACEMENT: WindowPlacement = {
 };
 
 /**
- * Bring a previously-hidden Chrome window back on-screen, restoring the saved
- * placement (position + maximized/normal state) captured at hide time. When no
- * placement is known (lost state), a fallback on-screen box is used so the
- * window can never come back invisibly off-screen.
+ * Bring a previously-hidden browser back on-screen, restoring the saved native
+ * placement when available. Windows uses a fallback on-screen box when no
+ * saved placement is known; macOS returns its explicit restore mode from Hide.
  */
 export async function unhideChrome(
+  laneId: string | undefined,
   pid: number,
+  processStart: string,
   placement?: WindowPlacement | null,
+  debugPort?: number,
+  browser = "chrome",
+  tabId?: string,
 ): Promise<UnhideResult> {
   return await invoke<UnhideResult>("unhide_chrome", {
+    laneId: laneId ?? "",
     pid,
+    processStart,
     placement: placement ?? FALLBACK_PLACEMENT,
+    tab: tabId && debugPort ? { debugPort, browser, tabId } : null,
   });
 }
 
 /**
- * Tell the native hide-watcher which pids must be kept off-screen. The watcher
- * thread (in the Rust shell) then shoves any on-screen window of these pids
- * off-screen within ~150ms of it appearing — catching sign-in popups and
- * restarted Chromes with no flash. The frontend recomputes + pushes this set
- * whenever the hidden lanes or their live pids change.
+ * Tell the native hide watcher which exact browser processes must remain
+ * hidden. The frontend recomputes this set whenever a hidden lane restarts.
  */
-export async function setHiddenPids(pids: number[]): Promise<void> {
-  await invoke("set_hidden_pids", { pids });
+export async function setHiddenProcesses(targets: Array<{ pid: number; processStart: string }>): Promise<void> {
+  await invoke("set_hidden_processes", { targets });
 }
 
 /** Terminate a Chrome process by PID (only allowed if it has our user-data-dir). */
-export async function killChrome(pid: number): Promise<KillResult> {
-  return await invoke<KillResult>("kill_chrome", { pid });
+export async function killChrome(laneId: string | undefined, pid: number, processStart = ""): Promise<KillResult> {
+  return await invoke<KillResult>("kill_chrome", { laneId: laneId ?? "", pid, processStart });
 }
 
 export interface EraseResult {
@@ -125,10 +165,11 @@ export interface EraseResult {
  */
 export async function eraseChrome(
   pid: number,
+  processStart: string,
   profileDir: string,
   laneId?: string,
 ): Promise<EraseResult> {
-  return await invoke<EraseResult>("erase_chrome", { pid, profileDir, laneId });
+  return await invoke<EraseResult>("erase_chrome", { pid, processStart, profileDir, laneId });
 }
 
 export type DefaultBrowser = "chrome" | "edge" | "firefox"

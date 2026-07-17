@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { withTempHome } from "./helpers.js";
 import { readRegistry, listLanes, upsertLane, removeLane, markStaleLanes, setLaneStatus, touchLane, findLane } from "../src/core/registry.js";
 import { Lane, REGISTRY_VERSION, nowIso } from "../src/core/lane.js";
+import { registryPath } from "../src/core/paths.js";
+import { writeFile } from "node:fs/promises";
 
 function makeLane(overrides: Partial<Lane> = {}): Lane {
   return {
@@ -24,6 +26,13 @@ test("readRegistry returns empty for missing file", async () => {
     const reg = await readRegistry();
     assert.equal(reg.version, REGISTRY_VERSION);
     assert.deepEqual(reg.lanes, []);
+  });
+});
+
+test("readRegistry rejects an incompatible schema instead of treating it as empty", async () => {
+  await withTempHome(async () => {
+    await writeFile(registryPath(), JSON.stringify({ version: 999, lanes: [] }), "utf8");
+    await assert.rejects(readRegistry(), /schema version/i);
   });
 });
 

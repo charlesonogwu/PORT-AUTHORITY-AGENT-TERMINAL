@@ -4,6 +4,7 @@ USAGE:
   portpilot <command> [options]
 
 COMMANDS:
+  runtime-handshake             Report runtime identity and compatibility metadata as JSON
   list                          List all lanes
   status                        Show lanes + live port observations + warnings
   reserve --owner <n> --cwd <p> Reserve a lane (allocates app & Chrome ports + profile dir)

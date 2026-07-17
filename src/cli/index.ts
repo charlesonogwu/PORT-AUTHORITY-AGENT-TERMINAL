@@ -18,6 +18,8 @@ import { formatMissingDependencyMessage, isMissingDependencyError, missingDepend
 import { ParsedArgs, flagBool, flagString, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
 import { formatLanesTable, formatReserveBlock } from "./format.js";
 import { HELP } from "./help.js";
+import { runtimeHandshake } from "../core/runtime-handshake.js";
+import { evaluateLaneAction } from "../core/action-safety.js";
 
 interface CliContext {
   args: ParsedArgs;
@@ -96,6 +98,26 @@ async function cmdStatus(ctx: CliContext): Promise<void> {
     ctx.stdout.write("\nWarnings:\n");
     for (const w of warnings) ctx.stdout.write(`  - ${w.laneId}: ${w.message}\n`);
   }
+}
+
+async function cmdDashboardActionCheck(ctx: CliContext): Promise<void> {
+  const laneId = flagString(ctx.args, "lane");
+  const pidRaw = flagString(ctx.args, "pid");
+  if (!laneId) fail(ctx, "missing required --lane", 1);
+  const pid = Number(pidRaw);
+  if (!Number.isInteger(pid) || pid <= 0) fail(ctx, "--pid must be a positive integer", 1);
+
+  const lane = (await listLanes()).find((candidate) => candidate.id === laneId);
+  if (!lane) fail(ctx, `lane ${laneId} not found`, 2);
+  const scan = await scanPorts();
+  const validated = evaluateLaneAction(lane!, pid, scan.observations);
+  emit(ctx, {
+    ok: true,
+    lane: validated.lane,
+    pid: validated.pid,
+    observation: validated.observation,
+    scanSource: scan.source,
+  });
 }
 
 async function cmdReserve(ctx: CliContext): Promise<void> {
@@ -989,6 +1011,10 @@ async function dispatch(args: ParsedArgs): Promise<void> {
     return;
   }
   switch (args.command) {
+    case "runtime-handshake":
+      return emit(ctx, await runtimeHandshake());
+    case "dashboard-action-check":
+      return cmdDashboardActionCheck(ctx);
     case "list":
       return cmdList(ctx);
     case "status":

@@ -3,6 +3,7 @@
 // Some write paths (kill, focus, hide) are stubbed in Phase 5 so the
 // invoke() bridge in gui/src/api/client.ts compiles.
 
+pub mod action_safety;
 pub mod config;
 pub mod doctor;
 pub mod erase;

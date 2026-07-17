@@ -25,6 +25,7 @@ import {
   findAllAgentChromes,
   findAllAgentFirefoxes,
   findLiveChromes,
+  findLiveFirefoxes,
   inferCwdFromProfile,
   inferOwnerFromProfile,
   inferProjectFromProfile,
@@ -425,13 +426,14 @@ export async function buildSnapshot(opts: { cdpTimeoutMs?: number } = {}): Promi
   const fromProcs = findAllAgentChromes(processSnap);
   const fromFirefox = findAllAgentFirefoxes(processSnap);
   const fromScan = findLiveChromes(scan.observations);
+  const fromScanFirefox = findLiveFirefoxes(scan.observations);
   const seenPids = new Set<number>();
   const liveChromes: LiveChrome[] = [];
   for (const lc of [...fromProcs, ...fromFirefox]) {
     if (lc.pid !== undefined) seenPids.add(lc.pid);
     liveChromes.push(lc);
   }
-  for (const lc of fromScan) {
+  for (const lc of [...fromScan, ...fromScanFirefox]) {
     if (lc.pid !== undefined && seenPids.has(lc.pid)) continue;
     if (lc.pid !== undefined) seenPids.add(lc.pid);
     liveChromes.push(lc);
