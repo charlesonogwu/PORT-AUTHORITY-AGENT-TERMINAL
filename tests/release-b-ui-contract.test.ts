@@ -29,9 +29,12 @@ test("Release B uses browser-neutral dashboard labels", () => {
 test("macOS Show and Hide use exact-PID application APIs without Accessibility onboarding", () => {
   assert.match(macApplication, /NSRunningApplication/);
   assert.match(macApplication, /runningApplicationWithProcessIdentifier/);
-  assert.match(macApplication, /\.hide\(\)/);
-  assert.match(macApplication, /\.unhide\(\)/);
-  assert.match(macApplication, /activateWithOptions/);
+  assert.match(macApplication, /GetProcessForPID/);
+  assert.match(macApplication, /ShowHideProcess/);
+  assert.match(macApplication, /SetFrontProcessWithOptions/);
+  assert.match(macApplication, /SET_FRONT_PROCESS_CAUSED_BY_USER/);
+  assert.match(macApplication, /wait_for_state/);
+  assert.doesNotMatch(macApplication, /activateWithOptions|yieldActivationToApplication/);
   assert.doesNotMatch(macApplication, /AXUIElement|AXIsProcessTrusted|osascript/);
   assert.doesNotMatch(app, /Accessibility|Enable Show & Hide|Permission required/);
   assert.doesNotMatch(client, /Accessibility|accessibility-revoked/);
@@ -44,6 +47,17 @@ test("native window actions remain lane- and process-identity-validated", () => 
     [...focusCommands.matchAll(/process_identity::verify\(pid, &process_start\)/g)].length,
     3,
   );
+});
+
+test("Show activates the exact displayed Chrome tab before raising its verified PID", () => {
+  assert.match(app, /tabId=\{s\.primaryTabs\[0\]\?\.id\}/);
+  assert.match(client, /tab: tabId && debugPort \? \{ debugPort, browser, tabId \} : null/);
+  assert.match(focusCommands, /checked_cdp_activation/);
+  assert.match(focusCommands, /PUT \/json\/activate\/\{target_id\}/);
+  assert.match(focusCommands, /requested_port != Some\(lane_port\)/);
+  assert.match(focusCommands, /requested_browser != lane_browser/);
+  assert.match(focusCommands, /activate_exact_tab\(activation\)\.await/);
+  assert.doesNotMatch(focusCommands, /Command::new\([^)]*(curl|osascript)/);
 });
 
 test("unused Accessibility settings fallback is not exposed over IPC", () => {

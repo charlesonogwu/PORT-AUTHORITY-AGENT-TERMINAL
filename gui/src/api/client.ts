@@ -77,9 +77,21 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   return await invoke<RuntimeStatus>("get_runtime_status");
 }
 
-/** Bring a Chrome window owned by a known PID to the foreground. */
-export async function focusChrome(laneId: string | undefined, pid: number, processStart = ""): Promise<FocusResult> {
-  return await invoke<FocusResult>("focus_chrome", { laneId: laneId ?? "", pid, processStart });
+/** Activate the displayed lane tab, then bring its verified browser PID forward. */
+export async function focusChrome(
+  laneId: string | undefined,
+  pid: number,
+  processStart = "",
+  debugPort?: number,
+  browser = "chrome",
+  tabId?: string,
+): Promise<FocusResult> {
+  return await invoke<FocusResult>("focus_chrome", {
+    laneId: laneId ?? "",
+    pid,
+    processStart,
+    tab: tabId && debugPort ? { debugPort, browser, tabId } : null,
+  });
 }
 
 /**
@@ -110,12 +122,16 @@ export async function unhideChrome(
   pid: number,
   processStart: string,
   placement?: WindowPlacement | null,
+  debugPort?: number,
+  browser = "chrome",
+  tabId?: string,
 ): Promise<UnhideResult> {
   return await invoke<UnhideResult>("unhide_chrome", {
     laneId: laneId ?? "",
     pid,
     processStart,
     placement: placement ?? FALLBACK_PLACEMENT,
+    tab: tabId && debugPort ? { debugPort, browser, tabId } : null,
   });
 }
 

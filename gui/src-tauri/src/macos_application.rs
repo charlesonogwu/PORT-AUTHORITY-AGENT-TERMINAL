@@ -1,5 +1,26 @@
-use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+use objc2_app_kit::NSRunningApplication;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
+
+const STATE_TIMEOUT: Duration = Duration::from_millis(1_500);
+const STATE_POLL: Duration = Duration::from_millis(50);
+
+const SET_FRONT_PROCESS_FRONT_WINDOW_ONLY: u32 = 1 << 0;
+const SET_FRONT_PROCESS_CAUSED_BY_USER: u32 = 1 << 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ProcessSerialNumber {
+    high_long_of_psn: u32,
+    low_long_of_psn: u32,
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn GetProcessForPID(pid: i32, psn: *mut ProcessSerialNumber) -> i32;
+    fn ShowHideProcess(psn: *const ProcessSerialNumber, visible: u8) -> i16;
+    fn SetFrontProcessWithOptions(psn: *const ProcessSerialNumber, options: u32) -> i32;
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -17,58 +38,85 @@ impl MacPlacement {
     }
 }
 
-trait RunningApplicationControl {
+trait ProcessControl {
     fn is_terminated(&self) -> bool;
-    fn is_hidden(&self) -> bool;
-    fn hide(&self) -> bool;
-    fn unhide(&self) -> bool;
-    fn activate(&self) -> bool;
+    fn hide_process(&self) -> Result<(), String>;
+    fn show_process(&self) -> Result<(), String>;
+    fn make_frontmost(&self) -> Result<(), String>;
 }
 
-impl RunningApplicationControl for NSRunningApplication {
+struct NativeProcessControl {
+    pid: u32,
+    serial_number: ProcessSerialNumber,
+}
+
+impl NativeProcessControl {
+    fn new(pid: u32) -> Result<Self, String> {
+        let native_pid =
+            i32::try_from(pid).map_err(|_| "browser PID is outside the macOS range")?;
+        let mut serial_number = ProcessSerialNumber::default();
+        // SAFETY: `serial_number` is writable for the duration of the call and
+        // GetProcessForPID is documented by Apple as thread-safe.
+        let status = unsafe { GetProcessForPID(native_pid, &mut serial_number) };
+        os_status("resolve browser process", status)?;
+        Ok(Self { pid, serial_number })
+    }
+}
+
+impl ProcessControl for NativeProcessControl {
     fn is_terminated(&self) -> bool {
-        self.isTerminated()
+        running_application(self.pid)
+            .map(|application| application.isTerminated())
+            .unwrap_or(true)
     }
 
-    fn is_hidden(&self) -> bool {
-        self.isHidden()
+    fn hide_process(&self) -> Result<(), String> {
+        // SAFETY: this immutable process serial number was resolved from the
+        // already revalidated PID. ShowHideProcess is thread-safe on macOS.
+        let status = unsafe { ShowHideProcess(&self.serial_number, 0) };
+        os_status("hide browser process", i32::from(status))
     }
 
-    fn hide(&self) -> bool {
-        self.hide()
+    fn show_process(&self) -> Result<(), String> {
+        // SAFETY: same invariants as `hide_process`; nonzero means visible.
+        let status = unsafe { ShowHideProcess(&self.serial_number, 1) };
+        os_status("show browser process", i32::from(status))
     }
 
-    fn unhide(&self) -> bool {
-        self.unhide()
-    }
-
-    fn activate(&self) -> bool {
-        self.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows)
+    fn make_frontmost(&self) -> Result<(), String> {
+        // SAFETY: Apple documents SetFrontProcessWithOptions as thread-safe.
+        // The user-caused option accurately represents a direct Show click.
+        let status = unsafe {
+            SetFrontProcessWithOptions(
+                &self.serial_number,
+                SET_FRONT_PROCESS_FRONT_WINDOW_ONLY | SET_FRONT_PROCESS_CAUSED_BY_USER,
+            )
+        };
+        os_status("make browser process frontmost", status)
     }
 }
 
-fn hide_application(app: &impl RunningApplicationControl) -> Result<(), String> {
-    if app.is_terminated() {
-        return Err("browser application has already exited".into());
-    }
-    if app.is_hidden() || app.hide() {
+fn os_status(action: &str, status: i32) -> Result<(), String> {
+    if status == 0 {
         Ok(())
     } else {
-        Err("macOS refused the browser hide request".into())
+        Err(format!("macOS could not {action} (OSStatus {status})"))
     }
 }
 
-fn show_application(app: &impl RunningApplicationControl) -> Result<(), String> {
-    if app.is_terminated() {
+fn request_hide(process: &impl ProcessControl) -> Result<(), String> {
+    if process.is_terminated() {
         return Err("browser application has already exited".into());
     }
-    if app.is_hidden() && !app.unhide() {
-        return Err("macOS refused the browser unhide request".into());
+    process.hide_process()
+}
+
+fn request_show(process: &impl ProcessControl) -> Result<(), String> {
+    if process.is_terminated() {
+        return Err("browser application has already exited".into());
     }
-    if !app.activate() {
-        return Err("macOS refused the browser activation request".into());
-    }
-    Ok(())
+    process.show_process()?;
+    process.make_frontmost()
 }
 
 fn running_application(pid: u32) -> Result<objc2::rc::Retained<NSRunningApplication>, String> {
@@ -77,31 +125,68 @@ fn running_application(pid: u32) -> Result<objc2::rc::Retained<NSRunningApplicat
         .ok_or_else(|| format!("PID {pid} is not a running macOS application"))
 }
 
-pub fn focus(pid: u32) -> Result<(), String> {
-    let app = running_application(pid)?;
-    show_application(&*app)
+fn wait_for_state(pid: u32, hidden: bool, active: bool) -> Result<(), String> {
+    let deadline = Instant::now() + STATE_TIMEOUT;
+    loop {
+        let application = running_application(pid)?;
+        if application.isTerminated() {
+            return Err("browser application exited while macOS was changing its state".into());
+        }
+        if application.isHidden() == hidden && (!active || application.isActive()) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let expected = if hidden {
+                "hidden"
+            } else if active {
+                "visible and frontmost"
+            } else {
+                "visible"
+            };
+            return Err(format!(
+                "macOS accepted the request but browser PID {pid} did not become {expected}"
+            ));
+        }
+        std::thread::sleep(STATE_POLL);
+    }
 }
 
-pub fn hide(pid: u32) -> Result<MacPlacement, String> {
-    let app = running_application(pid)?;
-    hide_application(&*app)?;
+async fn change_state(pid: u32, show: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let process = NativeProcessControl::new(pid)?;
+        if show {
+            request_show(&process)?;
+            wait_for_state(pid, false, true)
+        } else {
+            request_hide(&process)?;
+            wait_for_state(pid, true, false)
+        }
+    })
+    .await
+    .map_err(|error| format!("macOS process-control worker failed: {error}"))?
+}
+
+pub async fn focus(pid: u32) -> Result<(), String> {
+    change_state(pid, true).await
+}
+
+pub async fn hide(pid: u32) -> Result<MacPlacement, String> {
+    change_state(pid, false).await?;
     Ok(MacPlacement::application_hidden())
 }
 
-/// Re-hide an already verified browser PID. `NSRunningApplication::hide` is
-/// application-scoped, so it also covers full-screen Spaces, popups, and newly
-/// created windows without enumerating or moving individual windows.
-pub fn park_on_screen(pid: u32) -> Result<(), String> {
-    let app = running_application(pid)?;
-    hide_application(&*app)
+/// Re-hide an already verified browser PID from the watcher thread. The
+/// Process Manager call is thread-safe and idempotently applies to that PID.
+pub fn enforce_hide(pid: u32) -> Result<(), String> {
+    let process = NativeProcessControl::new(pid)?;
+    request_hide(&process)
 }
 
-pub fn restore(pid: u32, placement: MacPlacement) -> Result<(), String> {
+pub async fn restore(pid: u32, placement: MacPlacement) -> Result<(), String> {
     if placement.platform != "macos" || !placement.application_hidden {
         return Err("invalid macOS application hide state".into());
     }
-    let app = running_application(pid)?;
-    show_application(&*app)
+    focus(pid).await
 }
 
 #[cfg(test)]
@@ -109,115 +194,93 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
-    struct FakeApplication {
+    struct FakeProcess {
         terminated: bool,
-        hidden: bool,
-        hide_result: bool,
-        unhide_result: bool,
-        activate_result: bool,
+        hide_result: Result<(), String>,
+        show_result: Result<(), String>,
+        front_result: Result<(), String>,
         hide_calls: Cell<u32>,
-        unhide_calls: Cell<u32>,
-        activate_calls: Cell<u32>,
+        show_calls: Cell<u32>,
+        front_calls: Cell<u32>,
     }
 
-    impl FakeApplication {
-        fn visible() -> Self {
+    impl FakeProcess {
+        fn running() -> Self {
             Self {
                 terminated: false,
-                hidden: false,
-                hide_result: true,
-                unhide_result: true,
-                activate_result: true,
+                hide_result: Ok(()),
+                show_result: Ok(()),
+                front_result: Ok(()),
                 hide_calls: Cell::new(0),
-                unhide_calls: Cell::new(0),
-                activate_calls: Cell::new(0),
+                show_calls: Cell::new(0),
+                front_calls: Cell::new(0),
             }
         }
     }
 
-    impl RunningApplicationControl for FakeApplication {
+    impl ProcessControl for FakeProcess {
         fn is_terminated(&self) -> bool {
             self.terminated
         }
 
-        fn is_hidden(&self) -> bool {
-            self.hidden
-        }
-
-        fn hide(&self) -> bool {
+        fn hide_process(&self) -> Result<(), String> {
             self.hide_calls.set(self.hide_calls.get() + 1);
-            self.hide_result
+            self.hide_result.clone()
         }
 
-        fn unhide(&self) -> bool {
-            self.unhide_calls.set(self.unhide_calls.get() + 1);
-            self.unhide_result
+        fn show_process(&self) -> Result<(), String> {
+            self.show_calls.set(self.show_calls.get() + 1);
+            self.show_result.clone()
         }
 
-        fn activate(&self) -> bool {
-            self.activate_calls.set(self.activate_calls.get() + 1);
-            self.activate_result
+        fn make_frontmost(&self) -> Result<(), String> {
+            self.front_calls.set(self.front_calls.get() + 1);
+            self.front_result.clone()
         }
     }
 
     #[test]
-    fn hide_visible_application_once() {
-        let app = FakeApplication::visible();
-        assert_eq!(hide_application(&app), Ok(()));
-        assert_eq!(app.hide_calls.get(), 1);
+    fn hide_targets_the_resolved_process_once() {
+        let process = FakeProcess::running();
+        assert_eq!(request_hide(&process), Ok(()));
+        assert_eq!(process.hide_calls.get(), 1);
     }
 
     #[test]
-    fn hide_is_idempotent_when_application_is_already_hidden() {
-        let mut app = FakeApplication::visible();
-        app.hidden = true;
-        assert_eq!(hide_application(&app), Ok(()));
-        assert_eq!(app.hide_calls.get(), 0);
+    fn show_makes_the_same_process_visible_then_frontmost() {
+        let process = FakeProcess::running();
+        assert_eq!(request_show(&process), Ok(()));
+        assert_eq!(process.show_calls.get(), 1);
+        assert_eq!(process.front_calls.get(), 1);
     }
 
     #[test]
-    fn show_unhides_then_activates() {
-        let mut app = FakeApplication::visible();
-        app.hidden = true;
-        assert_eq!(show_application(&app), Ok(()));
-        assert_eq!(app.unhide_calls.get(), 1);
-        assert_eq!(app.activate_calls.get(), 1);
+    fn show_failure_does_not_claim_frontmost() {
+        let mut process = FakeProcess::running();
+        process.show_result = Err("show refused".into());
+        assert!(request_show(&process).is_err());
+        assert_eq!(process.show_calls.get(), 1);
+        assert_eq!(process.front_calls.get(), 0);
     }
 
     #[test]
-    fn show_visible_application_skips_unhide_but_activates() {
-        let app = FakeApplication::visible();
-        assert_eq!(show_application(&app), Ok(()));
-        assert_eq!(app.unhide_calls.get(), 0);
-        assert_eq!(app.activate_calls.get(), 1);
+    fn frontmost_failure_is_reported() {
+        let mut process = FakeProcess::running();
+        process.front_result = Err("front refused".into());
+        assert!(request_show(&process).is_err());
+        assert_eq!(process.show_calls.get(), 1);
+        assert_eq!(process.front_calls.get(), 1);
     }
 
     #[test]
-    fn native_refusals_are_reported() {
-        let mut hide_refused = FakeApplication::visible();
-        hide_refused.hide_result = false;
-        assert!(hide_application(&hide_refused).is_err());
-
-        let mut unhide_refused = FakeApplication::visible();
-        unhide_refused.hidden = true;
-        unhide_refused.unhide_result = false;
-        assert!(show_application(&unhide_refused).is_err());
-        assert_eq!(unhide_refused.activate_calls.get(), 0);
-
-        let mut activation_refused = FakeApplication::visible();
-        activation_refused.activate_result = false;
-        assert!(show_application(&activation_refused).is_err());
-    }
-
-    #[test]
-    fn terminated_application_is_refused_without_actions() {
-        let mut app = FakeApplication::visible();
-        app.terminated = true;
-        assert!(hide_application(&app).is_err());
-        assert!(show_application(&app).is_err());
-        assert_eq!(app.hide_calls.get(), 0);
-        assert_eq!(app.unhide_calls.get(), 0);
-        assert_eq!(app.activate_calls.get(), 0);
+    fn terminated_process_is_refused_without_actions() {
+        let mut process = FakeProcess::running();
+        process.terminated = true;
+        assert!(request_hide(&process).is_err());
+        assert!(request_show(&process).is_err());
+        assert_eq!(process.hide_calls.get(), 0);
+        assert_eq!(process.show_calls.get(), 0);
+        assert_eq!(process.front_calls.get(), 0);
     }
 
     #[test]

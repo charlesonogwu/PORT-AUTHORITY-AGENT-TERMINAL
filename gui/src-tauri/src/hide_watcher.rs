@@ -66,7 +66,7 @@ pub fn spawn(state: HiddenPids) {
             #[cfg(target_os = "macos")]
             for (pid, process_start) in &targets {
                 if crate::process_identity::verify(*pid, process_start).is_ok() {
-                    let _ = crate::macos_application::park_on_screen(*pid);
+                    let _ = crate::macos_application::enforce_hide(*pid);
                 }
             }
         }

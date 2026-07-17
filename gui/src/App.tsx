@@ -731,6 +731,10 @@ function SessionRow({
                 laneId={s.laneId}
                 pid={s.pid}
                 processStart={s.processStart ?? ""}
+                debugPort={s.chromeDebugPort}
+                browser={s.browser ?? "chrome"}
+                tabId={s.primaryTabs[0]?.id}
+                tabTitle={s.primaryTabs[0]?.title}
                 enabled={registeredAction}
                 disabledReason={actionReason}
               />
@@ -924,12 +928,20 @@ function FocusButton({
   laneId,
   pid,
   processStart,
+  debugPort,
+  browser,
+  tabId,
+  tabTitle,
   enabled,
   disabledReason,
 }: {
   laneId?: string
   pid: number
   processStart: string
+  debugPort: number
+  browser: "chrome" | "firefox" | "edge"
+  tabId?: string
+  tabTitle?: string
   enabled: boolean
   disabledReason: string
 }) {
@@ -954,7 +966,14 @@ function FocusButton({
     setBusy(true)
     setError(null)
     try {
-      const data = await focusChrome(laneId, pid, processStart)
+      const data = await focusChrome(
+        laneId,
+        pid,
+        processStart,
+        debugPort,
+        browser,
+        tabId,
+      )
       if (!data.ok) {
         setError(data.error ?? "focus failed")
       } else {
@@ -965,7 +984,7 @@ function FocusButton({
     } finally {
       setBusy(false)
     }
-  }, [busy, laneId, pid, processStart])
+  }, [busy, laneId, pid, processStart, debugPort, browser, tabId])
 
   if (error) {
     return (
@@ -982,7 +1001,13 @@ function FocusButton({
       disabled={busy || !enabled}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={enabled ? `Bring verified browser pid ${pid} to the foreground` : disabledReason}
+      title={
+        enabled
+          ? tabTitle
+            ? `Show the exact displayed tab: ${tabTitle}`
+            : `Bring verified browser pid ${pid} to the foreground`
+          : disabledReason
+      }
     >
       {busy ? (
         "showing…"
@@ -1044,7 +1069,15 @@ function HideAllButton({
           if (allHidden) {
             const entry = hiddenApi.getEntry(s)
             hiddenApi.clearHidden(s)
-            const res = await unhideChrome(s.laneId, s.pid, s.processStart ?? "", entry?.placement)
+            const res = await unhideChrome(
+              s.laneId,
+              s.pid,
+              s.processStart ?? "",
+              entry?.placement,
+              s.chromeDebugPort,
+              s.browser ?? "chrome",
+              s.primaryTabs[0]?.id,
+            )
             if (res.ok) ok++
             else hiddenApi.markHidden(s, entry?.placement)
           } else {
@@ -1238,7 +1271,15 @@ function HideToggleButton({
         // Clear the persistent flag FIRST, so a concurrent poll tick can't
         // re-park the window we are about to bring back.
         hiddenApi.clearHidden(s)
-        const res = await unhideChrome(s.laneId, s.pid, s.processStart ?? "", entry?.placement)
+        const res = await unhideChrome(
+          s.laneId,
+          s.pid,
+          s.processStart ?? "",
+          entry?.placement,
+          s.chromeDebugPort,
+          s.browser ?? "chrome",
+          s.primaryTabs[0]?.id,
+        )
         if (!res.ok) {
           hiddenApi.markHidden(s, entry?.placement)
           setError(res.error ?? "unhide failed")

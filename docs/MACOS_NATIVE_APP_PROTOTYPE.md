@@ -25,16 +25,27 @@ end user does not need Node or npm.
 
 ## Browser application control
 
-Show and Hide use Apple’s public `NSRunningApplication` API for one exact process
-identifier. They do not require Accessibility permission or a System Settings
-approval. Before every action, PortPilot still revalidates the registered lane,
-process identifier, process start time, browser profile, and command line. An
-unknown, replaced, or mismatched process is refused before AppKit is called.
+Show and Hide use Apple’s Process Manager compatibility API for one exact
+process identifier, then use `NSRunningApplication` to verify the observed
+result. The compatibility calls are public but deprecated; they remain exported
+by the macOS 15.5 SDK and were physically validated against two independent
+Chrome processes on Sequoia 15.5. They do not require Accessibility permission
+or a System Settings approval. A nonzero OSStatus fails closed. Before every
+action, PortPilot still revalidates the registered lane, process identifier,
+process start time, browser profile, and command line. An unknown, replaced, or
+mismatched process is refused before the macOS process API is called.
 
 Hiding is application-scoped, so normal windows, popup windows, and full-screen
 Spaces belonging to the same verified browser process are handled together
-without enumerating or moving individual windows. Show requests an unhide and
-activation for that same PID. Repeated watcher requests are idempotent.
+without enumerating or moving individual windows. For Chrome and Edge, Show
+first activates the exact tab displayed in the lane's Current page column by
+calling `/json/activate/<target-id>` on the lane's revalidated loopback CDP
+port. A mismatched port, browser, invalid target ID, or non-200 response fails
+closed. PortPilot then marks the exact process visible and fronts only that
+process's leading non-floating window with Apple's user-caused option. Finally,
+it verifies that the exact PID actually became visible and frontmost instead of
+treating an immediate status code as proof of success. Repeated watcher
+requests are idempotent.
 
 The full-screen, multiple-window, minimized-window, restart-while-hidden, and
 Hide All paths still require physical Mac validation before this prototype is

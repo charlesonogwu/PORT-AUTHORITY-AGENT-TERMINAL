@@ -23,25 +23,173 @@
 use crate::cli::quiet_command;
 use crate::commands::action_safety::revalidate_lane_action;
 use crate::runtime::RuntimeState;
+use serde::Deserialize;
 use serde_json::{json, Value};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+use std::time::{Duration, Instant};
 use tauri::State;
 
-async fn validation_error(
+const CDP_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CdpActivationRequest {
+    debug_port: u16,
+    browser: String,
+    tab_id: String,
+}
+
+async fn validated_lane_action(
     runtime: State<'_, RuntimeState>,
     lane_id: String,
     pid: u32,
     process_start: String,
-) -> Option<String> {
+) -> Result<Value, String> {
     let runtime = runtime.inner().clone();
     match tauri::async_runtime::spawn_blocking(move || {
         revalidate_lane_action(&runtime, &lane_id, pid, &process_start)
     })
     .await
     {
-        Ok(Ok(_)) => None,
-        Ok(Err(error)) => Some(error),
-        Err(error) => Some(format!("lane validation worker failed: {error}")),
+        Ok(result) => result,
+        Err(error) => Err(format!("lane validation worker failed: {error}")),
     }
+}
+
+fn validate_cdp_target_id(target_id: &str) -> Result<(), String> {
+    if target_id.is_empty()
+        || target_id.len() > 128
+        || !target_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("refused CDP activation: invalid tab target id".into());
+    }
+    Ok(())
+}
+
+fn activate_cdp_target_with_stream(
+    mut stream: TcpStream,
+    port: u16,
+    target_id: &str,
+) -> Result<(), String> {
+    validate_cdp_target_id(target_id)?;
+    let request = format!(
+        "PUT /json/activate/{target_id} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("could not request the exact browser tab: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("could not send the exact browser tab request: {error}"))?;
+
+    // Chrome may keep this tiny HTTP connection alive. Success is completely
+    // determined by the status line, so do not wait for EOF. On macOS a timed
+    // or temporarily nonblocking read can surface as EAGAIN (OS error 35);
+    // retry it only inside this short, bounded deadline.
+    let deadline = Instant::now() + CDP_ACTIVATION_TIMEOUT;
+    let mut response = Vec::with_capacity(256);
+    loop {
+        if let Some(newline) = response.iter().position(|byte| *byte == b'\n') {
+            let status = String::from_utf8_lossy(&response[..newline])
+                .trim_end_matches('\r')
+                .to_string();
+            let mut parts = status.split_whitespace();
+            let protocol = parts.next().unwrap_or_default();
+            let code = parts.next().unwrap_or_default();
+            if matches!(protocol, "HTTP/1.1" | "HTTP/1.0") && code == "200" {
+                return Ok(());
+            }
+            return Err(format!(
+                "browser refused to activate tab {target_id} on debug port {port} ({status})"
+            ));
+        }
+        if response.len() >= 8 * 1024 {
+            return Err("browser tab response has no bounded HTTP status line".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out reading the browser tab response status".into());
+        }
+
+        let mut chunk = [0_u8; 512];
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err("browser tab response ended before its HTTP status".into()),
+            Ok(size) => response.extend_from_slice(&chunk[..size]),
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => {
+                return Err(format!("could not read the browser tab response: {error}"));
+            }
+        }
+    }
+}
+
+fn activate_cdp_target(port: u16, target_id: &str) -> Result<(), String> {
+    validate_cdp_target_id(target_id)?;
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let stream =
+        TcpStream::connect_timeout(&address.into(), CDP_ACTIVATION_TIMEOUT).map_err(|error| {
+            format!("could not reach the verified browser tab on port {port}: {error}")
+        })?;
+    stream
+        .set_read_timeout(Some(CDP_ACTIVATION_TIMEOUT))
+        .map_err(|error| format!("could not set browser response timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(CDP_ACTIVATION_TIMEOUT))
+        .map_err(|error| format!("could not set browser request timeout: {error}"))?;
+    activate_cdp_target_with_stream(stream, port, target_id)
+}
+
+fn checked_cdp_activation(
+    validation: &Value,
+    requested_port: Option<u16>,
+    requested_browser: Option<&str>,
+    target_id: Option<&str>,
+) -> Result<Option<(u16, String)>, String> {
+    let Some(target_id) = target_id else {
+        return Ok(None);
+    };
+    validate_cdp_target_id(target_id)?;
+    let lane = validation
+        .get("lane")
+        .ok_or_else(|| "refused CDP activation: validated lane is missing".to_string())?;
+    let lane_port = lane
+        .get("chromeDebugPort")
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| "refused CDP activation: validated lane port is missing".to_string())?;
+    if requested_port != Some(lane_port) {
+        return Err(
+            "refused CDP activation: dashboard port does not match the validated lane".into(),
+        );
+    }
+    let lane_browser = lane
+        .get("browser")
+        .and_then(Value::as_str)
+        .unwrap_or("chrome");
+    let requested_browser = requested_browser.unwrap_or("chrome");
+    if requested_browser != lane_browser {
+        return Err(
+            "refused CDP activation: dashboard browser does not match the validated lane".into(),
+        );
+    }
+    if !matches!(lane_browser, "chrome" | "edge") {
+        return Ok(None);
+    }
+    Ok(Some((lane_port, target_id.to_string())))
+}
+
+async fn activate_exact_tab(activation: Option<(u16, String)>) -> Result<(), String> {
+    let Some((port, target_id)) = activation else {
+        return Ok(());
+    };
+    tauri::async_runtime::spawn_blocking(move || activate_cdp_target(port, &target_id))
+        .await
+        .map_err(|error| format!("browser tab activation worker failed: {error}"))?
 }
 
 /// The small amount of window metadata needed to decide whether a top-level
@@ -81,7 +229,15 @@ fn browser_window_rank(candidate: &WindowCandidate) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_window_rank, WindowCandidate};
+    use super::{
+        activate_cdp_target_with_stream, browser_window_rank, checked_cdp_activation,
+        validate_cdp_target_id, WindowCandidate,
+    };
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn candidate(class_name: &str, title: &str, width: i32, height: i32) -> WindowCandidate {
         WindowCandidate {
@@ -122,6 +278,102 @@ mod tests {
             None,
         );
     }
+
+    #[test]
+    fn cdp_activation_targets_the_exact_tab_over_loopback() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request
+                .starts_with("PUT /json/activate/6D2D652F143283327CAB85B3373381BD HTTP/1.1\r\n"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\nTarget activated",
+                )
+                .unwrap();
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        activate_cdp_target_with_stream(stream, address.port(), "6D2D652F143283327CAB85B3373381BD")
+            .unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cdp_activation_accepts_200_without_waiting_for_eof_and_retries_would_block() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            thread::sleep(Duration::from_millis(50));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: keep-alive\r\n\r\nTarget activated",
+                )
+                .unwrap();
+            thread::sleep(Duration::from_millis(500));
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let started = Instant::now();
+        activate_cdp_target_with_stream(stream, address.port(), "6D2D652F143283327CAB85B3373381BD")
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "activation waited for the server to close its successful response"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cdp_activation_refuses_path_or_header_injection() {
+        for target in ["", "../../json/version", "tab id", "tab\r\nInjected: yes"] {
+            assert!(
+                validate_cdp_target_id(target).is_err(),
+                "accepted {target:?}"
+            );
+        }
+        assert!(validate_cdp_target_id("6D2D652F143283327CAB85B3373381BD").is_ok());
+    }
+
+    #[test]
+    fn cdp_activation_requires_the_revalidated_lane_port_and_browser() {
+        let validated = json!({
+            "lane": { "chromeDebugPort": 9322, "browser": "chrome" }
+        });
+        let exact = checked_cdp_activation(
+            &validated,
+            Some(9322),
+            Some("chrome"),
+            Some("6D2D652F143283327CAB85B3373381BD"),
+        )
+        .unwrap();
+        assert_eq!(
+            exact,
+            Some((9322, "6D2D652F143283327CAB85B3373381BD".to_string()))
+        );
+        assert!(checked_cdp_activation(
+            &validated,
+            Some(9323),
+            Some("chrome"),
+            Some("6D2D652F143283327CAB85B3373381BD")
+        )
+        .is_err());
+        assert!(checked_cdp_activation(
+            &validated,
+            Some(9322),
+            Some("edge"),
+            Some("6D2D652F143283327CAB85B3373381BD")
+        )
+        .is_err());
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -133,14 +385,32 @@ pub async fn focus_chrome(
     lane_id: String,
     pid: u32,
     process_start: String,
+    tab: Option<CdpActivationRequest>,
     runtime: State<'_, RuntimeState>,
 ) -> Result<Value, String> {
-    if let Some(error) = validation_error(runtime, lane_id, pid, process_start.clone()).await {
-        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
-    }
+    let validation = match validated_lane_action(runtime, lane_id, pid, process_start.clone()).await
+    {
+        Ok(validation) => validation,
+        Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
+    };
     if let Err(error) = crate::process_identity::verify(pid, &process_start) {
         return Ok(json!({ "ok": false, "pid": pid, "error": error }));
     }
+    let activation = match checked_cdp_activation(
+        &validation,
+        tab.as_ref().map(|tab| tab.debug_port),
+        tab.as_ref().map(|tab| tab.browser.as_str()),
+        tab.as_ref().map(|tab| tab.tab_id.as_str()),
+    ) {
+        Ok(activation) => activation,
+        Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
+    };
+    if let Err(error) = activate_exact_tab(activation).await {
+        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
+    }
+    #[cfg(target_os = "macos")]
+    let result = crate::macos_application::focus(pid).await;
+    #[cfg(not(target_os = "macos"))]
     let result = run_focus(pid);
     Ok(match result {
         Ok(()) => json!({ "ok": true, "pid": pid }),
@@ -159,7 +429,7 @@ pub async fn hide_chrome(
     process_start: String,
     runtime: State<'_, RuntimeState>,
 ) -> Result<Value, String> {
-    if let Some(error) = validation_error(runtime, lane_id, pid, process_start.clone()).await {
+    if let Err(error) = validated_lane_action(runtime, lane_id, pid, process_start.clone()).await {
         return Ok(json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": error }));
     }
     if let Err(error) = crate::process_identity::verify(pid, &process_start) {
@@ -171,7 +441,7 @@ pub async fn hide_chrome(
     }
     #[cfg(target_os = "macos")]
     {
-        let result = crate::macos_application::hide(pid);
+        let result = crate::macos_application::hide(pid).await;
         Ok(match result {
             Ok(placement) => json!({ "ok": true, "pid": pid, "placement": placement }),
             Err(e) => json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": e }),
@@ -211,12 +481,27 @@ pub async fn unhide_chrome(
     pid: u32,
     process_start: String,
     placement: Value,
+    tab: Option<CdpActivationRequest>,
     runtime: State<'_, RuntimeState>,
 ) -> Result<Value, String> {
-    if let Some(error) = validation_error(runtime, lane_id, pid, process_start.clone()).await {
+    let validation = match validated_lane_action(runtime, lane_id, pid, process_start.clone()).await
+    {
+        Ok(validation) => validation,
+        Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
+    };
+    if let Err(error) = crate::process_identity::verify(pid, &process_start) {
         return Ok(json!({ "ok": false, "pid": pid, "error": error }));
     }
-    if let Err(error) = crate::process_identity::verify(pid, &process_start) {
+    let activation = match checked_cdp_activation(
+        &validation,
+        tab.as_ref().map(|tab| tab.debug_port),
+        tab.as_ref().map(|tab| tab.browser.as_str()),
+        tab.as_ref().map(|tab| tab.tab_id.as_str()),
+    ) {
+        Ok(activation) => activation,
+        Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
+    };
+    if let Err(error) = activate_exact_tab(activation).await {
         return Ok(json!({ "ok": false, "pid": pid, "error": error }));
     }
     #[cfg(target_os = "windows")]
@@ -246,7 +531,7 @@ pub async fn unhide_chrome(
     {
         let placement: crate::macos_application::MacPlacement = serde_json::from_value(placement)
             .unwrap_or_else(|_| crate::macos_application::MacPlacement::application_hidden());
-        let result = crate::macos_application::restore(pid, placement);
+        let result = crate::macos_application::restore(pid, placement).await;
         Ok(match result {
             Ok(()) => json!({ "ok": true, "pid": pid }),
             Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
@@ -529,15 +814,6 @@ fn run_powershell(script: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/* -------------------------------------------------------------------------- */
-/*  macOS implementation                                                       */
-/* -------------------------------------------------------------------------- */
-
-#[cfg(target_os = "macos")]
-fn run_focus(pid: u32) -> Result<(), String> {
-    crate::macos_application::focus(pid)
 }
 
 /* -------------------------------------------------------------------------- */
