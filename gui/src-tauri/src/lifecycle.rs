@@ -5,6 +5,7 @@ pub enum LifecycleEvent {
     CloseRequested,
     #[allow(dead_code)]
     ExitRequested,
+    #[cfg(any(target_os = "macos", test))]
     Reopen,
     SecondLaunch,
 }
@@ -22,7 +23,9 @@ pub fn decision(event: LifecycleEvent, is_macos: bool) -> LifecycleDecision {
         LifecycleEvent::CloseRequested if is_macos => LifecycleDecision::Hide,
         LifecycleEvent::CloseRequested => LifecycleDecision::Close,
         LifecycleEvent::ExitRequested => LifecycleDecision::Exit,
-        LifecycleEvent::Reopen | LifecycleEvent::SecondLaunch => LifecycleDecision::Restore,
+        #[cfg(any(target_os = "macos", test))]
+        LifecycleEvent::Reopen => LifecycleDecision::Restore,
+        LifecycleEvent::SecondLaunch => LifecycleDecision::Restore,
     }
 }
 

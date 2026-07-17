@@ -3,6 +3,7 @@ use crate::cli::quiet_command;
 use crate::commands::action_safety::revalidate_lane_action;
 use crate::runtime::RuntimeState;
 use serde_json::{json, Value};
+#[cfg(target_os = "macos")]
 use std::{
     thread,
     time::{Duration, Instant},

@@ -18,8 +18,6 @@
 // re-assert the off-screen position.
 
 use std::collections::HashMap;
-#[cfg(target_os = "windows")]
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

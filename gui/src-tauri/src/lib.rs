@@ -77,7 +77,7 @@ pub fn run() {
         }))
         .manage(hidden_pids.clone())
         .manage(runtime)
-        .setup(move |app| {
+        .setup(move |_app| {
             // Start the real-time hide watcher: keeps every window of every
             // hidden lane off-screen within ~150ms of it appearing.
             hide_watcher::spawn(hidden_pids.clone());
@@ -87,8 +87,8 @@ pub fn run() {
             // second invocation.
             #[cfg(target_os = "macos")]
             {
-                install_macos_menu(app)?;
-                lifecycle::restore_main_window(app.handle());
+                install_macos_menu(_app)?;
+                lifecycle::restore_main_window(_app.handle());
             }
             Ok(())
         })
@@ -131,13 +131,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building PortPilot");
 
-    app.run(|app_handle, event| {
+    app.run(|_app_handle, _event| {
         #[cfg(target_os = "macos")]
-        if matches!(event, tauri::RunEvent::Reopen { .. })
+        if matches!(_event, tauri::RunEvent::Reopen { .. })
             && lifecycle::decision(lifecycle::LifecycleEvent::Reopen, true)
                 == lifecycle::LifecycleDecision::Restore
         {
-            lifecycle::restore_main_window(app_handle);
+            lifecycle::restore_main_window(_app_handle);
         }
     });
 }

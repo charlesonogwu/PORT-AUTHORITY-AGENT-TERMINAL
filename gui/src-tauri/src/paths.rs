@@ -46,9 +46,9 @@ pub fn runtime_provider_config_path() -> PathBuf {
         let base = std::env::var("LOCALAPPDATA")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_else(|_| ".".into());
-        return PathBuf::from(base)
+        PathBuf::from(base)
             .join("PortPilot")
-            .join("runtime-provider.json");
+            .join("runtime-provider.json")
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

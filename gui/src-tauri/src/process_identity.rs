@@ -94,8 +94,8 @@ pub fn verify(_pid: u32, _expected: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 pub fn enrich_snapshot(snapshot: &mut Value) {
-    #[cfg(target_os = "macos")]
     if let Some(sessions) = snapshot
         .get_mut("liveSessions")
         .and_then(Value::as_array_mut)
@@ -122,6 +122,9 @@ pub fn enrich_snapshot(snapshot: &mut Value) {
         }
     }
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn enrich_snapshot(_snapshot: &mut Value) {}
 
 #[cfg(test)]
 mod tests {
