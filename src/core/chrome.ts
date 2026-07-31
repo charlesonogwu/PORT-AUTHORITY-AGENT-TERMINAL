@@ -1,10 +1,10 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, posix } from "node:path";
+import { delimiter, isAbsolute, join, posix } from "node:path";
 import { isWindows } from "./paths.js";
-import { Lane, normalizeCwd } from "./lane.js";
+import { Lane, normalizeCwd, validatePortRange } from "./lane.js";
 import { PortObservation, observationsForPort } from "./scanner.js";
 
 /**
@@ -321,9 +321,25 @@ export class UnsafeChromeArgError extends Error {
 
 export class BrowserBinaryNotFoundError extends Error {
   constructor(browser: string, candidates: string[]) {
-    super(`${browser} was not found. Checked: ${candidates.join(", ")}. Install ${browser}, place it in /Applications or ~/Applications, or set the documented PORTPILOT_*_BIN override.`);
+    super(`${browser} was not found. Checked: ${candidates.join(", ")}. Install ${browser} in a standard location or set the documented PORTPILOT_*_BIN override.`);
     this.name = "BrowserBinaryNotFoundError";
   }
+}
+
+function binaryExists(binary: string): boolean {
+  if (isAbsolute(binary) || /[\\/]/.test(binary)) return existsSync(binary);
+  const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const extensions =
+    process.platform === "win32"
+      ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
+      : [""];
+  return pathDirs.some((dir) =>
+    extensions.some((ext) => existsSync(join(dir, `${binary}${ext}`))),
+  );
+}
+
+export function assertBrowserBinaryAvailable(binary: string, browser: string): void {
+  if (!binaryExists(binary)) throw new BrowserBinaryNotFoundError(browser, [binary]);
 }
 
 export function resolveChromeBinary(explicit?: string): string {
@@ -337,14 +353,16 @@ export function resolveChromeBinary(explicit?: string): string {
     return explicit;
   }
   const envBin = process.env.PORTPILOT_CHROME_BIN ?? process.env.CHROME_PATH;
-  if (envBin && envBin.length > 0) return envBin;
-  const candidates = DEFAULT_CHROME_BINARIES[process.platform] ?? DEFAULT_CHROME_BINARIES.linux!;
-  if (process.platform === "darwin") {
-    const found = candidates.find((candidate) => existsSync(candidate));
-    if (found) return found;
-    throw new BrowserBinaryNotFoundError("Chrome", candidates);
+  if (envBin && envBin.length > 0) {
+    if (!isChromeBinaryPath(envBin)) {
+      throw new UnsafeChromeArgError(`Refusing PORTPILOT_CHROME_BIN/CHROME_PATH value "${envBin}" because it is not a recognised Chromium-family binary.`);
+    }
+    return envBin;
   }
-  return candidates[0]!;
+  const candidates = DEFAULT_CHROME_BINARIES[process.platform] ?? DEFAULT_CHROME_BINARIES.linux!;
+  const found = candidates.find(binaryExists);
+  if (found) return found;
+  throw new BrowserBinaryNotFoundError("Chrome", candidates);
 }
 
 /**
@@ -363,6 +381,10 @@ export function buildLaunchPlan(lane: Lane, opts: LaunchChromeOptions = {}): Lau
   if (typeof lane.chromeDebugPort !== "number") {
     throw new Error("Lane has no chromeDebugPort assigned");
   }
+  validatePortRange(
+    { start: lane.chromeDebugPort, end: lane.chromeDebugPort },
+    "browser debug",
+  );
   const binary = resolveChromeBinary(opts.binaryPath);
   const mode = opts.mode ?? DEFAULT_CHROME_MODE;
   const args = [
@@ -402,6 +424,31 @@ export interface LaunchResult {
   mode: ChromeLaunchMode;
 }
 
+export class BrowserLaunchError extends Error {
+  constructor(browser: string, binary: string, cause: unknown) {
+    super(`Failed to launch ${browser} from "${binary}": ${(cause as Error).message ?? String(cause)}`);
+    this.name = "BrowserLaunchError";
+  }
+}
+
+export function waitForChildSpawn(
+  child: ChildProcess,
+  browser: string,
+  binary: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onSpawn = () => {
+      resolve();
+    };
+    const onError = (error: Error) => {
+      child.off("spawn", onSpawn);
+      reject(new BrowserLaunchError(browser, binary, error));
+    };
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
+  });
+}
+
 /**
  * Launch Chrome for the lane. Caller must ensure `evaluateChromeAttach`
  * returned `safe-free` first. We do not enforce that here because callers may
@@ -416,10 +463,11 @@ export interface LaunchResult {
 export async function launchChromeForLane(lane: Lane, opts: LaunchChromeOptions = {}): Promise<LaunchResult> {
   const mode = opts.mode ?? DEFAULT_CHROME_MODE;
   const plan = buildLaunchPlan(lane, opts);
-  await mkdir(plan.profileDir, { recursive: true });
   if (opts.dryRun) {
     return { binary: plan.binary, args: plan.args, spawned: false, mode };
   }
+  assertBrowserBinaryAvailable(plan.binary, "Chrome");
+  await mkdir(plan.profileDir, { recursive: true });
   const detached = opts.detached !== false;
   const child = spawn(plan.binary, plan.args, {
     detached,
@@ -430,6 +478,7 @@ export async function launchChromeForLane(lane: Lane, opts: LaunchChromeOptions 
     windowsHide: mode !== "visible",
     shell: false,
   });
+  await waitForChildSpawn(child, "Chrome", plan.binary);
   if (detached) child.unref();
   return { pid: child.pid, binary: plan.binary, args: plan.args, spawned: true, mode };
 }

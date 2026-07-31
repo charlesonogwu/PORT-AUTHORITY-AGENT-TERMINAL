@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { posix } from "node:path";
-import { Lane, normalizeCwd } from "./lane.js";
+import { Lane, normalizeCwd, validatePortRange } from "./lane.js";
 import { PortObservation, observationsForPort } from "./scanner.js";
 import {
   ChromeAttachVerdict,
@@ -12,6 +12,8 @@ import {
   LaunchResult,
   UnsafeChromeArgError,
   isSafeInitialUrl,
+  assertBrowserBinaryAvailable,
+  waitForChildSpawn,
 } from "./chrome.js";
 
 /**
@@ -92,14 +94,18 @@ export function resolveFirefoxBinary(explicit?: string): string {
     return explicit;
   }
   const envBin = process.env.PORTPILOT_FIREFOX_BIN ?? process.env.FIREFOX_PATH;
-  if (envBin && envBin.length > 0) return envBin;
-  const candidates = DEFAULT_FIREFOX_BINARIES[process.platform] ?? DEFAULT_FIREFOX_BINARIES.linux!;
-  if (process.platform === "darwin") {
-    const found = candidates.find((candidate) => existsSync(candidate));
-    if (found) return found;
-    throw new BrowserBinaryNotFoundError("Firefox", candidates);
+  if (envBin && envBin.length > 0) {
+    if (!isFirefoxBinaryPath(envBin)) {
+      throw new UnsafeChromeArgError(`Refusing PORTPILOT_FIREFOX_BIN/FIREFOX_PATH value "${envBin}" because it is not a recognised Firefox-family binary.`);
+    }
+    return envBin;
   }
-  return candidates[0]!;
+  const candidates = DEFAULT_FIREFOX_BINARIES[process.platform] ?? DEFAULT_FIREFOX_BINARIES.linux!;
+  const found = candidates.find((candidate) =>
+    candidate.includes("/") || candidate.includes("\\") ? existsSync(candidate) : true,
+  );
+  if (found) return found;
+  throw new BrowserBinaryNotFoundError("Firefox", candidates);
 }
 
 export function isFirefoxProcess(o: PortObservation): boolean {
@@ -182,6 +188,10 @@ export function buildFirefoxLaunchPlan(lane: Lane, opts: LaunchFirefoxOptions = 
   if (typeof lane.chromeDebugPort !== "number") {
     throw new Error("Lane has no debug port assigned");
   }
+  validatePortRange(
+    { start: lane.chromeDebugPort, end: lane.chromeDebugPort },
+    "browser debug",
+  );
   const mode = opts.mode ?? "visible";
   if (mode === "background") throw new UnsupportedFirefoxModeError(mode);
   const binary = resolveFirefoxBinary(opts.binaryPath);
@@ -211,10 +221,11 @@ export function buildFirefoxLaunchPlan(lane: Lane, opts: LaunchFirefoxOptions = 
 export async function launchFirefoxForLane(lane: Lane, opts: LaunchFirefoxOptions = {}): Promise<LaunchResult> {
   const mode = opts.mode ?? "visible";
   const plan = buildFirefoxLaunchPlan(lane, opts);
-  await mkdir(plan.profileDir, { recursive: true });
   if (opts.dryRun) {
     return { binary: plan.binary, args: plan.args, spawned: false, mode };
   }
+  assertBrowserBinaryAvailable(plan.binary, "Firefox");
+  await mkdir(plan.profileDir, { recursive: true });
   const detached = opts.detached !== false;
   const child = spawn(plan.binary, plan.args, {
     detached,
@@ -222,6 +233,7 @@ export async function launchFirefoxForLane(lane: Lane, opts: LaunchFirefoxOption
     windowsHide: mode !== "visible",
     shell: false,
   });
+  await waitForChildSpawn(child, "Firefox", plan.binary);
   if (detached) child.unref();
   return { pid: child.pid, binary: plan.binary, args: plan.args, spawned: true, mode };
 }
