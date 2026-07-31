@@ -73,7 +73,7 @@ export function parsePortRange(spec: string | undefined): { start: number; end: 
   if (!m) return undefined;
   const start = Number(m[1]);
   const end = Number(m[2]);
-  if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end < start) return undefined;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end > 65_535 || end < start) return undefined;
   return { start, end };
 }
 

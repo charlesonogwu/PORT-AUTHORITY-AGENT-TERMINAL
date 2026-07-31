@@ -7,6 +7,7 @@ import {
   isStale,
   laneSessionId,
   canonicalizeOwner,
+  cwdIdentity,
   normalizeCwd,
   nowIso,
 } from "./lane.js";
@@ -57,12 +58,12 @@ export function filterLanes(lanes: Lane[], filter: LaneFilter): Lane[] {
     : filter.status
     ? [filter.status]
     : null;
-  const cwd = filter.cwd ? normalizeCwd(filter.cwd) : null;
+  const cwd = filter.cwd ? cwdIdentity(filter.cwd) : null;
   const wantSession = typeof filter.sessionId === "string" ? filter.sessionId : null;
   const owner = filter.owner ? canonicalizeOwner(filter.owner).canonical : null;
   return lanes.filter((lane) => {
     if (owner && canonicalizeOwner(lane.owner).canonical !== owner) return false;
-    if (cwd && normalizeCwd(lane.cwd) !== cwd) return false;
+    if (cwd && cwdIdentity(lane.cwd) !== cwd) return false;
     if (wantSession !== null && laneSessionId(lane) !== wantSession) return false;
     if (wantStatuses && !wantStatuses.includes(lane.status)) return false;
     if (!filter.includeReleased && !wantStatuses && lane.status === "released") return false;
@@ -89,7 +90,7 @@ export async function updateRegistry(updater: RegistryUpdater): Promise<Lane[]> 
     const file: RegistryFile = { version: REGISTRY_VERSION, lanes: next };
     await atomicWriteJson(registryPath(), file);
     return next;
-  });
+  }, { timeoutMs: 30_000, retryMs: 25, staleMs: 30_000 });
 }
 
 export async function upsertLane(lane: Lane): Promise<Lane> {

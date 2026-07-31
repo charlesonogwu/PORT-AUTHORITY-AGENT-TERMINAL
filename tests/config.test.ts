@@ -33,6 +33,18 @@ test("saveConfig + loadConfig roundtrip", async () => {
   });
 });
 
+test("config refuses out-of-range ports instead of persisting unusable values", async () => {
+  await withTempHome(async () => {
+    await assert.rejects(
+      saveConfig({
+        version: 1,
+        chromeDebugRange: { start: 70_000, end: 70_001 },
+      }),
+      /port range/i,
+    );
+  });
+});
+
 test("recommendForMachine clamps small machines to >= 2", () => {
   const rec = recommendForMachine(2 * 1024 ** 3); // 2 GB
   assert.ok(rec.recommendedMaxActiveLanes >= 2);
