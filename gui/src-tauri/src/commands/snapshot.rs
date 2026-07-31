@@ -23,7 +23,11 @@
 // install issue instead of going blank.
 
 use crate::cli::run_cli_json;
-use serde_json::{json, Value};
+use serde_json::Value;
+
+fn snapshot_result(result: Result<Value, String>) -> Result<Value, String> {
+    result
+}
 
 /// 0.2.3 fix: async + spawn_blocking. Previously this was a sync
 /// `pub fn`, which Tauri runs on the **main UI thread**. Every 3-second
@@ -39,21 +43,16 @@ pub async fn get_snapshot() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(|| run_cli_json(&["dashboard-snapshot"]))
         .await
         .map_err(|e| format!("snapshot worker join failed: {}", e))
-        .and_then(|res| match res {
-            Ok(v) => Ok(v),
-            Err(e) => Ok(json!({
-                "ok": false,
-                "generatedAt": "",
-                "scanSource": "empty",
-                "scanErrors": [e.clone()],
-                "home": "",
-                "registryPath": "",
-                "config": {},
-                "summary": { "liveSessions": 0, "distinctAgents": 0, "conflicts": 0 },
-                "liveSessions": [],
-                "registryHealth": { "portpilot": { "exists": false, "lockHealthy": false } },
-                "conflicts": [],
-                "warnings": [format!("paat CLI unavailable: {}", e)]
-            })),
-        })
+        .and_then(snapshot_result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_result;
+
+    #[test]
+    fn snapshot_failure_is_not_disguised_as_an_empty_dashboard() {
+        let result = snapshot_result(Err("paat unavailable".into()));
+        assert_eq!(result.unwrap_err(), "paat unavailable");
+    }
 }
