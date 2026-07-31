@@ -71,6 +71,10 @@ export interface PortRange {
     start: number;
     end: number;
 }
+export declare class PortRangeError extends Error {
+    constructor(label: string, range: PortRange);
+}
+export declare function validatePortRange(range: PortRange, label?: string): PortRange;
 export declare const DEFAULT_CHROME_DEBUG_RANGE: PortRange;
 export declare const DEFAULT_APP_PORT_RANGE: PortRange;
 /**
@@ -112,4 +116,8 @@ export declare function laneSessionId(lane: {
     sessionId?: string;
 }): string;
 export declare function normalizeCwd(cwd: string): string;
+/** Stable comparison key for lane identity. Windows paths are resolved,
+ * separator-normalized, and case-folded because NTFS paths are normally
+ * case-insensitive. The stored `cwd` remains human-readable via normalizeCwd. */
+export declare function cwdIdentity(cwd: string, platform?: NodeJS.Platform): string;
 export declare function isStale(lane: Lane, now?: number): boolean;

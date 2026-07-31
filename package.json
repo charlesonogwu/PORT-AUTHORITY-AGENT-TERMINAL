@@ -55,6 +55,7 @@
     "gui/src-tauri/src",
     "scripts/postinstall.cjs",
     "scripts/build-dashboard-tauri.cjs",
+    "scripts/npm-invocation.cjs",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -103,12 +104,12 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "png-to-ico": "^3.0.1",
-    "sharp": "^0.34.5",
-    "tsx": "^4.19.2",
+    "sharp": "^0.35.3",
+    "tsx": "^4.23.1",
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.4.3"
   }
 }

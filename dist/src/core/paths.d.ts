@@ -5,6 +5,7 @@
 export declare function portpilotHome(): string;
 export declare function registryPath(): string;
 export declare function lockPath(): string;
+export declare function launchLockPath(laneId: string): string;
 export declare function profilesDir(): string;
 /**
  * Compose a deterministic Chrome profile directory for a lane.

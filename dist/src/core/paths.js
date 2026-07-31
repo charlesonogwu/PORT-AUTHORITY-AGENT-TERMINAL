@@ -17,6 +17,10 @@ export function registryPath() {
 export function lockPath() {
     return join(portpilotHome(), "lanes.json.lock");
 }
+export function launchLockPath(laneId) {
+    const safeId = laneId.replace(/[^a-zA-Z0-9._-]+/g, "_");
+    return join(portpilotHome(), "launch-locks", `${safeId}.lock`);
+}
 export function profilesDir() {
     return join(portpilotHome(), "profiles");
 }

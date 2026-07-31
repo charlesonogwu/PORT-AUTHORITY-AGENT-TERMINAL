@@ -1,3 +1,4 @@
+import { type ChildProcess } from "node:child_process";
 import { Lane } from "./lane.js";
 import { PortObservation } from "./scanner.js";
 /**
@@ -174,6 +175,7 @@ export declare class UnsafeChromeArgError extends Error {
 export declare class BrowserBinaryNotFoundError extends Error {
     constructor(browser: string, candidates: string[]);
 }
+export declare function assertBrowserBinaryAvailable(binary: string, browser: string): void;
 export declare function resolveChromeBinary(explicit?: string): string;
 /**
  * Build the Chrome launch command for a lane. We always pass:
@@ -196,6 +198,10 @@ export interface LaunchResult {
     /** The visibility mode the lane was launched with. */
     mode: ChromeLaunchMode;
 }
+export declare class BrowserLaunchError extends Error {
+    constructor(browser: string, binary: string, cause: unknown);
+}
+export declare function waitForChildSpawn(child: ChildProcess, browser: string, binary: string): Promise<void>;
 /**
  * Launch Chrome for the lane. Caller must ensure `evaluateChromeAttach`
  * returned `safe-free` first. We do not enforce that here because callers may
