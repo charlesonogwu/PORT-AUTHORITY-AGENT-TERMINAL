@@ -113,6 +113,19 @@ async function waitForCdp(port: number, totalMs: number): Promise<{ Browser: str
   throw new Error(`CDP did not come up on :${port} within ${totalMs}ms (last: ${lastErr?.message})`);
 }
 
+async function pickEphemeralPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (!port) throw new Error("could not allocate an ephemeral test port");
+  return port;
+}
+
 const spawnedChildren: { name: string; pid: number; port?: number }[] = [];
 
 async function killChildren(): Promise<void> {
@@ -193,8 +206,9 @@ async function scenario2_safeAttach(aliceLane: Lane): Promise<void> {
 
 async function scenario3_unsafeForeignChrome(): Promise<void> {
   log("\n[3/4] unsafe-foreign-chrome — Chrome with WRONG profile on lane port");
-  // Pick a free port well above what scenario 2 used.
-  const foreignPort = 9398;
+  // Ask the OS for a free disposable port instead of colliding with a real
+  // service that happens to use a hard-coded test value.
+  const foreignPort = await pickEphemeralPort();
   const foreignProfile = join(process.env.PORTPILOT_HOME!, "foreign-chrome-profile");
   await mkdir(foreignProfile, { recursive: true });
   // Launch Chrome with a profile that DOES NOT belong to any portpilot lane.

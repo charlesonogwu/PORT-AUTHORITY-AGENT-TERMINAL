@@ -266,18 +266,19 @@ test("build-only image packages are not installed during global runtime install"
 
   assert.equal(prodDeps.sharp, undefined);
   assert.equal(prodDeps["png-to-ico"], undefined);
-  assert.equal(pkg.devDependencies?.sharp, "^0.34.5");
+  assert.match(pkg.devDependencies?.sharp ?? "", /^\^0\.35\./);
   assert.equal(pkg.devDependencies?.["png-to-ico"], "^3.0.1");
 });
 
-test("git install pack input excludes temporary node_modules", () => {
+test("package input excludes node_modules without deleting the developer dependency tree", () => {
   const pkg = JSON.parse(readRepoFile("package.json"));
   const npmignore = readRepoFile(".npmignore");
   const prepack = readRepoFile("scripts/prepack.cjs");
 
   assert.equal(pkg.scripts?.prepack, "node scripts/prepack.cjs");
   assert.match(npmignore, /^node_modules\/$/m);
-  assert.match(prepack, /rmSync\(rootNodeModules, \{ recursive: true, force: true \}\)/);
+  assert.ok(Array.isArray(pkg.files) && pkg.files.length > 0);
+  assert.doesNotMatch(prepack, /rmSync|removeSync|rmdirSync/);
 });
 
 test("installer and CLI help do not advertise removed extension or hotkey flows", () => {

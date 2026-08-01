@@ -4,7 +4,7 @@ import { z } from "zod";
 import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
 import { findLane, listLanes, markStaleLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { hasSonar, scanPorts } from "../core/scanner.js";
-import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
+import { evaluateChromeAttach, resolveChromeMode } from "../core/chrome.js";
 import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
 import { loadConfig } from "../core/config.js";
 import { portpilotHome, profilesDir } from "../core/paths.js";
@@ -16,10 +16,14 @@ import { PageControlError, openPageController } from "../core/pagecontrol.js";
  */
 export function buildMcpServer() {
     const server = new McpServer({ name: "portpilot", version: "0.1.0" }, { capabilities: { tools: {} }, instructions: "Coordinate dev server ports, Chrome debug ports, and Chrome profiles between local AI coding agents." });
-    const portRangeShape = {
-        start: z.number().int().positive(),
-        end: z.number().int().positive(),
-    };
+    const portRangeSchema = z
+        .object({
+        start: z.number().int().min(1).max(65_535),
+        end: z.number().int().min(1).max(65_535),
+    })
+        .refine((range) => range.start <= range.end, {
+        message: "port range start must not exceed end",
+    });
     // ── HIGH-LEVEL "do everything" tool ──────────────────────────────────────
     server.registerTool("open", {
         title: "Open Chrome via portpilot in one call (chrome.ts entrypoint)",
@@ -154,8 +158,8 @@ export function buildMcpServer() {
                 .optional()
                 .describe("Optional parallel session id. Different sessions for the same (owner, cwd) get different ports and profile dirs, so one agent can run multiple concurrent browser instances. Omit for the implicit 'default' session. RAM note: each extra session is a whole separate browser (~0.5-1.5 GB); if you only need more pages, use page_newtab on your existing lane instead."),
             task: z.string().optional().describe("Short description of the task this lane is for."),
-            appPortRange: z.object(portRangeShape).optional(),
-            chromeDebugRange: z.object(portRangeShape).optional(),
+            appPortRange: portRangeSchema.optional(),
+            chromeDebugRange: portRangeSchema.optional(),
             withAppPort: z.boolean().optional().default(true),
             withChromePort: z.boolean().optional().default(true),
             browser: z
@@ -239,7 +243,7 @@ export function buildMcpServer() {
         title: "Find free port",
         description: "Find the next free port in a range, considering both live port observations and active reservations.",
         inputSchema: {
-            range: z.object(portRangeShape).optional(),
+            range: portRangeSchema.optional(),
         },
     }, async (args) => {
         const port = await findFreePort({ range: args.range });
@@ -281,8 +285,10 @@ export function buildMcpServer() {
         }
         const cfg = await loadConfig();
         const mode = resolveChromeMode(args.mode, cfg.chromeMode);
-        const launch = await launchChromeForLane(lane, { dryRun: args.dryRun, binaryPath: args.binaryPath, mode });
-        await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
+        const launch = await launchBrowserForLane(lane, { dryRun: args.dryRun, binaryPath: args.binaryPath, mode });
+        if (!args.dryRun) {
+            await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
+        }
         return jsonResult({ ok: true, launched: !args.dryRun, mode, lane, command: { binary: launch.binary, args: launch.args }, pid: launch.pid });
     });
     server.registerTool("launch_browser_lane", {
@@ -328,7 +334,9 @@ export function buildMcpServer() {
             return jsonResult({ ok: false, error: err.message, lane });
         }
         const launch = await launchBrowserForLane(lane, { dryRun: args.dryRun, binaryPath: args.binaryPath, mode });
-        await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
+        if (!args.dryRun) {
+            await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
+        }
         return jsonResult({
             ok: true,
             launched: !args.dryRun,
@@ -436,8 +444,8 @@ export function buildMcpServer() {
         title: "Scan listening ports",
         description: "Return every TCP port currently listening on the local machine, with the process name and command line where available. This is the raw scanner view — used internally by check_lane and doctor — exposed for agents that want to inspect the live port table directly. Use the optional `port` filter to restrict to a single port, or `portRange` for a range.",
         inputSchema: {
-            port: z.number().int().positive().optional().describe("Filter to a single port number."),
-            portRange: z.object({ start: z.number().int().positive(), end: z.number().int().positive() }).optional().describe("Filter to a port range (inclusive)."),
+            port: z.number().int().min(1).max(65_535).optional().describe("Filter to a single port number."),
+            portRange: portRangeSchema.optional().describe("Filter to a port range (inclusive)."),
             chromeOnly: z.boolean().optional().default(false).describe("Only return Chromium-family processes."),
         },
     }, async (args) => {

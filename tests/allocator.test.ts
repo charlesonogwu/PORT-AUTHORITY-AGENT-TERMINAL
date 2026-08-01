@@ -87,6 +87,39 @@ test("allocateLane fails when both candidate ranges are exhausted", async () => 
   });
 });
 
+test("allocateLane treats Windows cwd case and dot-segment variants as one lane", {
+  skip: process.platform !== "win32" ? "requires Windows path semantics" : false,
+}, async () => {
+  await withTempHome(async () => {
+    const first = await allocateLane({
+      owner: "codex",
+      cwd: "C:\\Work\\ProjectAlpha",
+      observations: empty,
+    });
+    const second = await allocateLane({
+      owner: "codex",
+      cwd: "c:/work/projectalpha/src/..",
+      observations: empty,
+    });
+    assert.equal(second.alreadyExisted, true);
+    assert.equal(second.lane.id, first.lane.id);
+  });
+});
+
+test("allocateLane rejects invalid port ranges before iterating them", async () => {
+  await withTempHome(async () => {
+    await assert.rejects(
+      allocateLane({
+        owner: "codex",
+        cwd: "C:\\work\\invalid-range",
+        appPortRange: { start: 70_000, end: 70_001 },
+        observations: [],
+      }),
+      /port range/i,
+    );
+  });
+});
+
 test("findFreePort returns the next available port in the range", async () => {
   await withTempHome(async () => {
     const obs: PortObservation[] = [

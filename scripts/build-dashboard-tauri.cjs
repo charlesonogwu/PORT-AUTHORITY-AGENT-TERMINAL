@@ -33,6 +33,7 @@ const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
+const { npmInvocation } = require("./npm-invocation.cjs");
 
 const repoRoot = path.resolve(__dirname, "..");
 const guiDir = path.join(repoRoot, "gui");
@@ -44,9 +45,7 @@ const strict = process.argv.includes("--strict");
 function log(msg) { process.stdout.write(`[build-dashboard] ${msg}\n`); }
 function warn(msg) { process.stderr.write(`[build-dashboard] ${msg}\n`); }
 
-/** Resolve the platform-correct executable name for npm + cargo. Node
- *  doesn't auto-append .cmd on Windows when shell:false, so we have to. */
-function npmCmd() { return process.platform === "win32" ? "npm.cmd" : "npm"; }
+/** Resolve the platform-correct executable name for cargo. */
 function cargoCmd() { return process.platform === "win32" ? "cargo.exe" : "cargo"; }
 
 /** Pick the binary name and output path per platform. */
@@ -112,9 +111,10 @@ function maybeNpmInstallGui(env) {
   const nodeModules = path.join(guiDir, "node_modules");
   if (fs.existsSync(nodeModules)) return true;
   log("gui/node_modules missing — running `npm ci` inside gui/ …");
+  const ci = npmInvocation(["ci", "--no-audit", "--no-fund"]);
   const result = spawnSync(
-    npmCmd(),
-    ["ci", "--no-audit", "--no-fund"],
+    ci.command,
+    ci.args,
     {
       cwd: guiDir,
       stdio: "inherit",
@@ -127,9 +127,10 @@ function maybeNpmInstallGui(env) {
   if (result.status !== 0) {
     // Fall back to `npm install` if ci fails (no lockfile, version drift, etc.)
     warn("`npm ci` failed — falling back to `npm install`…");
+    const fallback = npmInvocation(["install", "--no-audit", "--no-fund"]);
     const install = spawnSync(
-      npmCmd(),
-      ["install", "--no-audit", "--no-fund"],
+      fallback.command,
+      fallback.args,
       {
         cwd: guiDir,
         stdio: "inherit",

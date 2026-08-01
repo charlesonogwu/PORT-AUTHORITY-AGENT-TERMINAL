@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Dashboard Show, Hide, Unhide, Kill, and Erase revalidate the complete live
+  PortPilot lane identity (lane, browser, PID, creation time, debug port, and
+  profile) immediately before acting. PID reuse and stale dashboard rows now
+  fail closed instead of targeting an unrelated process.
+- A failed dashboard snapshot no longer masquerades as an empty dashboard; the
+  UI keeps the last verified snapshot and surfaces the error.
+- Browser launches are serialized per lane and wait for the browser to prove
+  its port/profile identity. Concurrent opens reuse one verified process,
+  missing executables fail clearly, and dry runs no longer mark lanes active.
+- Windows working-directory identity is case-insensitive and resolves dot
+  segments, preventing duplicate lanes for equivalent paths.
+- Port ranges are rejected unless every value is an integer in `1..65535`, and
+  registry lock contention gets a longer, jittered retry window.
+- The strict dashboard builder invokes npm's JavaScript CLI through Node on
+  Windows instead of attempting to spawn `npm.cmd` directly.
+- `npm pack` and `npm publish` no longer delete the developer's `node_modules`.
+
+### Security
+
+- The Tauri dashboard now has a restrictive Content Security Policy.
+- Runtime and build dependencies were updated to remove all currently reported
+  npm audit findings.
+
+### Tests
+
+- Added regressions for stale/PID-reused dashboard targets, failed snapshots,
+  concurrent browser launches, missing executables, Windows path identity,
+  invalid port ranges, non-destructive packaging, Windows npm invocation, and
+  dashboard CSP.
+
 ---
 
 ## [0.4.0] — macOS browser safety/runtime foundation

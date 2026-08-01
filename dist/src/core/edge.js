@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { posix } from "node:path";
 import { normalizeCwd } from "./lane.js";
 import { observationsForPort } from "./scanner.js";
-import { UnsafeChromeArgError, BrowserBinaryNotFoundError, buildLaunchPlan, extractUserDataDir, launchChromeForLane, } from "./chrome.js";
+import { UnsafeChromeArgError, BrowserBinaryNotFoundError, assertBrowserBinaryAvailable, buildLaunchPlan, extractUserDataDir, launchChromeForLane, } from "./chrome.js";
 /**
  * Microsoft Edge backend.
  *
@@ -69,17 +69,17 @@ export function resolveEdgeBinary(explicit) {
         return explicit;
     }
     const envBin = process.env.PORTPILOT_EDGE_BIN ?? process.env.EDGE_PATH;
-    if (envBin && envBin.length > 0)
+    if (envBin && envBin.length > 0) {
+        if (!isEdgeBinaryPath(envBin)) {
+            throw new UnsafeChromeArgError(`Refusing PORTPILOT_EDGE_BIN/EDGE_PATH value "${envBin}" because it is not a recognised Edge-family binary.`);
+        }
         return envBin;
-    const candidates = DEFAULT_EDGE_BINARIES[process.platform] ?? DEFAULT_EDGE_BINARIES.linux;
-    if (process.platform === "win32" || process.platform === "darwin") {
-        const found = candidates.find((c) => existsSync(c));
-        if (found)
-            return found;
     }
-    if (process.platform === "darwin")
-        throw new BrowserBinaryNotFoundError("Microsoft Edge", candidates);
-    return candidates[0];
+    const candidates = DEFAULT_EDGE_BINARIES[process.platform] ?? DEFAULT_EDGE_BINARIES.linux;
+    const found = candidates.find((candidate) => candidate.includes("/") || candidate.includes("\\") ? existsSync(candidate) : true);
+    if (found)
+        return found;
+    throw new BrowserBinaryNotFoundError("Microsoft Edge", candidates);
 }
 export function isEdgeProcess(o) {
     const cmd = (o.command ?? "").toLowerCase();
@@ -131,5 +131,6 @@ export function buildEdgeLaunchPlan(lane, opts = {}) {
 /** Launch Edge for the lane. Same contract as launchChromeForLane. */
 export async function launchEdgeForLane(lane, opts = {}) {
     const binary = resolveEdgeBinary(opts.binaryPath);
+    assertBrowserBinaryAvailable(binary, "Microsoft Edge");
     return launchChromeForLane(lane, { ...opts, binaryPath: binary });
 }

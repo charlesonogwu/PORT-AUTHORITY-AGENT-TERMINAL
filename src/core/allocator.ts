@@ -8,6 +8,7 @@ import {
   LaneStatus,
   PortRange,
   canonicalizeOwner,
+  cwdIdentity,
   isStale,
   laneSessionId,
   newLaneId,
@@ -16,6 +17,7 @@ import {
   ownerSlug,
   projectSlug,
   sessionSlug,
+  validatePortRange,
 } from "./lane.js";
 import { profileDirFor } from "./paths.js";
 import { PortObservation, isPortInUse, scanPorts } from "./scanner.js";
@@ -174,7 +176,7 @@ export function findExistingLane(
   sessionId: string = DEFAULT_SESSION_ID,
   browser: BrowserKind = "chrome",
 ): Lane | undefined {
-  const target = normalizeCwd(cwd);
+  const target = cwdIdentity(cwd);
   // Match canonical-against-canonical so a registry that still contains
   // pre-canonicalization owners (e.g. "codex-test-alpha" written before
   // canonicalizeOwner shipped) can still satisfy idempotency for new
@@ -190,7 +192,7 @@ export function findExistingLane(
 }
 
 function laneMatchesKey(l: Lane, owner: string, normalizedCwd: string, sessionId: string): boolean {
-  if (normalizeCwd(l.cwd) !== normalizedCwd) return false;
+  if (cwdIdentity(l.cwd) !== normalizedCwd) return false;
   if (laneSessionId(l) !== sessionId) return false;
   if (l.status === "released") return false;
   if (l.owner === owner) return true;
@@ -211,7 +213,7 @@ export function findExistingLaneAnyBrowser(
   sessionId: string = DEFAULT_SESSION_ID,
   prefer?: BrowserKind,
 ): Lane | undefined {
-  const target = normalizeCwd(cwd);
+  const target = cwdIdentity(cwd);
   const matches = lanes.filter((l) => laneMatchesKey(l, owner, target, sessionId));
   if (matches.length === 0) return undefined;
   if (prefer) {
@@ -232,6 +234,8 @@ export function findExistingLaneAnyBrowser(
  * lane is always allowed, even at the cap.
  */
 export async function allocateLane(opts: AllocateOptions): Promise<AllocateResult> {
+  if (opts.appPortRange) validatePortRange(opts.appPortRange, "app");
+  if (opts.chromeDebugRange) validatePortRange(opts.chromeDebugRange, "browser debug");
   const observationsProvided = opts.observations !== undefined;
   const scan = observationsProvided
     ? { observations: opts.observations!, source: "provided" as const, errors: [] as string[] }
@@ -307,12 +311,12 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
       if (needApp || needChrome) {
         const ctx = buildContext(observations, lanes);
         if (needApp) {
-          const appRange = opts.appPortRange ?? config.appPortRange ?? DEFAULT_APP_PORT_RANGE;
+          const appRange = validatePortRange(opts.appPortRange ?? config.appPortRange ?? DEFAULT_APP_PORT_RANGE, "app");
           appPort = pickPort(appRange, new Set<number>([...ctx.occupied, ...ctx.reservedAppPorts]));
           if (appPort === undefined) throw new Error(`No free app port in range ${appRange.start}-${appRange.end}`);
         }
         if (needChrome) {
-          const chromeRange = opts.chromeDebugRange ?? config.chromeDebugRange ?? DEFAULT_CHROME_DEBUG_RANGE;
+          const chromeRange = validatePortRange(opts.chromeDebugRange ?? config.chromeDebugRange ?? DEFAULT_CHROME_DEBUG_RANGE, "browser debug");
           chromeDebugPort = pickPort(chromeRange, new Set<number>([...ctx.occupied, ...ctx.reservedChromePorts]));
           if (chromeDebugPort === undefined) throw new Error(`No free Chrome debug port in range ${chromeRange.start}-${chromeRange.end}`);
         }
@@ -341,8 +345,8 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
       );
     }
     const ctx = buildContext(observations, lanes);
-    const appRange = opts.appPortRange ?? config.appPortRange ?? DEFAULT_APP_PORT_RANGE;
-    const chromeRange = opts.chromeDebugRange ?? config.chromeDebugRange ?? DEFAULT_CHROME_DEBUG_RANGE;
+    const appRange = validatePortRange(opts.appPortRange ?? config.appPortRange ?? DEFAULT_APP_PORT_RANGE, "app");
+    const chromeRange = validatePortRange(opts.chromeDebugRange ?? config.chromeDebugRange ?? DEFAULT_CHROME_DEBUG_RANGE, "browser debug");
     const wantApp = opts.withAppPort !== false;
     const wantChrome = opts.withChromePort !== false;
     const appTaken = new Set<number>([...ctx.occupied, ...ctx.reservedAppPorts]);
@@ -401,7 +405,7 @@ export interface FindFreePortOptions {
 }
 
 export async function findFreePort(opts: FindFreePortOptions = {}): Promise<number | undefined> {
-  const range = opts.range ?? DEFAULT_CHROME_DEBUG_RANGE;
+  const range = validatePortRange(opts.range ?? DEFAULT_CHROME_DEBUG_RANGE, "network");
   const observations = opts.observations ?? (await scanPorts()).observations;
   const lanes = await listLanes();
   const ctx = buildContext(observations, lanes);

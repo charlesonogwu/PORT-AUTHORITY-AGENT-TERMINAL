@@ -6,7 +6,7 @@ import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
 import { Lane, isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
 import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { scanPorts, hasSonar } from "../core/scanner.js";
-import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
+import { evaluateChromeAttach, resolveChromeMode } from "../core/chrome.js";
 import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
 import { openPageController } from "../core/pagecontrol.js";
 import { portpilotHome, profilesDir, registryPath } from "../core/paths.js";
@@ -333,7 +333,9 @@ async function cmdOpen(ctx: CliContext): Promise<void> {
     mode,
     ...(url ? { initialUrl: url } : {}),
   });
-  await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
+  if (!dryRun) {
+    await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
+  }
   if (ctx.json) {
     emit(ctx, { ok: true, launched: !dryRun, browser, mode, lane, pid: launch.pid, navigatedTo: url ?? null, command: { binary: launch.binary, args: launch.args } });
     return;
@@ -439,8 +441,10 @@ async function cmdLaunchChrome(ctx: CliContext): Promise<void> {
   // --mode wins, then PORTPILOT_CHROME_MODE env, then config, then "visible".
   const cfg = await loadConfig();
   const mode = resolveChromeMode(flagString(ctx.args, "mode"), cfg.chromeMode);
-  const launch = await launchChromeForLane(lane!, { dryRun, binaryPath: bin, mode });
-  await updateRegistry((lanes) => lanes.map((l) => (l.id === lane!.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
+  const launch = await launchBrowserForLane(lane!, { dryRun, binaryPath: bin, mode });
+  if (!dryRun) {
+    await updateRegistry((lanes) => lanes.map((l) => (l.id === lane!.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
+  }
   if (ctx.json) emit(ctx, { ok: true, launched: !dryRun, mode, lane, command: { binary: launch.binary, args: launch.args }, pid: launch.pid });
   else {
     if (dryRun) ctx.stdout.write(`Would launch (${mode}): ${launch.binary} ${launch.args.join(" ")}\n`);
