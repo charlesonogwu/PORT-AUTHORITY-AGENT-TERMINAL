@@ -133,6 +133,39 @@ Restart the app and the agent has these tools:
 Then a prompt like *"Open https://example.com via PAAT in this folder"* just works:
 the agent calls `open` and the session appears on the dashboard.
 
+### Use the `/portpilot` command
+
+The npm installer also adds a task-scoped **PortPilot** skill to Codex and
+Claude Code. This includes Claude Code's graphical **Code tab inside Claude
+Desktop**, but not ordinary Claude Desktop Chat or Cowork. In Claude Code,
+invoke `/portpilot`; in Codex, type `/port` and select **PortPilot** from the
+skill list (or mention `$portpilot`). Put the browser task after it, for example:
+
+```text
+/portpilot Search eBay for a used Pixel 7 and summarize three listings.
+```
+
+For that task, the agent must use PortPilot MCP only. It will not silently
+fall back to built-in web search, another browser tool, or a personal browser
+profile. If PortPilot is disconnected, it stops and tells you instead. The
+skill also keeps one lane for the task and uses `page_newtab` when it needs
+more pages, avoiding unnecessary full-browser processes.
+
+To reinstall the command without reinstalling the package:
+
+```text
+paat install-skill all
+```
+
+PortPilot will update only copies it previously installed. If you already
+created your own skill named `portpilot`, it is left unchanged.
+
+The same setup also writes PortPilot's user-scoped MCP entry to
+`~/.claude.json`, which is shared by Claude Code CLI and Claude Desktop's Code
+tab. If the standalone `claude` command is installed, PortPilot delegates that
+write to `claude mcp add`; otherwise it performs a backed-up, non-destructive
+JSON merge itself.
+
 ## Browser backends
 
 Every lane has a browser backend — pass `browser` to `open` / `reserve_lane`,

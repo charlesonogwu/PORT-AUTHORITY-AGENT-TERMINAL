@@ -14,6 +14,7 @@ import { deleteProfileDir, forgetProfile, listProfiles, selectPruneCandidates, t
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
 import { installShortcut, shortcutStatus, uninstallShortcut } from "./shortcut.js";
 import { installMcpFor, type McpClient } from "./install-mcp.js";
+import { installAgentSkill, type AgentSkillClient } from "./install-skill.js";
 import { formatMissingDependencyMessage, isMissingDependencyError, missingDependencyName } from "./mcp-preflight.js";
 import { ParsedArgs, flagBool, flagString, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
 import { formatLanesTable, formatReserveBlock } from "./format.js";
@@ -940,6 +941,71 @@ async function cmdInstallMcp(ctx: CliContext): Promise<void> {
   if (!allOk) process.exit(1);
 }
 
+async function cmdInstallSkill(ctx: CliContext): Promise<void> {
+  const valid: AgentSkillClient[] = ["codex", "claude"];
+  const target = ctx.args.positional[0];
+  const allFlag = flagBool(ctx.args, "all");
+
+  let clients: AgentSkillClient[];
+  if (!target || target === "all" || allFlag) clients = valid;
+  else if ((valid as string[]).includes(target)) clients = [target as AgentSkillClient];
+  else fail(ctx, `unknown skill client '${target}'. Try: paat install-skill <codex|claude|all>`);
+
+  const results: Array<{
+    client: AgentSkillClient;
+    ok: boolean;
+    skillDir?: string;
+    backupPath?: string | null;
+    action?: "installed" | "updated" | "already-installed" | "conflict";
+    reason?: string;
+    error?: string;
+  }> = [];
+
+  for (const client of clients!) {
+    try {
+      const result = await installAgentSkill(client);
+      results.push({
+        client,
+        ok: result.action !== "conflict",
+        skillDir: result.skillDir,
+        backupPath: result.backupPath,
+        action: result.action,
+        ...(result.reason ? { reason: result.reason } : {}),
+      });
+    } catch (err) {
+      results.push({ client, ok: false, error: (err as Error).message });
+    }
+  }
+
+  const allOk = results.every((result) => result.ok);
+  if (ctx.json) {
+    emit(ctx, { ok: allOk, results });
+    if (!allOk) process.exit(1);
+    return;
+  }
+
+  for (const result of results) {
+    if (!result.ok) {
+      ctx.stderr.write(`x ${result.client}: ${result.reason ?? result.error}\n`);
+      continue;
+    }
+    const label = result.action === "installed"
+      ? "installed"
+      : result.action === "updated"
+        ? "updated"
+        : "already present (no change)";
+    ctx.stdout.write(`+ ${result.client}: ${label}\n`);
+    ctx.stdout.write(`  skill: ${result.skillDir}\n`);
+    if (result.backupPath) ctx.stdout.write(`  backup: ${result.backupPath}\n`);
+  }
+
+  if (allOk) {
+    ctx.stdout.write("\nPortPilot now appears in Codex and Claude Code (including the Desktop Code tab). Restart an open app if it does not refresh automatically.\n");
+  } else {
+    process.exit(1);
+  }
+}
+
 async function cmdAutostart(ctx: CliContext): Promise<void> {
   const sub = ctx.args.positional[0] ?? "status";
   const autostart = await import("./autostart.js");
@@ -1019,6 +1085,8 @@ async function dispatch(args: ParsedArgs): Promise<void> {
       return cmdShortcut(ctx);
     case "install-mcp":
       return cmdInstallMcp(ctx);
+    case "install-skill":
+      return cmdInstallSkill(ctx);
     case "autostart":
       return cmdAutostart(ctx);
     case "prune":

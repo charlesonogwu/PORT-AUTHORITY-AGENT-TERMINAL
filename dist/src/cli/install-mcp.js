@@ -248,6 +248,68 @@ export async function installCodexMcp(opts = {}) {
         action: working !== (raw ?? "") ? "updated" : "installed",
     };
 }
+/** User-scoped MCP config shared by Claude Code CLI and the Desktop Code tab. */
+export function claudeCodeConfigPath(configDir = process.env.CLAUDE_CONFIG_DIR) {
+    return configDir && configDir.trim().length > 0
+        ? join(configDir, ".claude.json")
+        : join(homedir(), ".claude.json");
+}
+async function installClaudeCodeMcpDirect(configPath, command, args) {
+    await mkdir(dirname(configPath), { recursive: true });
+    const raw = await readIfExists(configPath);
+    let existing = {};
+    if (raw !== null && raw.trim().length > 0) {
+        try {
+            existing = JSON.parse(raw);
+            if (existing === null || typeof existing !== "object" || Array.isArray(existing)) {
+                throw new Error("expected a JSON object at the root");
+            }
+        }
+        catch (err) {
+            throw new Error(`could not parse existing Claude Code config (${configPath}): ${err.message}. ` +
+                "Fix the JSON manually, then re-run `paat install-mcp claude-code`.");
+        }
+    }
+    const rawServers = existing.mcpServers;
+    if (rawServers !== undefined &&
+        (rawServers === null || typeof rawServers !== "object" || Array.isArray(rawServers))) {
+        throw new Error(`could not update Claude Code config (${configPath}): mcpServers must be a JSON object.`);
+    }
+    const mcpServers = rawServers ?? {};
+    let migratedLegacy = false;
+    for (const legacyName of LEGACY_MCP_SERVER_NAMES) {
+        if (legacyName === MCP_SERVER_NAME)
+            continue;
+        if (legacyName in mcpServers) {
+            delete mcpServers[legacyName];
+            migratedLegacy = true;
+        }
+    }
+    const newBlock = { type: "stdio", command, args, env: {} };
+    const oldBlock = mcpServers[MCP_SERVER_NAME];
+    if (!migratedLegacy && JSON.stringify(oldBlock) === JSON.stringify(newBlock)) {
+        return {
+            client: "claude-code",
+            configPath,
+            backupPath: null,
+            action: "already-installed",
+        };
+    }
+    let backupPath = null;
+    if (raw !== null) {
+        backupPath = makeBackupName(configPath);
+        await copyFile(configPath, backupPath);
+    }
+    mcpServers[MCP_SERVER_NAME] = newBlock;
+    existing.mcpServers = mcpServers;
+    await writeFile(configPath, JSON.stringify(existing, null, 2) + "\n", "utf8");
+    return {
+        client: "claude-code",
+        configPath,
+        backupPath,
+        action: oldBlock === undefined && !migratedLegacy ? "installed" : "updated",
+    };
+}
 /**
  * Quote a single shell argument so concatenation into a command line is safe.
  * On Windows we double-quote anything with whitespace or shell metacharacters
@@ -320,11 +382,12 @@ export function parseExistingPaatLine(listStdout) {
 }
 /**
  * Install (or update, or no-op) the PAAT MCP server entry in Claude Code's
- * configuration. Delegates to the `claude` CLI so we don't have to encode
- * Claude Code's config format ourselves (it can change between releases).
+ * configuration. Uses the `claude` CLI when available. If only Claude
+ * Desktop's graphical Code tab is installed, safely merges the user-scoped
+ * entry into ~/.claude.json directly; the CLI and Code tab share that file.
  *
  * Failure modes:
- *   - `claude` not on PATH                -> clear error with install link
+ *   - `claude` not on PATH                -> direct ~/.claude.json fallback
  *   - `claude mcp list` errored           -> propagate stderr
  *   - `claude mcp add` errored            -> propagate stderr
  *
@@ -344,22 +407,14 @@ export async function installClaudeCodeMcp(opts = {}) {
     const command = opts.command ?? __defaults.command;
     const args = opts.args ?? __defaults.args;
     const run = opts.runner ?? defaultClaudeRunner;
-    // 1. Sanity-check that claude is reachable. If not, return "skipped" rather
-    //    than throwing — that way `paat install-mcp` (all clients) doesn't fail
-    //    loudly during a postinstall on machines that only use Claude Desktop or
-    //    only Codex. The reason field carries the install hint if the user wants
-    //    to set up Claude Code later.
+    // 1. Prefer Claude's own CLI. The Desktop Code tab can exist without a
+    //    standalone `claude` command, so user scope has a direct JSON fallback.
     const probe = await run(claudeBin, ["--version"]);
     if (!probe.ok) {
-        return {
-            client: "claude-code",
-            configPath: "<claude CLI not installed>",
-            backupPath: null,
-            action: "skipped",
-            reason: `'${claudeBin}' is not on PATH. Install Claude Code from ` +
-                `https://docs.claude.com/en/claude-code/quickstart, then run ` +
-                `\`paat install-mcp claude-code\` to wire it up.`,
-        };
+        if (scope !== "user") {
+            throw new Error(`'${claudeBin}' is not on PATH, and the safe direct fallback only supports user scope.`);
+        }
+        return installClaudeCodeMcpDirect(opts.configPath ?? claudeCodeConfigPath(), command, args);
     }
     // 2. Check whether PAAT is already registered — under either the canonical
     //    name OR any legacy name. Legacy entries get migrated (removed) so the
