@@ -102,10 +102,18 @@ COMMANDS:
                   status                                           show whether autostart is enabled
   install-mcp <client>          Wire PAAT into an AI agent's MCP config (no manual JSON edit)
                   claude                                           Claude Desktop  → %APPDATA%\\Claude\\claude_desktop_config.json
-                  claude-code                                      Claude Code CLI → delegates to \`claude mcp add\` (user scope)
+                  claude-code                                      Claude Code CLI + Desktop Code tab → ~/.claude.json
+                                                                   (uses \`claude mcp add\` when the CLI is available)
                   codex                                            Codex Desktop   → ~\\.codex\\config.toml
                   all (default)                                    all three — same as 'install-mcp' with no args
-                  (Claude / Codex configs get a timestamped backup; claude-code uses Claude Code's own CLI which has its own undo via \`claude mcp remove\`)
+                  (JSON configs get timestamped backups; CLI-managed entries can be removed with \`claude mcp remove\`)
+  install-skill <client>        Add the task-scoped /portpilot command to Codex and Claude Code
+                  codex                                            Codex skill → ~/.codex/skills/portpilot
+                  claude                                           Claude Code (CLI and Desktop Code tab) → ~/.claude/skills/portpilot
+                  all (default)                                    install both integrations
+                  The command uses only PortPilot MCP for that task and never
+                  falls back to another browser tool. Existing unmanaged skills
+                  named portpilot are left unchanged.
   mcp                           Run the MCP server over stdio
   help                          Show this help
 

@@ -228,7 +228,13 @@ function main() {
     if (!mcpOk) warn("install-mcp returned a non-zero status — re-run `paat install-mcp` manually.");
   }
 
-  if (mcpOk) {
+  log("Installing the /portpilot command for Codex and Claude Code…");
+  const skillOk = run(cliJs, ["install-skill"]);
+  if (!skillOk) {
+    warn("install-skill returned a non-zero status — re-run `paat install-skill` manually.");
+  }
+
+  if (mcpOk && skillOk) {
     log("Done. portpilot is ready. Open the dashboard with `portpilot` or `paat dashboard`.");
   }
 }

@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A task-scoped PortPilot skill for Codex and Claude Code, including the Code
+  tab inside Claude Desktop. Invoking `/portpilot` in Claude Code or selecting
+  PortPilot from Codex's slash skill list forces that browser task through
+  PortPilot MCP and refuses fallback browsing. Ordinary Claude Desktop Chat
+  and Cowork do not load local Claude Code skills.
+- `paat install-skill <codex|claude|all>` installs the integration safely and
+  idempotently; npm postinstall wires it automatically.
+- Claude Code MCP setup now falls back to a backed-up merge into
+  `~/.claude.json` when the standalone `claude` CLI is unavailable, so the
+  Desktop Code tab receives both the command and the PortPilot tools.
+
+### Safety
+
+- The skill reuses one lane per task, uses `page_newtab` for additional pages,
+  and never permits personal/default browser profiles.
+- The installer refuses to overwrite an unmanaged user skill named
+  `portpilot`.
+
 ---
 
 ## [0.4.0] — macOS browser safety/runtime foundation

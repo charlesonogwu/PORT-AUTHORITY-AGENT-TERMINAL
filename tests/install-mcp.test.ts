@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  claudeCodeConfigPath,
   installClaudeCodeMcp,
   installClaudeMcp,
   installCodexMcp,
@@ -36,6 +37,11 @@ const EXPECTED_NAME = "port-authority-agent-terminal";
 function freshTempDir(): string {
   return mkdtempSync(join(tmpdir(), "paat-install-mcp-"));
 }
+
+test("claudeCodeConfigPath: stores global MCP config under CLAUDE_CONFIG_DIR", () => {
+  const configDir = join("C:\\", "isolated-claude-config");
+  assert.equal(claudeCodeConfigPath(configDir), join(configDir, ".claude.json"));
+});
 
 /* -------------------------------------------------------------------------- */
 /*  Claude (JSON)                                                             */
@@ -539,18 +545,31 @@ test("installClaudeCodeMcp: replaces an existing canonical entry with a differen
   ]);
 });
 
-test("installClaudeCodeMcp: returns action='skipped' when `claude` is not on PATH (not thrown)", async () => {
-  // We DO NOT want this to throw — that would make `paat install-mcp` (all
-  // clients) fail loudly during postinstall on a machine that doesn't have
-  // Claude Code. Returning "skipped" is the right behavior so postinstall
-  // can keep going and wire up the OTHER clients cleanly.
-  const { runner } = buildMockRunner([fail("command not found", 127)]);
-  const r = await installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] });
-  assert.equal(r.client, "claude-code");
-  assert.equal(r.action, "skipped");
-  assert.equal(r.backupPath, null);
-  assert.match(r.configPath, /not installed/i);
-  assert.match(r.reason ?? "", /Install Claude Code from/i);
+test("installClaudeCodeMcp: writes user config directly when the CLI is unavailable", async () => {
+  const dir = freshTempDir();
+  try {
+    const configPath = join(dir, ".claude.json");
+    const { runner } = buildMockRunner([fail("command not found", 127)]);
+    const r = await installClaudeCodeMcp({
+      runner,
+      configPath,
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: ["C:\\paat\\index.js", "mcp"],
+    });
+
+    assert.equal(r.client, "claude-code");
+    assert.equal(r.action, "installed");
+    assert.equal(r.configPath, configPath);
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    assert.deepEqual(config.mcpServers[EXPECTED_NAME], {
+      type: "stdio",
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: ["C:\\paat\\index.js", "mcp"],
+      env: {},
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("installClaudeCodeMcp: propagates `claude mcp list` errors with stderr", async () => {
@@ -612,11 +631,30 @@ test("installClaudeCodeMcp: honors custom claudeBin, scope, command, args option
   );
 });
 
-test("installClaudeCodeMcp: 'skipped' result still includes a useful reason field", async () => {
-  const { runner } = buildMockRunner([fail("ENOENT", -1)]);
-  const r = await installClaudeCodeMcp({ runner, command: "paat", args: ["mcp"] });
-  assert.equal(r.action, "skipped");
-  assert.ok(r.reason && r.reason.length > 0, "skipped results must carry a reason");
+test("installClaudeCodeMcp: direct fallback preserves unrelated config and migrates legacy entries", async () => {
+  const dir = freshTempDir();
+  try {
+    const configPath = join(dir, ".claude.json");
+    writeFileSync(configPath, JSON.stringify({
+      theme: "dark",
+      mcpServers: {
+        github: { type: "http", url: "https://example.invalid/mcp" },
+        paat: { type: "stdio", command: "old", args: [] },
+      },
+    }));
+    const { runner } = buildMockRunner([fail("ENOENT", -1)]);
+    const r = await installClaudeCodeMcp({ runner, configPath, command: "node", args: ["paat.js", "mcp"] });
+
+    assert.equal(r.action, "updated");
+    assert.ok(r.backupPath && existsSync(r.backupPath));
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    assert.equal(config.theme, "dark");
+    assert.equal(config.mcpServers.paat, undefined);
+    assert.equal(config.mcpServers.github.url, "https://example.invalid/mcp");
+    assert.equal(config.mcpServers[EXPECTED_NAME].command, "node");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("MCP_SERVER_NAME constant exports the canonical name", () => {

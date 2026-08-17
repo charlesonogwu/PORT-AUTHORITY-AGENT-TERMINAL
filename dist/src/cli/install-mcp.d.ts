@@ -131,9 +131,13 @@ export interface InstallClaudeCodeOptions {
     command?: string;
     /** Args to that command. Defaults to ["mcp"]. */
     args?: string[];
+    /** Override ~/.claude.json for the no-CLI fallback. Used by tests. */
+    configPath?: string;
     /** Injectable for tests. If omitted we shell out for real via child_process.spawn. */
     runner?: ClaudeCliRunner;
 }
+/** User-scoped MCP config shared by Claude Code CLI and the Desktop Code tab. */
+export declare function claudeCodeConfigPath(configDir?: string | undefined): string;
 /**
  * Parse `claude mcp list` output looking for a specific server name. Format:
  *   "<name>: <command> - ✓ Connected"
@@ -154,11 +158,12 @@ export declare function parseExistingPaatLine(listStdout: string): {
 };
 /**
  * Install (or update, or no-op) the PAAT MCP server entry in Claude Code's
- * configuration. Delegates to the `claude` CLI so we don't have to encode
- * Claude Code's config format ourselves (it can change between releases).
+ * configuration. Uses the `claude` CLI when available. If only Claude
+ * Desktop's graphical Code tab is installed, safely merges the user-scoped
+ * entry into ~/.claude.json directly; the CLI and Code tab share that file.
  *
  * Failure modes:
- *   - `claude` not on PATH                -> clear error with install link
+ *   - `claude` not on PATH                -> direct ~/.claude.json fallback
  *   - `claude mcp list` errored           -> propagate stderr
  *   - `claude mcp add` errored            -> propagate stderr
  *

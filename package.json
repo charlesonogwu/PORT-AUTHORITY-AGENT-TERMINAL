@@ -53,6 +53,7 @@
     "gui/src-tauri/capabilities",
     "gui/src-tauri/icons",
     "gui/src-tauri/src",
+    "skills/portpilot",
     "scripts/postinstall.cjs",
     "scripts/build-dashboard-tauri.cjs",
     "README.md",

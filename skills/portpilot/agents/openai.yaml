@@ -1,0 +1,6 @@
+interface:
+  display_name: "PortPilot"
+  short_description: "Use only PortPilot for browser work"
+  default_prompt: "Use $portpilot to complete this browser task only through PortPilot."
+policy:
+  allow_implicit_invocation: false
