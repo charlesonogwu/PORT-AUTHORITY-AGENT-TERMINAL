@@ -119,7 +119,7 @@ Restart the app and the agent has these tools:
 - **`open`** — reserve + launch + navigate in one call, the one to reach for.
   Takes `browser: "chrome" | "edge" | "firefox"` (default chrome, or whatever
   you picked as the dashboard's default browser).
-- Lane management: `reserve_lane`, `check_lane`, `release_lane`,
+- Lane management: `reserve_lane`, `check_lane`, `release_lane`, `close_browser`,
   `launch_browser_lane` (any backend), `launch_chrome_lane` (kept for
   back-compat), `list_lanes`, `find_free_lane`, `scan_ports`, `doctor`.
 - **Page control** — drive the lane's browser through one uniform interface,
@@ -132,6 +132,21 @@ Restart the app and the agent has these tools:
 
 Then a prompt like *"Open https://example.com via PAAT in this folder"* just works:
 the agent calls `open` and the session appears on the dashboard.
+
+### Persistent browser lifetime
+
+The native PortPilot app starts one local supervisor that owns persistent
+browser launches. MCP servers and CLI commands are clients of that supervisor;
+they do not own the Chrome, Edge, or Firefox process tree. An MCP cancellation,
+agent restart, or controller disconnect therefore does not close every browser.
+Restarted agents reconnect only after PortPilot re-verifies the exact lane,
+browser, profile, debugging port, and live process.
+
+`release_lane` only changes registry bookkeeping. To actually exit one browser,
+call `close_browser` (or `paat close-browser`), which performs a fresh ownership
+check and refuses foreign or unverifiable processes. If the supervisor is not
+running, persistent launch fails clearly instead of falling back to a
+controller-owned browser; open or restart the PortPilot dashboard and retry.
 
 ## Browser backends
 
@@ -219,6 +234,7 @@ How to use it:
    Page.bringToFront() or Browser.setWindowBounds with on-screen coordinates,
    since both yank the window onto the user's screen.
 5. Release when finished: call release_lane (it does not kill the browser).
+   Use close_browser only when the browser itself should explicitly exit.
 
 No PortPilot MCP tools in this agent? Use the CLI instead:
    paat open --owner <you> --cwd "<path>" --browser chrome --mode background

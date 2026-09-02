@@ -10,6 +10,8 @@ import { loadConfig } from "../core/config.js";
 import { portpilotHome, profilesDir } from "../core/paths.js";
 import { BrowserKind, Lane, isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
 import { PageControlError, PageController, openPageController } from "../core/pagecontrol.js";
+import { createSupervisorClient } from "../supervisor/client.js";
+import { launchPersistentBrowser } from "../supervisor/routing.js";
 
 /**
  * Build the MCP server, registering one tool per CLI verb. The MCP server
@@ -112,11 +114,12 @@ export function buildMcpServer(): McpServer {
       }
       // Already running our browser with the matching profile?
       if (result.verdict.kind === "safe-attach") {
+        const attached = await launchPersistentBrowser(lane, {});
         return jsonResult({
           ok: true,
           alreadyRunning: true,
           browser,
-          lane,
+          lane: { ...lane, browserPid: attached.pid, browserState: "active" },
           dashboard: "PortPilot dashboard app (native; the user opens it from their desktop or with: paat dashboard)",
           message: `${label} was already running with this lane's profile. Reusing it.`,
         });
@@ -133,13 +136,10 @@ export function buildMcpServer(): McpServer {
       } catch (err) {
         return jsonResult({ ok: false, error: (err as Error).message, lane });
       }
-      const launch = await launchBrowserForLane(lane, {
+      const launch = await launchPersistentBrowser(lane, {
         mode,
         ...(args.url ? { initialUrl: args.url } : {}),
       });
-      await updateRegistry((lanes) =>
-        lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)),
-      );
       return jsonResult({
         ok: true,
         launched: true,
@@ -153,6 +153,31 @@ export function buildMcpServer(): McpServer {
           ? { note: "Firefox lane: debug port serves WebDriver BiDi (ws://127.0.0.1:" + lane.chromeDebugPort + "/session), not Chrome CDP. Drive it with the page_* tools (page_goto/page_text/page_eval/page_click/page_fill/page_screenshot) — they speak BiDi for you." }
           : {}),
       });
+    },
+  );
+
+  server.registerTool(
+    "close_browser",
+    {
+      title: "Explicitly close one persistent lane browser",
+      description:
+        "Close exactly one PortPilot browser after re-verifying its browser type, debug port, pid, and dedicated profile. " +
+        "MCP disconnects and release_lane never close browsers; use this only when the browser should actually exit.",
+      inputSchema: {
+        owner: z.string().min(1),
+        cwd: z.string().min(1),
+        sessionId: z.string().optional(),
+      },
+    },
+    async (args) => {
+      const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}) });
+      if (!lane) return jsonResult({ ok: false, error: "no matching lane found" });
+      try {
+        const result = await createSupervisorClient().close({ laneId: lane.id });
+        return jsonResult({ ok: true, ...result });
+      } catch (error) {
+        return jsonResult({ ok: false, error: `PortPilot supervisor close failed: ${(error as Error).message}` });
+      }
     },
   );
 
@@ -333,15 +358,30 @@ export function buildMcpServer(): McpServer {
         return jsonResult({ ok: false, error: `unsafe to launch Chrome: ${result.verdict.kind}`, verdict: result.verdict });
       }
       if (result.verdict.kind === "safe-attach") {
-        return jsonResult({ ok: true, attached: true, lane, message: "Chrome already running with the matching profile; attach instead of launching." });
+        const attached = await launchPersistentBrowser(lane, {});
+        return jsonResult({ ok: true, attached: true, lane, pid: attached.pid, message: "Chrome already running with the matching profile; attach instead of launching." });
       }
       const cfg = await loadConfig();
       const mode = resolveChromeMode(args.mode, cfg.chromeMode);
-      const launch = await launchChromeForLane(lane, { dryRun: args.dryRun, binaryPath: args.binaryPath, mode });
-      await updateRegistry((lanes) =>
-        lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)),
-      );
-      return jsonResult({ ok: true, launched: !args.dryRun, mode, lane, command: { binary: launch.binary, args: launch.args }, pid: launch.pid });
+      if (args.dryRun) {
+        const plan = await launchChromeForLane(lane, { dryRun: true, binaryPath: args.binaryPath, mode });
+        return jsonResult({
+          ok: true,
+          launched: false,
+          mode,
+          lane,
+          command: { binary: plan.binary, args: plan.args },
+        });
+      }
+      const launch = await launchPersistentBrowser(lane, { binaryPath: args.binaryPath, mode });
+      return jsonResult({
+        ok: true,
+        launched: !args.dryRun,
+        mode,
+        lane,
+        command: launch.command,
+        pid: launch.pid,
+      });
     },
   );
 
@@ -380,7 +420,8 @@ export function buildMcpServer(): McpServer {
         return jsonResult({ ok: false, error: `unsafe to launch ${label}: ${result.verdict.kind}`, verdict: result.verdict });
       }
       if (result.verdict.kind === "safe-attach") {
-        return jsonResult({ ok: true, attached: true, browser, lane, message: `${label} already running with the matching profile; attach instead of launching.` });
+        const attached = await launchPersistentBrowser(lane, {});
+        return jsonResult({ ok: true, attached: true, browser, lane, pid: attached.pid, message: `${label} already running with the matching profile; attach instead of launching.` });
       }
       const cfg = await loadConfig();
       const mode = resolveChromeMode(args.mode, cfg.chromeMode);
@@ -389,17 +430,25 @@ export function buildMcpServer(): McpServer {
       } catch (err) {
         return jsonResult({ ok: false, error: (err as Error).message, lane });
       }
-      const launch = await launchBrowserForLane(lane, { dryRun: args.dryRun, binaryPath: args.binaryPath, mode });
-      await updateRegistry((lanes) =>
-        lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)),
-      );
+      if (args.dryRun) {
+        const plan = await launchBrowserForLane(lane, { dryRun: true, binaryPath: args.binaryPath, mode });
+        return jsonResult({
+          ok: true,
+          launched: false,
+          browser,
+          mode,
+          lane,
+          command: { binary: plan.binary, args: plan.args },
+        });
+      }
+      const launch = await launchPersistentBrowser(lane, { binaryPath: args.binaryPath, mode });
       return jsonResult({
         ok: true,
         launched: !args.dryRun,
         browser,
         mode,
         lane,
-        command: { binary: launch.binary, args: launch.args },
+        command: launch.command,
         pid: launch.pid,
         ...(browser === "firefox"
           ? { note: "Firefox lane: debug port serves WebDriver BiDi (ws://127.0.0.1:" + lane.chromeDebugPort + "/session), not Chrome CDP. Drive it with the page_* tools (page_goto/page_text/page_eval/page_click/page_fill/page_screenshot) — they speak BiDi for you." }

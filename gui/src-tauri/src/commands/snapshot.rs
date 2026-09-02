@@ -22,7 +22,7 @@
 // arrays + zeroed summary + a warning string so the dashboard surfaces the
 // install issue instead of going blank.
 
-use crate::cli::run_cli_json;
+use crate::cli::{run_cli_json, supervisor_startup_error};
 use serde_json::{json, Value};
 
 /// 0.2.3 fix: async + spawn_blocking. Previously this was a sync
@@ -36,12 +36,39 @@ use serde_json::{json, Value};
 /// being computed.
 #[tauri::command]
 pub async fn get_snapshot() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(|| run_cli_json(&["dashboard-snapshot"]))
+    tauri::async_runtime::spawn_blocking(|| {
+        (
+            run_cli_json(&["dashboard-snapshot"]),
+            run_cli_json(&["supervisor", "status"]),
+        )
+    })
         .await
         .map_err(|e| format!("snapshot worker join failed: {}", e))
-        .and_then(|res| match res {
-            Ok(v) => Ok(v),
-            Err(e) => Ok(json!({
+        .map(|(res, supervisor_status)| match res {
+            Ok(mut v) => {
+                let mut add_warning = |warning: String| {
+                    if let Some(object) = v.as_object_mut() {
+                        let warnings = object.entry("warnings").or_insert_with(|| json!([]));
+                        if let Some(array) = warnings.as_array_mut() {
+                            array.push(json!(warning));
+                        }
+                    }
+                };
+                if let Some(error) = supervisor_startup_error() {
+                    add_warning(format!("Persistent browser supervisor unavailable: {}", error));
+                }
+                let running = supervisor_status
+                    .as_ref()
+                    .ok()
+                    .and_then(|status| status.get("running"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                if !running {
+                    add_warning("Persistent browser supervisor is not responding; new browser launches are disabled until PortPilot is restarted.".into());
+                }
+                v
+            }
+            Err(e) => json!({
                 "ok": false,
                 "generatedAt": "",
                 "scanSource": "empty",
@@ -54,6 +81,6 @@ pub async fn get_snapshot() -> Result<Value, String> {
                 "registryHealth": { "portpilot": { "exists": false, "lockHealthy": false } },
                 "conflicts": [],
                 "warnings": [format!("paat CLI unavailable: {}", e)]
-            })),
+            }),
         })
 }

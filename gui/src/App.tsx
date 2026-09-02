@@ -1495,6 +1495,13 @@ export function App() {
         )}
         {snap && (
           <>
+            {(snap.warnings?.length ?? 0) > 0 && (
+              <Alert variant="destructive" className="mb-6">
+                <AlertTriangle className="size-4" />
+                <AlertTitle>PortPilot needs attention</AlertTitle>
+                <AlertDescription>{snap.warnings!.join(" ")}</AlertDescription>
+              </Alert>
+            )}
             <ConflictsBanner snap={snap} />
             <div className="mb-3 flex items-center justify-between">
               <SectionLabel className="mb-0">Live Chrome sessions</SectionLabel>
