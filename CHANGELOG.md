@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.1] — persistent browser supervisor
+
+### Fixed
+
+- Persistent browser processes are now launched by a user-scoped PortPilot
+  supervisor started by the native dashboard, rather than by disposable MCP
+  workers. Cancelling or restarting an MCP controller no longer owns the
+  browser process lifetime.
+- MCP and CLI reconnect through an authenticated local socket and reverify the
+  lane's browser, profile, debugging port, and process before reuse.
+
+### Added
+
+- `close_browser` (MCP) and `close-browser` (CLI) explicitly terminate one
+  reverified lane browser. `release_lane` remains bookkeeping-only.
+- Registry metadata distinguishes browser lifecycle and supervisor identity
+  without changing existing lane-allocation status semantics.
+- Windows lifecycle coverage proves a supervised process survives controller
+  termination, reconnects with the same PID, and exits only on explicit close.
+
+---
+
 ## [0.4.0] — macOS browser safety/runtime foundation
 
 ### Added

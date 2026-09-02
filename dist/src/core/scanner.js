@@ -5,7 +5,9 @@ function runCommand(cmd, args, opts = {}) {
         const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, signal: opts.signal });
         let stdout = "";
         let stderr = "";
+        let timedOut = false;
         const timeout = setTimeout(() => {
+            timedOut = true;
             child.kill();
         }, opts.timeoutMs ?? 8000);
         child.stdout.on("data", (b) => { stdout += b.toString("utf8"); });
@@ -16,9 +18,19 @@ function runCommand(cmd, args, opts = {}) {
         });
         child.on("close", (code) => {
             clearTimeout(timeout);
+            if (timedOut) {
+                reject(new Error(`${cmd} timed out after ${opts.timeoutMs ?? 8000}ms`));
+                return;
+            }
             resolve({ stdout, stderr, code });
         });
     });
+}
+/** lsof exits 1 with no output when there are no matching listeners. A null
+ * exit means the process was killed/timed out and must never mean "no ports". */
+export function isAuthoritativeLsofResult(result) {
+    return result.code === 0
+        || (result.code === 1 && !result.stdout.trim() && !result.stderr.trim());
 }
 /**
  * Detect whether the user has Sonar installed and on PATH.
@@ -116,7 +128,7 @@ export function parseUnixPsOutput(stdout) {
     }
     return byPid;
 }
-async function lookupUnixProcesses(pids) {
+async function lookupUnixProcesses(pids, signal) {
     const byPid = new Map();
     const wanted = Array.from(new Set(Array.from(pids).filter((pid) => Number.isInteger(pid) && pid > 0)));
     // Keep argv small on hosts with many listeners. Values are numeric PIDs only;
@@ -124,7 +136,7 @@ async function lookupUnixProcesses(pids) {
     for (let start = 0; start < wanted.length; start += 100) {
         const batch = wanted.slice(start, start + 100);
         try {
-            const res = await runCommand("ps", ["-ww", "-p", batch.join(","), "-o", "pid=", "-o", "command="], { timeoutMs: 8_000 });
+            const res = await runCommand("ps", ["-ww", "-p", batch.join(","), "-o", "pid=", "-o", "command="], { signal, timeoutMs: 8_000 });
             for (const [pid, meta] of parseUnixPsOutput(res.stdout))
                 byPid.set(pid, meta);
         }
@@ -135,15 +147,15 @@ async function lookupUnixProcesses(pids) {
     }
     return { byPid };
 }
-async function lookupWindowsProcesses(pids) {
+async function lookupWindowsProcesses(pids, signal) {
     const byPid = new Map();
     const wanted = Array.from(new Set(Array.from(pids).filter((p) => Number.isInteger(p) && p > 0)));
     if (wanted.length === 0)
         return { byPid };
     const filter = wanted.map((p) => `ProcessId=${p}`).join(" OR ");
-    const ps = `Get-CimInstance Win32_Process -Filter "${filter.replace(/"/g, '\\"')}" | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress -Depth 3`;
+    const ps = `Get-CimInstance Win32_Process -Filter "${filter.replace(/"/g, '\\"')}" | Select-Object ProcessId,Name,CommandLine,@{Name='CreationDate';Expression={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress -Depth 3`;
     try {
-        const res = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeoutMs: 8000 });
+        const res = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { signal, timeoutMs: 8000 });
         if (!res.stdout.trim())
             return { byPid };
         let parsed;
@@ -159,7 +171,11 @@ async function lookupWindowsProcesses(pids) {
                 continue;
             const o = item;
             if (typeof o.ProcessId === "number") {
-                byPid.set(o.ProcessId, { command: o.Name, commandLine: o.CommandLine ?? undefined });
+                byPid.set(o.ProcessId, {
+                    command: o.Name,
+                    commandLine: o.CommandLine ?? undefined,
+                    processStartedAt: typeof o.CreationDate === "string" ? o.CreationDate : undefined,
+                });
             }
         }
     }
@@ -168,15 +184,20 @@ async function lookupWindowsProcesses(pids) {
     }
     return { byPid };
 }
-async function scanWindowsNative(_opts) {
+async function scanWindowsNative(opts) {
     // Get-NetTCPConnection is the modern API; fall back to netstat if missing.
     const ps = `Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object LocalPort,OwningProcess,LocalAddress | ConvertTo-Json -Compress -Depth 3`;
     let stdout = "";
+    let primaryAvailable = false;
     try {
-        const res = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeoutMs: 8000 });
-        stdout = res.stdout;
+        const res = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { signal: opts.signal, timeoutMs: 8000 });
+        if (res.code === 0) {
+            primaryAvailable = true;
+            stdout = res.stdout;
+        }
     }
     catch {
+        opts.signal?.throwIfAborted();
         // fall through to netstat
     }
     const seen = new Map();
@@ -202,9 +223,13 @@ async function scanWindowsNative(_opts) {
             // fall through
         }
     }
+    let fallbackAvailable = false;
     if (seen.size === 0) {
         try {
-            const res = await runCommand("netstat.exe", ["-ano", "-p", "TCP"], { timeoutMs: 6000 });
+            const res = await runCommand("netstat.exe", ["-ano", "-p", "TCP"], { signal: opts.signal, timeoutMs: 6000 });
+            fallbackAvailable = res.code === 0;
+            if (!fallbackAvailable)
+                throw new Error(`netstat exited with code ${res.code}`);
             for (const line of res.stdout.split(/\r?\n/)) {
                 const s = line.trim();
                 if (!s.toUpperCase().includes("LISTENING"))
@@ -228,11 +253,15 @@ async function scanWindowsNative(_opts) {
             }
         }
         catch {
+            opts.signal?.throwIfAborted();
             // give up — return whatever we have
         }
     }
+    if (!primaryAvailable && !fallbackAvailable) {
+        throw new Error("PortPilot native scanner unavailable: both Get-NetTCPConnection and netstat failed");
+    }
     const observations = Array.from(seen.values());
-    const lookup = await lookupWindowsProcesses(observations.map((o) => o.pid).filter((p) => typeof p === "number"));
+    const lookup = await lookupWindowsProcesses(observations.map((o) => o.pid).filter((p) => typeof p === "number"), opts.signal);
     for (const obs of observations) {
         if (typeof obs.pid !== "number")
             continue;
@@ -240,18 +269,21 @@ async function scanWindowsNative(_opts) {
         if (meta) {
             obs.command = meta.command;
             obs.commandLine = meta.commandLine;
+            obs.processStartedAt = meta.processStartedAt;
         }
     }
     return observations;
 }
-async function scanUnixNative(_opts) {
+async function scanUnixNative(opts) {
     // lsof gives us listener PID/name; ps supplies the complete argv needed to
     // prove a Chromium --user-data-dir or Firefox -profile belongs to a lane.
+    let lsofAvailable = false;
     try {
-        const res = await runCommand("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"], { timeoutMs: 6000 });
+        const res = await runCommand("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"], { signal: opts.signal, timeoutMs: 6000 });
+        lsofAvailable = isAuthoritativeLsofResult(res);
         if (res.stdout.trim()) {
             const observations = parseLsofOutput(res.stdout);
-            const lookup = await lookupUnixProcesses(observations.map((observation) => observation.pid).filter((pid) => typeof pid === "number"));
+            const lookup = await lookupUnixProcesses(observations.map((observation) => observation.pid).filter((pid) => typeof pid === "number"), opts.signal);
             for (const observation of observations) {
                 if (typeof observation.pid !== "number")
                     continue;
@@ -265,14 +297,22 @@ async function scanUnixNative(_opts) {
         }
     }
     catch {
+        opts.signal?.throwIfAborted();
         // fall through to ss
     }
+    let ssAvailable = false;
     try {
-        const res = await runCommand("ss", ["-tlnp"], { timeoutMs: 6000 });
+        const res = await runCommand("ss", ["-tlnp"], { signal: opts.signal, timeoutMs: 6000 });
+        ssAvailable = res.code === 0;
+        if (!ssAvailable)
+            throw new Error(`ss exited with code ${res.code}`);
         return parseSsOutput(res.stdout);
     }
     catch {
-        return [];
+        opts.signal?.throwIfAborted();
+        if (lsofAvailable)
+            return [];
+        throw new Error("PortPilot native scanner unavailable: both lsof and ss failed");
     }
 }
 function parseLsofOutput(stdout) {
@@ -333,6 +373,7 @@ function parseSsOutput(stdout) {
     return out;
 }
 export async function scanNative(opts = {}) {
+    opts.signal?.throwIfAborted();
     if (isWindows())
         return scanWindowsNative(opts);
     return scanUnixNative(opts);

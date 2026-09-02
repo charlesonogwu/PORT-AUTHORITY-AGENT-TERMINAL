@@ -85,6 +85,7 @@ export interface DashboardSnapshot {
   generatedAt: string
   scanSource: "sonar" | "native" | "empty"
   scanErrors: string[]
+  warnings?: string[]
   home: string
   registryPath: string
   config: {

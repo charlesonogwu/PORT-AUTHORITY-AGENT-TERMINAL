@@ -15,6 +15,11 @@ COMMANDS:
                   [--session <id>] [--json]
   release --owner <n> --cwd <p> Mark a lane as released
                   [--session <id>] [--remove] (delete the entry instead of marking)
+  close-browser --owner <n> --cwd <p>
+                                Explicitly close exactly one reverified lane browser
+                  [--session <id>] [--json]
+                       MCP/controller disconnects never close browsers. release remains
+                       bookkeeping-only; close-browser terminates the verified process.
   next [--range 9322-9399]      Find the next free port in a range
                   [--json]
   doctor                        Audit registry vs. live ports, suggest cleanups
@@ -107,6 +112,7 @@ COMMANDS:
                   all (default)                                    all three — same as 'install-mcp' with no args
                   (Claude / Codex configs get a timestamped backup; claude-code uses Claude Code's own CLI which has its own undo via \`claude mcp remove\`)
   mcp                           Run the MCP server over stdio
+  supervisor <serve|status>     Internal user-scoped persistent-browser supervisor
   help                          Show this help
 
 GLOBAL FLAGS:

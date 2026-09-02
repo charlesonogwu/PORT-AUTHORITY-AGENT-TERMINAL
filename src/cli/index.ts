@@ -18,6 +18,7 @@ import { formatMissingDependencyMessage, isMissingDependencyError, missingDepend
 import { ParsedArgs, flagBool, flagString, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
 import { formatLanesTable, formatReserveBlock } from "./format.js";
 import { HELP } from "./help.js";
+import { launchPersistentBrowser } from "../supervisor/routing.js";
 
 interface CliContext {
   args: ParsedArgs;
@@ -314,7 +315,8 @@ async function cmdOpen(ctx: CliContext): Promise<void> {
     fail(ctx, `unsafe to launch ${label} on lane ${lane.id}: ${result.verdict.kind}. Run portpilot doctor for details.`, 3);
   }
   if (result.verdict.kind === "safe-attach") {
-    if (ctx.json) emit(ctx, { ok: true, alreadyRunning: true, browser, lane });
+    const attached = await launchPersistentBrowser(lane, {});
+    if (ctx.json) emit(ctx, { ok: true, alreadyRunning: true, browser, lane, pid: attached.pid });
     else ctx.stdout.write(`${label} already running on port ${lane.chromeDebugPort} with the matching profile. Reusing it.\n`);
     return;
   }
@@ -327,19 +329,24 @@ async function cmdOpen(ctx: CliContext): Promise<void> {
   } catch (err) {
     fail(ctx, (err as Error).message, 1);
   }
-  const launch = await launchBrowserForLane(lane, {
-    dryRun,
+  if (dryRun) {
+    const plan = await launchBrowserForLane(lane, {
+      dryRun: true,
+      binaryPath: bin,
+      mode,
+      ...(url ? { initialUrl: url } : {}),
+    });
+    if (ctx.json) emit(ctx, { ok: true, launched: false, browser, mode, lane, navigatedTo: url ?? null, command: { binary: plan.binary, args: plan.args } });
+    else ctx.stdout.write(`Would launch (${browser}, ${mode}): ${plan.binary} ${plan.args.join(" ")}\n`);
+    return;
+  }
+  const launch = await launchPersistentBrowser(lane, {
     binaryPath: bin,
     mode,
     ...(url ? { initialUrl: url } : {}),
   });
-  await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
   if (ctx.json) {
-    emit(ctx, { ok: true, launched: !dryRun, browser, mode, lane, pid: launch.pid, navigatedTo: url ?? null, command: { binary: launch.binary, args: launch.args } });
-    return;
-  }
-  if (dryRun) {
-    ctx.stdout.write(`Would launch (${browser}, ${mode}): ${launch.binary} ${launch.args.join(" ")}\n`);
+    emit(ctx, { ok: true, launched: true, browser, mode, lane, pid: launch.pid, navigatedTo: url ?? null, command: launch.command });
     return;
   }
   ctx.stdout.write(`Launched ${label} (pid=${launch.pid ?? "?"}, mode=${mode})\nDebug port: ${lane.chromeDebugPort}\nProfile:    ${lane.chromeProfileDir}\n`);
@@ -430,7 +437,8 @@ async function cmdLaunchChrome(ctx: CliContext): Promise<void> {
     fail(ctx, `unsafe to launch Chrome: ${result.verdict.kind}. Run portpilot doctor for details.`, 3);
   }
   if (result.verdict.kind === "safe-attach") {
-    if (ctx.json) emit(ctx, { ok: true, attached: true, lane });
+    const attached = await launchPersistentBrowser(lane!, {});
+    if (ctx.json) emit(ctx, { ok: true, attached: true, lane, pid: attached.pid });
     else ctx.stdout.write(`Chrome already running on port ${lane!.chromeDebugPort} with the matching profile. Attach instead.\n`);
     return;
   }
@@ -439,13 +447,26 @@ async function cmdLaunchChrome(ctx: CliContext): Promise<void> {
   // --mode wins, then PORTPILOT_CHROME_MODE env, then config, then "visible".
   const cfg = await loadConfig();
   const mode = resolveChromeMode(flagString(ctx.args, "mode"), cfg.chromeMode);
-  const launch = await launchChromeForLane(lane!, { dryRun, binaryPath: bin, mode });
-  await updateRegistry((lanes) => lanes.map((l) => (l.id === lane!.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
-  if (ctx.json) emit(ctx, { ok: true, launched: !dryRun, mode, lane, command: { binary: launch.binary, args: launch.args }, pid: launch.pid });
-  else {
-    if (dryRun) ctx.stdout.write(`Would launch (${mode}): ${launch.binary} ${launch.args.join(" ")}\n`);
-    else ctx.stdout.write(`Launched ${launch.binary} (pid=${launch.pid ?? "?"}, mode=${mode})\nDebug port: ${lane!.chromeDebugPort}\nProfile:    ${lane!.chromeProfileDir}\n`);
+  if (dryRun) {
+    const plan = await launchChromeForLane(lane!, { dryRun: true, binaryPath: bin, mode });
+    if (ctx.json) emit(ctx, { ok: true, launched: false, mode, lane, command: { binary: plan.binary, args: plan.args } });
+    else ctx.stdout.write(`Would launch (${mode}): ${plan.binary} ${plan.args.join(" ")}\n`);
+    return;
   }
+  const launch = await launchPersistentBrowser(lane!, { binaryPath: bin, mode });
+  if (ctx.json) emit(ctx, { ok: true, launched: true, mode, lane, command: launch.command, pid: launch.pid });
+  else ctx.stdout.write(`Launched ${launch.command?.binary ?? "Chrome"} (pid=${launch.pid ?? "?"}, mode=${mode})\nDebug port: ${lane!.chromeDebugPort}\nProfile:    ${lane!.chromeProfileDir}\n`);
+}
+
+async function cmdCloseBrowser(ctx: CliContext): Promise<void> {
+  const { owner, cwd } = requireOwnerCwd(ctx);
+  const sessionId = flagString(ctx.args, "session");
+  const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}) });
+  if (!lane) fail(ctx, `no lane found for owner=${owner} cwd=${cwd}`, 2);
+  const { createSupervisorClient } = await import("../supervisor/client.js");
+  const result = await createSupervisorClient().close({ laneId: lane!.id });
+  if (ctx.json) emit(ctx, { ok: true, ...result });
+  else ctx.stdout.write(result.closed ? `Closed browser for ${lane!.id}.\n` : `Browser for ${lane!.id} was already closed.\n`);
 }
 
 async function cmdConfig(ctx: CliContext): Promise<void> {
@@ -852,6 +873,29 @@ async function cmdMcp(ctx: CliContext): Promise<void> {
   await mod.runMcpStdio();
 }
 
+async function cmdSupervisor(ctx: CliContext): Promise<void> {
+  const sub = ctx.args.positional[0] ?? "status";
+  if (sub === "serve") {
+    const { runProductionSupervisor } = await import("../supervisor/production.js");
+    const result = await runProductionSupervisor();
+    if (ctx.json) emit(ctx, { ok: true, result });
+    return;
+  }
+  if (sub === "status") {
+    const { createSupervisorClient } = await import("../supervisor/client.js");
+    try {
+      const result = await createSupervisorClient({ timeoutMs: 1_000 }).ping();
+      if (ctx.json) emit(ctx, { ok: true, running: true, ...result });
+      else ctx.stdout.write(`supervisor: running (${result.supervisorId})\n`);
+    } catch (error) {
+      if (ctx.json) emit(ctx, { ok: false, running: false, error: (error as Error).message });
+      else ctx.stdout.write("supervisor: not running\n");
+    }
+    return;
+  }
+  fail(ctx, `unknown supervisor subcommand: ${sub}. Try: serve, status`, 1);
+}
+
 async function cmdInstallMcp(ctx: CliContext): Promise<void> {
   // Argument shape: paat install-mcp <claude|claude-code|codex|all|--all>
   // Default (no positional) is "all" so the simplest invocation Just Works.
@@ -999,6 +1043,8 @@ async function dispatch(args: ParsedArgs): Promise<void> {
       return cmdCheck(ctx);
     case "release":
       return cmdRelease(ctx);
+    case "close-browser":
+      return cmdCloseBrowser(ctx);
     case "next":
       return cmdNext(ctx);
     case "doctor":
@@ -1027,6 +1073,8 @@ async function dispatch(args: ParsedArgs): Promise<void> {
       return cmdProfiles(ctx);
     case "mcp":
       return cmdMcp(ctx);
+    case "supervisor":
+      return cmdSupervisor(ctx);
     case "help":
     case "--help":
     case "-h":

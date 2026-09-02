@@ -7,6 +7,15 @@
 
 export type LaneStatus = "reserved" | "active" | "stale" | "released";
 
+/** Browser-process state, separate from the lane's allocation status. */
+export type BrowserLifecycleState =
+  | "starting"
+  | "active"
+  | "disconnected"
+  | "recoverable"
+  | "crashed"
+  | "closed";
+
 /**
  * Which browser backend a lane launches/coordinates.
  *
@@ -60,6 +69,14 @@ export interface Lane {
   createdAt: string;
   lastSeen: string;
   pid?: number;
+  /** Verified browser root pid. `pid` remains for registry compatibility. */
+  browserPid?: number;
+  /** Supervisor instance that last verified or launched the browser. */
+  supervisorId?: string;
+  /** Browser process lifecycle, independent of lane reservation status. */
+  browserState?: BrowserLifecycleState;
+  /** Time the supervisor launched or first verified this browser identity. */
+  browserStartedAt?: string;
   notes?: string;
 }
 

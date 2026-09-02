@@ -35,6 +35,9 @@ pub fn run() {
             // Start the real-time hide watcher: keeps every window of every
             // hidden lane off-screen within ~150ms of it appearing.
             hide_watcher::spawn(hidden_pids.clone());
+            // Browser lifetime belongs to this independently launched native
+            // app, never to a disposable MCP stdio worker.
+            cli::record_supervisor_startup(cli::start_supervisor_background());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
