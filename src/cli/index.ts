@@ -2,9 +2,9 @@
 import process from "node:process";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
+import { adoptProfileLane, allocateLane, checkLane, findFreePort } from "../core/allocator.js";
 import { Lane, isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
-import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
+import { AmbiguousLaneError, DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, resolveLaneSelector, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { scanPorts, hasSonar } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
 import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
@@ -43,6 +43,25 @@ function requireOwnerCwd(ctx: CliContext): { owner: string; cwd: string } {
   if (!owner) fail(ctx, "missing required --owner");
   if (!cwd) fail(ctx, "missing required --cwd");
   return { owner: owner!, cwd: normalizeCwd(cwd!) };
+}
+
+async function selectedLane(ctx: CliContext, includeReleased = false): Promise<Lane> {
+  const laneId = flagString(ctx.args, "lane-id");
+  try {
+    if (laneId) {
+      const lane = await resolveLaneSelector({ laneId, includeReleased });
+      if (!lane) fail(ctx, `no lane found for immutable PPID ${laneId}`, 2);
+      return lane!;
+    }
+    const { owner, cwd } = requireOwnerCwd(ctx);
+    const sessionId = flagString(ctx.args, "session");
+    const lane = await resolveLaneSelector({ owner, cwd, ...(sessionId ? { sessionId } : {}), includeReleased });
+    if (!lane) fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}`, 2);
+    return lane!;
+  } catch (error) {
+    if (error instanceof AmbiguousLaneError) fail(ctx, error.message, 2);
+    throw error;
+  }
 }
 
 async function cmdList(ctx: CliContext): Promise<void> {
@@ -134,11 +153,29 @@ async function cmdReserve(ctx: CliContext): Promise<void> {
   if (result.alreadyExisted) ctx.stdout.write("\n(reused existing reservation)\n");
 }
 
-async function cmdCheck(ctx: CliContext): Promise<void> {
+async function cmdAdoptProfile(ctx: CliContext): Promise<void> {
   const { owner, cwd } = requireOwnerCwd(ctx);
-  const sessionId = flagString(ctx.args, "session");
-  const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}) });
-  if (!lane) fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}. Run: portpilot reserve --owner ${owner} --cwd ${cwd}${sessionId ? ` --session ${sessionId}` : ""}`, 2);
+  const profileDir = flagString(ctx.args, "profile-dir");
+  if (!profileDir) fail(ctx, "missing required --profile-dir");
+  const browserFlag = flagString(ctx.args, "browser");
+  const browser = normalizeBrowserKind(browserFlag) ?? "chrome";
+  if (browserFlag && !normalizeBrowserKind(browserFlag)) {
+    fail(ctx, `unknown --browser "${browserFlag}". Valid values: chrome, edge, firefox.`);
+  }
+  const result = await adoptProfileLane({
+    owner,
+    cwd,
+    sessionId: flagString(ctx.args, "session"),
+    task: flagString(ctx.args, "task"),
+    profileDir: profileDir!,
+    browser,
+  });
+  if (ctx.json) emit(ctx, { ok: true, adopted: true, lane: result.lane });
+  else ctx.stdout.write(`Adopted ${result.lane.chromeProfileDir}\nImmutable PPID: ${result.lane.id}\n`);
+}
+
+async function cmdCheck(ctx: CliContext): Promise<void> {
+  const lane = await selectedLane(ctx);
   await touchLane(lane!.id);
   const result = await checkLane(lane!);
   const verdict = result.verdict;
@@ -172,10 +209,7 @@ async function cmdCheck(ctx: CliContext): Promise<void> {
 }
 
 async function cmdRelease(ctx: CliContext): Promise<void> {
-  const { owner, cwd } = requireOwnerCwd(ctx);
-  const sessionId = flagString(ctx.args, "session");
-  const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}), includeReleased: true });
-  if (!lane) fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}`, 2);
+  const lane = await selectedLane(ctx, true);
   if (flagBool(ctx.args, "remove")) {
     await removeLane(lane!.id);
     if (ctx.json) emit(ctx, { ok: true, removed: true, laneId: lane!.id });
@@ -288,7 +322,11 @@ async function cmdDoctor(ctx: CliContext): Promise<void> {
  * of that browser.
  */
 async function cmdOpen(ctx: CliContext): Promise<void> {
-  const { owner, cwd } = requireOwnerCwd(ctx);
+  const laneId = flagString(ctx.args, "lane-id");
+  const exact = laneId ? await resolveLaneSelector({ laneId, includeReleased: true }) : undefined;
+  if (laneId && !exact) fail(ctx, `no lane found for immutable PPID ${laneId}`, 2);
+  const target = exact ? { owner: exact.owner, cwd: exact.cwd } : requireOwnerCwd(ctx);
+  const { owner, cwd } = target;
   const sessionId = flagString(ctx.args, "session");
   const task = flagString(ctx.args, "task");
   const url = flagString(ctx.args, "url");
@@ -302,6 +340,7 @@ async function cmdOpen(ctx: CliContext): Promise<void> {
   const reserve = await allocateLane({
     owner,
     cwd,
+    ...(laneId ? { laneId } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(task ? { task } : {}),
     ...(requestedBrowser ? { browser: requestedBrowser } : {}),
@@ -366,11 +405,8 @@ async function cmdPage(ctx: CliContext): Promise<void> {
   if (!sub || !subs.includes(sub)) {
     fail(ctx, `usage: portpilot page <${subs.join("|")}> --owner <n> --cwd <p> [--session <id>] [--tab <id>] ...`);
   }
-  const { owner, cwd } = requireOwnerCwd(ctx);
-  const sessionId = flagString(ctx.args, "session");
   const tab = flagString(ctx.args, "tab");
-  const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}) });
-  if (!lane) fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}. Run 'open' first.`, 2);
+  const lane = await selectedLane(ctx);
   let page;
   try {
     page = await openPageController(lane!);
@@ -428,10 +464,7 @@ async function cmdPage(ctx: CliContext): Promise<void> {
 }
 
 async function cmdLaunchChrome(ctx: CliContext): Promise<void> {
-  const { owner, cwd } = requireOwnerCwd(ctx);
-  const sessionId = flagString(ctx.args, "session");
-  const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}) });
-  if (!lane) fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}. Run reserve first.`, 2);
+  const lane = await selectedLane(ctx);
   const result = await checkLane(lane!);
   if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
     fail(ctx, `unsafe to launch Chrome: ${result.verdict.kind}. Run portpilot doctor for details.`, 3);
@@ -459,10 +492,7 @@ async function cmdLaunchChrome(ctx: CliContext): Promise<void> {
 }
 
 async function cmdCloseBrowser(ctx: CliContext): Promise<void> {
-  const { owner, cwd } = requireOwnerCwd(ctx);
-  const sessionId = flagString(ctx.args, "session");
-  const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}) });
-  if (!lane) fail(ctx, `no lane found for owner=${owner} cwd=${cwd}`, 2);
+  const lane = await selectedLane(ctx);
   const { createSupervisorClient } = await import("../supervisor/client.js");
   const result = await createSupervisorClient().close({ laneId: lane!.id });
   if (ctx.json) emit(ctx, { ok: true, ...result });
@@ -1039,6 +1069,8 @@ async function dispatch(args: ParsedArgs): Promise<void> {
       return cmdStatus(ctx);
     case "reserve":
       return cmdReserve(ctx);
+    case "adopt-profile":
+      return cmdAdoptProfile(ctx);
     case "check":
       return cmdCheck(ctx);
     case "release":

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { withTempHome } from "./helpers.js";
-import { readRegistry, listLanes, upsertLane, removeLane, markStaleLanes, setLaneStatus, touchLane, findLane } from "../src/core/registry.js";
+import { AmbiguousLaneError, readRegistry, listLanes, upsertLane, removeLane, markStaleLanes, setLaneStatus, touchLane, findLane, resolveLaneSelector } from "../src/core/registry.js";
 import { Lane, REGISTRY_VERSION, nowIso } from "../src/core/lane.js";
 
 function makeLane(overrides: Partial<Lane> = {}): Lane {
@@ -87,5 +87,34 @@ test("findLane filter excludes released lanes by default", async () => {
     assert.equal(lane, undefined);
     const includedAll = await findLane({ owner: "codex", cwd: "/tmp/vend-site", includeReleased: true });
     assert.ok(includedAll);
+  });
+});
+
+test("resolveLaneSelector finds the exact immutable lane id including released lanes", async () => {
+  await withTempHome(async () => {
+    await upsertLane(makeLane({ id: "lane_exact", status: "released" }));
+    const lane = await resolveLaneSelector({ laneId: "lane_exact", includeReleased: true });
+    assert.equal(lane?.id, "lane_exact");
+    assert.equal(lane?.chromeProfileDir, "/tmp/profiles/codex-vend-site");
+  });
+});
+
+test("resolveLaneSelector fails closed when one tuple names different profiles", async () => {
+  await withTempHome(async () => {
+    await upsertLane(makeLane({ id: "lane_one", chromeProfileDir: "/tmp/profiles/one" }));
+    await upsertLane(makeLane({ id: "lane_two", chromeProfileDir: "/tmp/profiles/two" }));
+    await assert.rejects(
+      resolveLaneSelector({ owner: "codex", cwd: "/tmp/vend-site", sessionId: "default" }),
+      (error: unknown) => error instanceof AmbiguousLaneError && error.candidateIds.join(",") === "lane_one,lane_two",
+    );
+  });
+});
+
+test("resolveLaneSelector deterministically keeps the oldest id for same-profile duplicates", async () => {
+  await withTempHome(async () => {
+    await upsertLane(makeLane({ id: "lane_new", createdAt: "2026-01-02T00:00:00.000Z" }));
+    await upsertLane(makeLane({ id: "lane_old", createdAt: "2026-01-01T00:00:00.000Z" }));
+    const lane = await resolveLaneSelector({ owner: "codex", cwd: "/tmp/vend-site", sessionId: "default" });
+    assert.equal(lane?.id, "lane_old");
   });
 });

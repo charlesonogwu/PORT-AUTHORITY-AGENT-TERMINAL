@@ -17,12 +17,14 @@ import {
   projectSlug,
   sessionSlug,
 } from "./lane.js";
-import { profileDirFor } from "./paths.js";
+import { profileDirFor, profilesDir } from "./paths.js";
 import { PortObservation, isPortInUse, scanPorts } from "./scanner.js";
 import { ChromeAttachVerdict } from "./chrome.js";
 import { evaluateBrowserAttach, normalizeBrowserKind } from "./browsers.js";
-import { listLanes, updateRegistry } from "./registry.js";
+import { listLanes, resolveLaneSelectorFrom, updateRegistry } from "./registry.js";
 import { CapacityError, loadConfig } from "./config.js";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 
 export interface AllocateOptions {
   owner: string;
@@ -56,6 +58,15 @@ export interface AllocateOptions {
    *  defaultBrowser, else "chrome". Non-chrome lanes get a distinct profile
    *  dir suffix (e.g. "-firefox") so backends can never share one. */
   browser?: BrowserKind;
+  /** Reopen one exact immutable lane identity, preserving its profile. */
+  laneId?: string;
+}
+
+export class LaneReopenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LaneReopenError";
+  }
 }
 
 export interface AllocateResult {
@@ -167,6 +178,33 @@ function takenProfileDirs(lanes: Lane[]): Set<string> {
   return out;
 }
 
+function sameBrowserProfile(a: Lane, b: Lane): boolean {
+  if (laneBrowser(a) !== laneBrowser(b)) return false;
+  const left = normalizeCwd(a.chromeProfileDir);
+  const right = normalizeCwd(b.chromeProfileDir);
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+function retireProfileDuplicates(lanes: Lane[], keeper: Lane): Lane[] {
+  return lanes.map((lane) => {
+    if (lane.id === keeper.id || !sameBrowserProfile(lane, keeper)) return lane;
+    const retired: Lane = {
+      ...lane,
+      status: "released",
+      browserState: "closed",
+      lastSeen: nowIso(),
+      notes: [lane.notes, `duplicate profile identity consolidated into ${keeper.id}`].filter(Boolean).join("; "),
+    };
+    delete retired.appPort;
+    delete retired.chromeDebugPort;
+    delete retired.pid;
+    delete retired.browserPid;
+    delete retired.browserStartedAt;
+    delete retired.supervisorId;
+    return retired;
+  });
+}
+
 export function findExistingLane(
   lanes: Lane[],
   owner: string,
@@ -215,10 +253,16 @@ export function findExistingLaneAnyBrowser(
   const matches = lanes.filter((l) => laneMatchesKey(l, owner, target, sessionId));
   if (matches.length === 0) return undefined;
   if (prefer) {
-    const hit = matches.find((l) => laneBrowser(l) === prefer);
-    if (hit) return hit;
+    const preferred = resolveLaneSelectorFrom(matches, { owner, cwd: target, sessionId, browser: prefer });
+    if (preferred) return preferred;
   }
-  return matches.reduce((a, b) => (a.lastSeen >= b.lastSeen ? a : b));
+  const latest = matches.reduce((a, b) => (a.lastSeen >= b.lastSeen ? a : b));
+  return resolveLaneSelectorFrom(matches, {
+    owner,
+    cwd: target,
+    sessionId,
+    browser: laneBrowser(latest),
+  });
 }
 
 /**
@@ -232,6 +276,17 @@ export function findExistingLaneAnyBrowser(
  * lane is always allowed, even at the cap.
  */
 export async function allocateLane(opts: AllocateOptions): Promise<AllocateResult> {
+  let exactTarget: Lane | undefined;
+  if (opts.laneId) {
+    exactTarget = (await listLanes()).find((lane) => lane.id === opts.laneId);
+    if (!exactTarget) throw new LaneReopenError(`lane ${opts.laneId} was not found`);
+    const profile = await stat(exactTarget.chromeProfileDir).catch(() => undefined);
+    if (!profile?.isDirectory()) {
+      throw new LaneReopenError(
+        `lane ${opts.laneId} cannot be reopened because its profile directory is missing: ${exactTarget.chromeProfileDir}`,
+      );
+    }
+  }
   const observationsProvided = opts.observations !== undefined;
   const scan = observationsProvided
     ? { observations: opts.observations!, source: "provided" as const, errors: [] as string[] }
@@ -244,12 +299,12 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
   // suffix is preserved by auto-promoting it to sessionId when the caller
   // didn't pass one explicitly — that way information isn't lost; it just
   // lands in the right column.
-  const canon = canonicalizeOwner(opts.owner);
+  const canon = canonicalizeOwner(exactTarget?.owner ?? opts.owner);
   const ownerCanonical = canon.canonical;
   const explicitSession =
     typeof opts.sessionId === "string" && opts.sessionId.trim().length > 0;
   const sessionRaw = explicitSession ? opts.sessionId! : canon.custom;
-  const sessionId = sessionSlug(sessionRaw);
+  const sessionId = exactTarget ? laneSessionId(exactTarget) : sessionSlug(sessionRaw);
 
   const config = await loadConfig();
   let alreadyExisted = false;
@@ -283,14 +338,29 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
     const cfgDefault = normalizeBrowserKind(config.defaultBrowser);
     let browser: BrowserKind;
     let existing: Lane | undefined;
-    if (opts.browser) {
+    if (opts.laneId) {
+      existing = lanes.find((lane) => lane.id === opts.laneId);
+      if (!existing) throw new LaneReopenError(`lane ${opts.laneId} disappeared during reopen`);
+      browser = laneBrowser(existing);
+    } else if (opts.browser) {
       browser = opts.browser;
-      existing = findExistingLane(lanes, ownerCanonical, opts.cwd, sessionId, browser);
+      existing = resolveLaneSelectorFrom(lanes, {
+        owner: ownerCanonical,
+        cwd: opts.cwd,
+        sessionId,
+        browser,
+      });
     } else {
       // Prefer the configured default when several lanes exist for this key;
       // with no default configured, prefer chrome (the historical behaviour)
       // so pre-existing chrome lanes keep winning ambiguous reconnects.
-      existing = findExistingLaneAnyBrowser(lanes, ownerCanonical, opts.cwd, sessionId, cfgDefault ?? "chrome");
+      existing = findExistingLaneAnyBrowser(
+        lanes,
+        ownerCanonical,
+        opts.cwd,
+        sessionId,
+        cfgDefault ?? "chrome",
+      );
       browser = existing ? laneBrowser(existing) : (cfgDefault ?? "chrome");
     }
     if (existing) {
@@ -299,9 +369,27 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
       // (logins survive); usually the same ports too — but a lane that went
       // stale may have had its port reclaimed by another lane in the
       // meantime, so top up whatever this call needs and is missing.
-      const reactivatedStatus: LaneStatus = existing.status === "stale" ? "active" : existing.status;
+      const reactivatedStatus: LaneStatus =
+        existing.status === "stale" || existing.status === "released" ? "active" : existing.status;
       let appPort = existing.appPort;
       let chromeDebugPort = existing.chromeDebugPort;
+      if (opts.laneId) {
+        const isHeldByOther = (field: "appPort" | "chromeDebugPort", port: number | undefined): boolean =>
+          port !== undefined && lanes.some((lane) =>
+            lane.id !== existing!.id &&
+            lane.status !== "released" &&
+            lane.status !== "stale" &&
+            lane[field] === port,
+          );
+        if (isHeldByOther("appPort", appPort)) appPort = undefined;
+        if (isHeldByOther("chromeDebugPort", chromeDebugPort)) chromeDebugPort = undefined;
+        if (chromeDebugPort !== undefined) {
+          const verdict = evaluateBrowserAttach(existing, observations);
+          if (verdict.kind === "unsafe-foreign-chrome" || verdict.kind === "unsafe-unknown") {
+            chromeDebugPort = undefined;
+          }
+        }
+      }
       const needApp = appPort === undefined && opts.withAppPort !== false;
       const needChrome = chromeDebugPort === undefined && opts.withChromePort !== false;
       if (needApp || needChrome) {
@@ -325,7 +413,10 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
         ...(appPort !== undefined ? { appPort } : {}),
         ...(chromeDebugPort !== undefined ? { chromeDebugPort } : {}),
       };
-      const updated = lanes.map((l) => (l.id === existing.id ? result! : l));
+      const updated = retireProfileDuplicates(
+        lanes.map((l) => (l.id === existing.id ? result! : l)),
+        result!,
+      );
       // Whether the ports are retained or freshly minted, no stale lane may
       // keep claiming them — that's the two-lanes-one-port conflict.
       return stripReclaimedPorts(updated, existing.id, appPort, chromeDebugPort);
@@ -393,6 +484,39 @@ export async function allocateLane(opts: AllocateOptions): Promise<AllocateResul
   if (warning) out.warning = warning;
   if (typeof activeLaneCount === "number") out.activeLaneCount = activeLaneCount;
   return out;
+}
+
+export interface AdoptProfileOptions extends Omit<AllocateOptions, "profileDir" | "laneId"> {
+  profileDir: string;
+}
+
+/** Explicitly register an orphaned PortPilot-owned profile as one new lane. */
+export async function adoptProfileLane(opts: AdoptProfileOptions): Promise<AllocateResult> {
+  const root = resolve(profilesDir());
+  const candidate = resolve(opts.profileDir);
+  const rel = relative(root, candidate);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new LaneReopenError(`profile must be inside PortPilot profiles directory: ${root}`);
+  }
+  const info = await stat(candidate).catch(() => undefined);
+  if (!info?.isDirectory()) throw new LaneReopenError(`profile directory does not exist: ${candidate}`);
+  const [realRoot, realCandidate] = await Promise.all([realpath(root), realpath(candidate)]);
+  const realRel = relative(realRoot, realCandidate);
+  if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) {
+    throw new LaneReopenError(`profile must be inside PortPilot profiles directory: ${root}`);
+  }
+  const key = process.platform === "win32" ? realCandidate.toLowerCase() : realCandidate;
+  const lanes = await listLanes();
+  let owner: Lane | undefined;
+  for (const lane of lanes) {
+    const current = await realpath(lane.chromeProfileDir).catch(() => resolve(lane.chromeProfileDir));
+    if ((process.platform === "win32" ? current.toLowerCase() : current) === key) {
+      owner = lane;
+      break;
+    }
+  }
+  if (owner) throw new LaneReopenError(`profile is already registered to immutable PPID ${owner.id}`);
+  return allocateLane({ ...opts, profileDir: realCandidate });
 }
 
 export interface FindFreePortOptions {

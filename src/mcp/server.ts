@@ -1,8 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
-import { findLane, listLanes, markStaleLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
+import { adoptProfileLane, allocateLane, checkLane, findFreePort } from "../core/allocator.js";
+import { AmbiguousLaneError, listLanes, markStaleLanes, removeLane, resolveLaneSelector, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { hasSonar, scanPorts } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
 import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
@@ -28,6 +28,35 @@ export function buildMcpServer(): McpServer {
     end: z.number().int().positive(),
   };
 
+  const exactLaneId = z.string().min(1).optional().describe("Immutable PortPilot lane ID (PPID). When supplied, owner/cwd/sessionId are not needed and PortPilot never guesses another profile.");
+  const optionalOwner = z.string().min(1).optional();
+  const optionalCwd = z.string().min(1).optional();
+
+  async function resolveToolLane(
+    args: { laneId?: string; owner?: string; cwd?: string; sessionId?: string },
+    includeReleased = false,
+  ): Promise<{ lane?: Lane; error?: string }> {
+    try {
+      if (args.laneId) {
+        const lane = await resolveLaneSelector({ laneId: args.laneId, includeReleased });
+        return lane ? { lane } : { error: `no lane found for immutable PPID ${args.laneId}` };
+      }
+      if (!args.owner || !args.cwd) {
+        return { error: "provide laneId, or both owner and cwd" };
+      }
+      const lane = await resolveLaneSelector({
+        owner: args.owner,
+        cwd: args.cwd,
+        ...(args.sessionId ? { sessionId: args.sessionId } : {}),
+        includeReleased,
+      });
+      return lane ? { lane } : { error: `no lane found for owner=${args.owner} cwd=${args.cwd}` };
+    } catch (error) {
+      if (error instanceof AmbiguousLaneError) return { error: error.message };
+      throw error;
+    }
+  }
+
   // ── HIGH-LEVEL "do everything" tool ──────────────────────────────────────
   server.registerTool(
     "open",
@@ -52,7 +81,8 @@ export function buildMcpServer(): McpServer {
         "Page.bringToFront() and must NOT call Browser.setWindowBounds with on-screen coordinates — both " +
         "re-raise the window onto the user's desktop and defeat the off-screen placement.",
       inputSchema: {
-        cwd: z.string().min(1).describe("Project working directory (absolute path)."),
+        laneId: exactLaneId,
+        cwd: optionalCwd.describe("Project working directory (absolute path). Required unless laneId is supplied."),
         url: z
           .string()
           .optional()
@@ -87,14 +117,19 @@ export function buildMcpServer(): McpServer {
       },
     },
     async (args) => {
-      const owner = (args.owner ?? "agent").toString().trim() || "agent";
+      const exact = args.laneId ? await resolveToolLane({ laneId: args.laneId }, true) : undefined;
+      if (exact?.error || (args.laneId && !exact?.lane)) return jsonResult({ ok: false, error: exact?.error });
+      if (!args.laneId && !args.cwd) return jsonResult({ ok: false, error: "cwd is required unless laneId is supplied" });
+      const owner = exact?.lane?.owner ?? ((args.owner ?? "agent").toString().trim() || "agent");
+      const cwd = exact?.lane?.cwd ?? args.cwd!;
       // Only pass browser through when the agent explicitly asked for one.
       // Omitted → the allocator resolves it: an existing lane keeps its
       // browser, else the user's configured defaultBrowser, else chrome.
       const requestedBrowser = normalizeBrowserKind(args.browser);
       const reserve = await allocateLane({
         owner,
-        cwd: args.cwd,
+        cwd,
+        ...(args.laneId ? { laneId: args.laneId } : {}),
         sessionId: args.sessionId,
         task: args.task,
         ...(requestedBrowser ? { browser: requestedBrowser } : {}),
@@ -164,14 +199,16 @@ export function buildMcpServer(): McpServer {
         "Close exactly one PortPilot browser after re-verifying its browser type, debug port, pid, and dedicated profile. " +
         "MCP disconnects and release_lane never close browsers; use this only when the browser should actually exit.",
       inputSchema: {
-        owner: z.string().min(1),
-        cwd: z.string().min(1),
+        laneId: exactLaneId,
+        owner: optionalOwner,
+        cwd: optionalCwd,
         sessionId: z.string().optional(),
       },
     },
     async (args) => {
-      const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}) });
-      if (!lane) return jsonResult({ ok: false, error: "no matching lane found" });
+      const selected = await resolveToolLane(args);
+      if (!selected.lane) return jsonResult({ ok: false, error: selected.error });
+      const lane = selected.lane;
       try {
         const result = await createSupervisorClient().close({ laneId: lane.id });
         return jsonResult({ ok: true, ...result });
@@ -252,25 +289,48 @@ export function buildMcpServer(): McpServer {
   );
 
   server.registerTool(
+    "adopt_profile",
+    {
+      title: "Adopt an orphaned PortPilot browser profile",
+      description:
+        "Explicitly register an existing orphaned profile directory beneath PORTPILOT_HOME/profiles as one new immutable PPID. " +
+        "Refuses normal/personal browser profiles and profiles already owned by another lane. Does not inspect cookies or launch a browser.",
+      inputSchema: {
+        owner: z.string().min(1),
+        cwd: z.string().min(1),
+        sessionId: z.string().optional(),
+        task: z.string().optional(),
+        profileDir: z.string().min(1),
+        browser: z.enum(["chrome", "firefox", "edge"]).optional().default("chrome"),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await adoptProfileLane(args);
+        return jsonResult({ ok: true, adopted: true, lane: result.lane });
+      } catch (error) {
+        return jsonResult({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+    },
+  );
+
+  server.registerTool(
     "check_lane",
     {
       title: "Check lane",
       description:
         "Check whether the named lane is safe to use right now. Returns a verdict that distinguishes free ports, attachable Chrome instances with the matching profile, and unsafe situations where a foreign process holds the port.",
       inputSchema: {
-        owner: z.string().min(1),
-        cwd: z.string().min(1),
+        laneId: exactLaneId,
+        owner: optionalOwner,
+        cwd: optionalCwd,
         sessionId: z.string().optional(),
       },
     },
     async (args) => {
-      const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}) });
-      if (!lane) {
-        return jsonResult({
-          ok: false,
-          error: `no lane found for owner=${args.owner} cwd=${args.cwd}${args.sessionId ? ` sessionId=${args.sessionId}` : ""}. Call reserve_lane first.`,
-        });
-      }
+      const selected = await resolveToolLane(args);
+      if (!selected.lane) return jsonResult({ ok: false, error: selected.error });
+      const lane = selected.lane;
       await touchLane(lane.id);
       const result = await checkLane(lane);
       const verdict = result.verdict;
@@ -286,17 +346,17 @@ export function buildMcpServer(): McpServer {
       title: "Release lane",
       description: "Mark a lane as released. Does not kill processes. Set remove=true to delete the entry entirely.",
       inputSchema: {
-        owner: z.string().min(1),
-        cwd: z.string().min(1),
+        laneId: exactLaneId,
+        owner: optionalOwner,
+        cwd: optionalCwd,
         sessionId: z.string().optional(),
         remove: z.boolean().optional().default(false),
       },
     },
     async (args) => {
-      const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}), includeReleased: true });
-      if (!lane) {
-        return jsonResult({ ok: false, error: `no lane found for owner=${args.owner} cwd=${args.cwd}` });
-      }
+      const selected = await resolveToolLane(args, true);
+      if (!selected.lane) return jsonResult({ ok: false, error: selected.error });
+      const lane = selected.lane;
       if (args.remove) {
         await removeLane(lane.id);
         return jsonResult({ ok: true, removed: true, laneId: lane.id });
@@ -337,8 +397,9 @@ export function buildMcpServer(): McpServer {
         "(default) is a normal window. In background mode, the CDP client must not call Page.bringToFront() or " +
         "Browser.setWindowBounds with on-screen coordinates.",
       inputSchema: {
-        owner: z.string().min(1),
-        cwd: z.string().min(1),
+        laneId: exactLaneId,
+        owner: optionalOwner,
+        cwd: optionalCwd,
         sessionId: z.string().optional(),
         dryRun: z.boolean().optional().default(false),
         binaryPath: z.string().optional(),
@@ -351,8 +412,9 @@ export function buildMcpServer(): McpServer {
       },
     },
     async (args) => {
-      const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}) });
-      if (!lane) return jsonResult({ ok: false, error: `no lane found for owner=${args.owner} cwd=${args.cwd}${args.sessionId ? ` sessionId=${args.sessionId}` : ""}` });
+      const selected = await resolveToolLane(args);
+      if (!selected.lane) return jsonResult({ ok: false, error: selected.error });
+      const lane = selected.lane;
       const result = await checkLane(lane);
       if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
         return jsonResult({ ok: false, error: `unsafe to launch Chrome: ${result.verdict.kind}`, verdict: result.verdict });
@@ -399,8 +461,9 @@ export function buildMcpServer(): McpServer {
         "Most callers should use the higher-level 'open' tool with a browser argument instead. Set dryRun=true to " +
         "return the launch command without executing.",
       inputSchema: {
-        owner: z.string().min(1),
-        cwd: z.string().min(1),
+        laneId: exactLaneId,
+        owner: optionalOwner,
+        cwd: optionalCwd,
         sessionId: z.string().optional(),
         dryRun: z.boolean().optional().default(false),
         binaryPath: z.string().optional(),
@@ -411,8 +474,9 @@ export function buildMcpServer(): McpServer {
       },
     },
     async (args) => {
-      const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}) });
-      if (!lane) return jsonResult({ ok: false, error: `no lane found for owner=${args.owner} cwd=${args.cwd}${args.sessionId ? ` sessionId=${args.sessionId}` : ""}` });
+      const selected = await resolveToolLane(args);
+      if (!selected.lane) return jsonResult({ ok: false, error: selected.error });
+      const lane = selected.lane;
       const browser = laneBrowser(lane);
       const label = browserLabel(browser);
       const result = await checkLane(lane);
@@ -463,20 +527,20 @@ export function buildMcpServer(): McpServer {
   // lane's OWN browser (matching dedicated profile) is ever controlled.
 
   const pageToolTarget = {
-    owner: z.string().min(1).describe("Lane owner (LLM provider name, e.g. 'codex')."),
-    cwd: z.string().min(1).describe("Lane project directory."),
+    laneId: exactLaneId,
+    owner: optionalOwner.describe("Lane owner. Required with cwd unless laneId is supplied."),
+    cwd: optionalCwd.describe("Lane project directory. Required with owner unless laneId is supplied."),
     sessionId: z.string().optional().describe("Lane session id, if the lane was reserved with one."),
     tab: z.string().optional().describe("Which tab: an id from page_tabs, a 0-based index ('0','1',…), or a url/title substring (e.g. 'checkout'). Omit for the first tab. NOTE: Firefox tab ids change between calls — prefer index or substring for Firefox lanes."),
   };
 
   async function withPage(
-    args: { owner: string; cwd: string; sessionId?: string },
+    args: { laneId?: string; owner?: string; cwd?: string; sessionId?: string },
     fn: (page: PageController, lane: Lane) => Promise<Record<string, unknown>>,
   ) {
-    const lane = await findLane({ owner: args.owner, cwd: args.cwd, ...(args.sessionId ? { sessionId: args.sessionId } : {}) });
-    if (!lane) {
-      return jsonResult({ ok: false, error: `no lane found for owner=${args.owner} cwd=${args.cwd}${args.sessionId ? ` sessionId=${args.sessionId}` : ""}. Reserve + launch with 'open' first.` });
-    }
+    const selected = await resolveToolLane(args);
+    if (!selected.lane) return jsonResult({ ok: false, error: selected.error });
+    const lane = selected.lane;
     let page: PageController | undefined;
     try {
       page = await openPageController(lane);
@@ -497,7 +561,7 @@ export function buildMcpServer(): McpServer {
       description:
         "List open tabs (id, url, title) in the lane's browser — works for chrome, edge (CDP), and firefox (WebDriver BiDi) lanes alike. " +
         "Tab ids feed the optional 'tab' argument of the other page_* tools. The lane's browser must already be running (use 'open').",
-      inputSchema: { owner: pageToolTarget.owner, cwd: pageToolTarget.cwd, sessionId: pageToolTarget.sessionId },
+      inputSchema: { laneId: pageToolTarget.laneId, owner: pageToolTarget.owner, cwd: pageToolTarget.cwd, sessionId: pageToolTarget.sessionId },
     },
     async (args) => withPage(args, async (page) => ({ tabs: await page.tabs() })),
   );
@@ -513,6 +577,7 @@ export function buildMcpServer(): McpServer {
         "'tab' argument of the other page_* tools — on chrome/edge the returned tab id stays valid across calls; on firefox BiDi ids " +
         "are per-call, so address tabs by 0-based index ('1') or a url/title substring instead. Works on all lane browsers.",
       inputSchema: {
+        laneId: pageToolTarget.laneId,
         owner: pageToolTarget.owner,
         cwd: pageToolTarget.cwd,
         sessionId: pageToolTarget.sessionId,

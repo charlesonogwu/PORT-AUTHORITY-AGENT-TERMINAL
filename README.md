@@ -338,6 +338,8 @@ the only path to termination, and it refuses anything that isn't Chromium-family
 | `paat check --owner <n> --cwd <p>`        | Verify the lane is safe to use right now |
 | `paat release --owner <n> --cwd <p>`      | Release a lane (does NOT kill Chrome) |
 | `paat open --owner <n> --cwd <p> [--browser chrome\|edge\|firefox] [--url <u>] [--mode ...]` | Reserve + launch + navigate in one step |
+| `paat open --lane-id <PPID> [--url <u>]` | Reopen one exact saved browser profile by immutable identity |
+| `paat adopt-profile --owner <n> --cwd <p> --profile-dir <path>` | Explicitly adopt an orphan beneath `~/.portpilot/profiles` |
 | `paat launch-chrome --owner <n> --cwd <p> [--mode visible\|background\|headless]` | Launch Chrome bound to the lane |
 | `paat page <tabs\|goto\|eval\|text\|click\|fill\|screenshot> --owner <n> --cwd <p>` | Drive the lane's browser (CDP or BiDi, same commands) |
 | `paat next [--range 9322-9399]`           | Print the next free port in a range |

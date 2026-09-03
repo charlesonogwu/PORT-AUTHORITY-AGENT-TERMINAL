@@ -12,9 +12,28 @@ export interface LaneFilter {
     sessionId?: string;
     status?: LaneStatus | LaneStatus[];
     includeReleased?: boolean;
+    browser?: import("./lane.js").BrowserKind;
 }
 export declare function filterLanes(lanes: Lane[], filter: LaneFilter): Lane[];
 export declare function findLane(filter: LaneFilter): Promise<Lane | undefined>;
+export interface LaneSelector extends LaneFilter {
+    /** Immutable PortPilot lane identity (called PPID in user-facing flows). */
+    laneId?: string;
+}
+export declare class AmbiguousLaneError extends Error {
+    readonly candidateIds: string[];
+    readonly candidates: Array<{
+        id: string;
+        profileDir: string;
+    }>;
+    constructor(candidates: Lane[]);
+}
+/**
+ * Resolve either one immutable lane id or the legacy owner/cwd/session tuple.
+ * Tuple lookup never guesses across distinct browser-profile identities.
+ */
+export declare function resolveLaneSelectorFrom(lanes: Lane[], selector: LaneSelector): Lane | undefined;
+export declare function resolveLaneSelector(selector: LaneSelector): Promise<Lane | undefined>;
 export type RegistryUpdater = (lanes: Lane[]) => Lane[] | Promise<Lane[]>;
 /**
  * Read-modify-write the registry while holding the lockfile. The updater

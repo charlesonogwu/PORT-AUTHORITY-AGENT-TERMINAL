@@ -11,6 +11,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.2] — immutable PPID reconnect
+
+### Fixed
+
+- Persistent browser profiles can be reopened by immutable lane ID with
+  `--lane-id`, even after release, staleness, supervisor restart, or debug-port
+  reassignment. Exact reopen never silently creates a replacement profile.
+- Tuple lookup now fails closed when one owner/project/session maps to distinct
+  profiles, and reports the candidate PPIDs instead of choosing arbitrarily.
+- Duplicate records for the same browser profile deterministically retain one
+  stable PPID and retire the redundant port claims.
+
+### Added
+
+- CLI and MCP exact-ID selection for open, check, page control, browser close,
+  release, and existing-lane launch operations.
+- Guarded orphan-profile adoption, restricted to existing directories beneath
+  PortPilot's own profiles directory; normal browser profiles are refused.
+- The dashboard shows and copies the exact `paat open --lane-id <PPID>` reconnect
+  command.
+
+---
+
 ## [0.4.1] — persistent browser supervisor
 
 ### Fixed
