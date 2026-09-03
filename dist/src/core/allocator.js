@@ -417,7 +417,7 @@ export async function adoptProfileLane(opts) {
     }
     if (owner)
         throw new LaneReopenError(`profile is already registered to immutable PPID ${owner.id}`);
-    return allocateLane({ ...opts, profileDir: realCandidate });
+    return allocateLane({ ...opts, profileDir: candidate });
 }
 export async function findFreePort(opts = {}) {
     const range = opts.range ?? DEFAULT_CHROME_DEBUG_RANGE;

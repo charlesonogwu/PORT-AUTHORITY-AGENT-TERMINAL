@@ -516,7 +516,7 @@ export async function adoptProfileLane(opts: AdoptProfileOptions): Promise<Alloc
     }
   }
   if (owner) throw new LaneReopenError(`profile is already registered to immutable PPID ${owner.id}`);
-  return allocateLane({ ...opts, profileDir: realCandidate });
+  return allocateLane({ ...opts, profileDir: candidate });
 }
 
 export interface FindFreePortOptions {
