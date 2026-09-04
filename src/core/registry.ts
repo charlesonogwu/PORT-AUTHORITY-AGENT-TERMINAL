@@ -9,6 +9,7 @@ import {
   canonicalizeOwner,
   normalizeCwd,
   nowIso,
+  laneBrowser,
 } from "./lane.js";
 import { lockPath, registryPath } from "./paths.js";
 import { atomicWriteJson, withLock } from "./lockfile.js";
@@ -49,6 +50,7 @@ export interface LaneFilter {
   sessionId?: string;
   status?: LaneStatus | LaneStatus[];
   includeReleased?: boolean;
+  browser?: import("./lane.js").BrowserKind;
 }
 
 export function filterLanes(lanes: Lane[], filter: LaneFilter): Lane[] {
@@ -64,6 +66,7 @@ export function filterLanes(lanes: Lane[], filter: LaneFilter): Lane[] {
     if (owner && canonicalizeOwner(lane.owner).canonical !== owner) return false;
     if (cwd && normalizeCwd(lane.cwd) !== cwd) return false;
     if (wantSession !== null && laneSessionId(lane) !== wantSession) return false;
+    if (filter.browser && laneBrowser(lane) !== filter.browser) return false;
     if (wantStatuses && !wantStatuses.includes(lane.status)) return false;
     if (!filter.includeReleased && !wantStatuses && lane.status === "released") return false;
     return true;
@@ -73,6 +76,55 @@ export function filterLanes(lanes: Lane[], filter: LaneFilter): Lane[] {
 export async function findLane(filter: LaneFilter): Promise<Lane | undefined> {
   const lanes = await listLanes();
   return filterLanes(lanes, filter)[0];
+}
+
+export interface LaneSelector extends LaneFilter {
+  /** Immutable PortPilot lane identity (called PPID in user-facing flows). */
+  laneId?: string;
+}
+
+export class AmbiguousLaneError extends Error {
+  readonly candidateIds: string[];
+  readonly candidates: Array<{ id: string; profileDir: string }>;
+
+  constructor(candidates: Lane[]) {
+    const ordered = [...candidates].sort((a, b) => a.id.localeCompare(b.id));
+    const details = ordered.map((lane) => `${lane.id} (${lane.chromeProfileDir})`).join(", ");
+    super(`ambiguous lane selector; use --lane-id with one of: ${details}`);
+    this.name = "AmbiguousLaneError";
+    this.candidateIds = ordered.map((lane) => lane.id);
+    this.candidates = ordered.map((lane) => ({ id: lane.id, profileDir: lane.chromeProfileDir }));
+  }
+}
+
+function stableLaneOrder(a: Lane, b: Lane): number {
+  const created = a.createdAt.localeCompare(b.createdAt);
+  return created !== 0 ? created : a.id.localeCompare(b.id);
+}
+
+/**
+ * Resolve either one immutable lane id or the legacy owner/cwd/session tuple.
+ * Tuple lookup never guesses across distinct browser-profile identities.
+ */
+export function resolveLaneSelectorFrom(lanes: Lane[], selector: LaneSelector): Lane | undefined {
+  if (selector.laneId) {
+    const exact = lanes.find((lane) => lane.id === selector.laneId);
+    if (!exact) return undefined;
+    if (!selector.includeReleased && exact.status === "released") return undefined;
+    return exact;
+  }
+
+  const matches = filterLanes(lanes, selector);
+  if (matches.length <= 1) return matches[0];
+  const identities = new Set(
+    matches.map((lane) => `${laneBrowser(lane)}\0${normalizeCwd(lane.chromeProfileDir)}`),
+  );
+  if (identities.size > 1) throw new AmbiguousLaneError(matches);
+  return [...matches].sort(stableLaneOrder)[0];
+}
+
+export async function resolveLaneSelector(selector: LaneSelector): Promise<Lane | undefined> {
+  return resolveLaneSelectorFrom(await listLanes(), selector);
 }
 
 export type RegistryUpdater = (lanes: Lane[]) => Lane[] | Promise<Lane[]>;

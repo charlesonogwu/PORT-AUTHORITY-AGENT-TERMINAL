@@ -33,6 +33,11 @@ export interface AllocateOptions {
      *  defaultBrowser, else "chrome". Non-chrome lanes get a distinct profile
      *  dir suffix (e.g. "-firefox") so backends can never share one. */
     browser?: BrowserKind;
+    /** Reopen one exact immutable lane identity, preserving its profile. */
+    laneId?: string;
+}
+export declare class LaneReopenError extends Error {
+    constructor(message: string);
 }
 export interface AllocateResult {
     lane: Lane;
@@ -63,6 +68,11 @@ export declare function findExistingLaneAnyBrowser(lanes: Lane[], owner: string,
  * lane is always allowed, even at the cap.
  */
 export declare function allocateLane(opts: AllocateOptions): Promise<AllocateResult>;
+export interface AdoptProfileOptions extends Omit<AllocateOptions, "profileDir" | "laneId"> {
+    profileDir: string;
+}
+/** Explicitly register an orphaned PortPilot-owned profile as one new lane. */
+export declare function adoptProfileLane(opts: AdoptProfileOptions): Promise<AllocateResult>;
 export interface FindFreePortOptions {
     range?: PortRange;
     observations?: PortObservation[];

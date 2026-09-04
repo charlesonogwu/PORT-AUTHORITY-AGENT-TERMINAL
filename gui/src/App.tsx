@@ -814,7 +814,23 @@ function ExpandedRow({ s }: { s: LiveSession }) {
         <Field label="browser version" value={s.browserVersion ?? "?"} />
         {s.task && <Field label="task (declared)" value={s.task} />}
         {s.appPort && <Field label="app port" mono value={`:${s.appPort}`} />}
-        {s.laneId && <Field label="lane id" mono value={s.laneId} />}
+        {s.laneId && (
+          <div className="space-y-1">
+            <Field label="immutable PPID / lane id" mono value={s.laneId} />
+            <div className="flex items-center gap-2">
+              <code className="break-all text-[10px] text-muted-foreground">{`paat open --lane-id ${s.laneId}`}</code>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-6 px-2 text-[10px]"
+                onClick={() => void navigator.clipboard.writeText(`paat open --lane-id ${s.laneId}`)}
+              >
+                Copy reconnect
+              </Button>
+            </div>
+          </div>
+        )}
         {s.agentInferenceEvidence && s.agentInferenceEvidence.length > 0 && (
           <div>
             <div className="mb-0.5 text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">

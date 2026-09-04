@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -124,5 +124,55 @@ test("unknown command exits non-zero", async () => {
   await withHome(async (home) => {
     const res = runCli(["nope"], home);
     assert.notEqual(res.code, 0);
+  });
+});
+
+test("CLI reopens and checks the exact immutable PPID without owner or cwd", async () => {
+  await withHome(async (home) => {
+    const cwd = join(home, "exact-project");
+    const created = JSON.parse(runCli(["reserve", "--owner", "codex", "--cwd", cwd, "--session", "saved", "--json"], home).stdout);
+    await mkdir(created.lane.chromeProfileDir, { recursive: true });
+    const released = runCli(["release", "--lane-id", created.lane.id, "--json"], home);
+    assert.equal(released.code, 0, released.stderr);
+
+    const reopened = runCli(["open", "--lane-id", created.lane.id, "--dry-run", "--json"], home);
+    assert.equal(reopened.code, 0, reopened.stderr);
+    const payload = JSON.parse(reopened.stdout);
+    assert.equal(payload.lane.id, created.lane.id);
+    assert.equal(payload.lane.chromeProfileDir, created.lane.chromeProfileDir);
+
+    const checked = runCli(["check", "--lane-id", created.lane.id, "--json"], home);
+    assert.equal(checked.code, 0, checked.stderr);
+    assert.equal(JSON.parse(checked.stdout).lane.id, created.lane.id);
+  });
+});
+
+test("CLI tuple selection fails closed and lists PPIDs when profiles are ambiguous", async () => {
+  await withHome(async (home) => {
+    const cwd = join(home, "ambiguous-project");
+    const one = JSON.parse(runCli(["reserve", "--owner", "codex", "--cwd", cwd, "--session", "one", "--json"], home).stdout);
+    const two = JSON.parse(runCli(["reserve", "--owner", "codex", "--cwd", cwd, "--session", "two", "--json"], home).stdout);
+    const checked = runCli(["check", "--owner", "codex", "--cwd", cwd, "--json"], home);
+    assert.equal(checked.code, 2);
+    const payload = JSON.parse(checked.stdout);
+    assert.match(payload.error, /ambiguous lane selector/);
+    assert.match(payload.error, new RegExp(one.lane.id));
+    assert.match(payload.error, new RegExp(two.lane.id));
+  });
+});
+
+test("CLI explicitly adopts an orphaned PortPilot profile and returns its PPID", async () => {
+  await withHome(async (home) => {
+    const profileDir = join(home, "profiles", "saved-login");
+    await mkdir(profileDir, { recursive: true });
+    const adopted = runCli([
+      "adopt-profile", "--owner", "codex", "--cwd", join(home, "project"),
+      "--session", "saved", "--profile-dir", profileDir, "--json",
+    ], home);
+    assert.equal(adopted.code, 0, adopted.stderr);
+    const payload = JSON.parse(adopted.stdout);
+    assert.equal(payload.adopted, true);
+    assert.equal(payload.lane.chromeProfileDir, profileDir);
+    assert.match(payload.lane.id, /^lane_/);
   });
 });

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { REGISTRY_VERSION, isStale, laneSessionId, canonicalizeOwner, normalizeCwd, nowIso, } from "./lane.js";
+import { REGISTRY_VERSION, isStale, laneSessionId, canonicalizeOwner, normalizeCwd, nowIso, laneBrowser, } from "./lane.js";
 import { lockPath, registryPath } from "./paths.js";
 import { atomicWriteJson, withLock } from "./lockfile.js";
 const EMPTY = { version: REGISTRY_VERSION, lanes: [] };
@@ -41,6 +41,8 @@ export function filterLanes(lanes, filter) {
             return false;
         if (wantSession !== null && laneSessionId(lane) !== wantSession)
             return false;
+        if (filter.browser && laneBrowser(lane) !== filter.browser)
+            return false;
         if (wantStatuses && !wantStatuses.includes(lane.status))
             return false;
         if (!filter.includeReleased && !wantStatuses && lane.status === "released")
@@ -51,6 +53,46 @@ export function filterLanes(lanes, filter) {
 export async function findLane(filter) {
     const lanes = await listLanes();
     return filterLanes(lanes, filter)[0];
+}
+export class AmbiguousLaneError extends Error {
+    candidateIds;
+    candidates;
+    constructor(candidates) {
+        const ordered = [...candidates].sort((a, b) => a.id.localeCompare(b.id));
+        const details = ordered.map((lane) => `${lane.id} (${lane.chromeProfileDir})`).join(", ");
+        super(`ambiguous lane selector; use --lane-id with one of: ${details}`);
+        this.name = "AmbiguousLaneError";
+        this.candidateIds = ordered.map((lane) => lane.id);
+        this.candidates = ordered.map((lane) => ({ id: lane.id, profileDir: lane.chromeProfileDir }));
+    }
+}
+function stableLaneOrder(a, b) {
+    const created = a.createdAt.localeCompare(b.createdAt);
+    return created !== 0 ? created : a.id.localeCompare(b.id);
+}
+/**
+ * Resolve either one immutable lane id or the legacy owner/cwd/session tuple.
+ * Tuple lookup never guesses across distinct browser-profile identities.
+ */
+export function resolveLaneSelectorFrom(lanes, selector) {
+    if (selector.laneId) {
+        const exact = lanes.find((lane) => lane.id === selector.laneId);
+        if (!exact)
+            return undefined;
+        if (!selector.includeReleased && exact.status === "released")
+            return undefined;
+        return exact;
+    }
+    const matches = filterLanes(lanes, selector);
+    if (matches.length <= 1)
+        return matches[0];
+    const identities = new Set(matches.map((lane) => `${laneBrowser(lane)}\0${normalizeCwd(lane.chromeProfileDir)}`));
+    if (identities.size > 1)
+        throw new AmbiguousLaneError(matches);
+    return [...matches].sort(stableLaneOrder)[0];
+}
+export async function resolveLaneSelector(selector) {
+    return resolveLaneSelectorFrom(await listLanes(), selector);
 }
 /**
  * Read-modify-write the registry while holding the lockfile. The updater

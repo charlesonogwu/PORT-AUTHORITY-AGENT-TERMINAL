@@ -11,13 +11,16 @@ COMMANDS:
                   [--task "..."] [--app-range 3000-3099] [--chrome-range 9322-9399]
                   [--no-app-port] [--no-chrome-port] [--browser-script <path>]
                   [--browser chrome|edge|firefox] [--json]
+  adopt-profile --owner <n> --cwd <p> --profile-dir <path>
+                                Adopt an orphaned directory beneath ~/.portpilot/profiles
+                  [--session <id>] [--browser chrome|edge|firefox] [--json]
   check --owner <n> --cwd <p>   Verify the lane is safe to use right now (Chrome attach safety)
-                  [--session <id>] [--json]
+                  [--session <id>] [--lane-id <PPID>] [--json]
   release --owner <n> --cwd <p> Mark a lane as released
-                  [--session <id>] [--remove] (delete the entry instead of marking)
+                  [--session <id>] [--lane-id <PPID>] [--remove] (delete the entry instead of marking)
   close-browser --owner <n> --cwd <p>
                                 Explicitly close exactly one reverified lane browser
-                  [--session <id>] [--json]
+                  [--session <id>] [--lane-id <PPID>] [--json]
                        MCP/controller disconnects never close browsers. release remains
                        bookkeeping-only; close-browser terminates the verified process.
   next [--range 9322-9399]      Find the next free port in a range
@@ -43,7 +46,7 @@ COMMANDS:
                   [--json]
   launch-chrome --owner <n> --cwd <p>
                                 Launch Chrome bound to the lane's debug port + profile
-                  [--session <id>] [--dry-run] [--bin <path>]
+                  [--session <id>] [--lane-id <PPID>] [--dry-run] [--bin <path>]
                   [--mode visible|background|headless]
                        visible    (default) normal window on the active desktop
                        background  real headed Chrome rendered off-screen; never
@@ -53,6 +56,7 @@ COMMANDS:
                         chromeMode field in ~/.portpilot/config.json)
   open --owner <n> --cwd <p>    Reserve + launch + navigate in ONE step, for Chrome, Edge, or Firefox
                   [--session <id>] [--task "..."] [--url <url>]
+                  [--lane-id <PPID>]  exact saved profile; owner/cwd not needed
                   [--browser chrome|edge|firefox]   omit = existing lane's browser,
                        else the configured defaultBrowser (dashboard picker), else chrome
                   [--mode visible|background|headless]   firefox has no 'background'
@@ -71,7 +75,7 @@ COMMANDS:
                                 Drive the lane's browser — chrome/edge via CDP, firefox
                                 via WebDriver BiDi. SAME subcommands for every backend.
                                 Only ever controls the lane's OWN browser (safe-attach).
-                  [--session <id>] [--tab <id|index|substring>] [--json]
+                  [--session <id>] [--lane-id <PPID>] [--tab <id|index|substring>] [--json]
                        --tab accepts a tab id, 0-based index, or url/title substring.
                        (Firefox tab ids change between calls — use index/substring.)
                   tabs                        list open tabs (id, url, title)
@@ -119,6 +123,7 @@ GLOBAL FLAGS:
   --json                        Emit machine-readable JSON
   --owner <name>                Agent owner: codex, claude, gemini, ...
   --cwd <path>                  Project working directory
+  --lane-id <PPID>              Select one exact immutable PortPilot lane/profile
   -h, --help                    Show help
 
 EXAMPLES:
