@@ -1,0 +1,72 @@
+name: Publish npm package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed release tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Select immutable release tag
+        id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected an existing v-prefixed semantic-version tag; got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          persist-credentials: false
+
+      - name: Set up Node 24 and npm registry
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Verify tag matches package version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          PACKAGE_TAG="v$(node -p "require('./package.json').version")"
+          if [[ "$RELEASE_TAG" != "$PACKAGE_TAG" ]]; then
+            echo "Release tag $RELEASE_TAG does not match package version $PACKAGE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Install exact dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Test release source
+        run: npm test
+
+      - name: Type-check release source
+        run: npm run lint
+
+      - name: Publish with npm Trusted Publishing
+        run: npm publish --access public
