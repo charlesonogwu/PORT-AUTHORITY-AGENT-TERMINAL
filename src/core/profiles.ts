@@ -1,9 +1,10 @@
 import type { Dirent } from "node:fs";
-import { access, readdir, rm, stat } from "node:fs/promises";
+import { access, readdir, rm, stat, rename } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { Lane, LaneStatus, isStale, normalizeCwd } from "./lane.js";
-import { profilesDir } from "./paths.js";
-import { listLanes, removeLane } from "./registry.js";
+import { profilesDir, lockPath } from "./paths.js";
+import { withLock } from "./lockfile.js";
+import { listLanes, updateRegistry } from "./registry.js";
 
 /**
  * Lifecycle tooling for the per-lane Chrome profiles PortPilot stores under
@@ -31,6 +32,7 @@ export interface ProfileEntry {
   status: ProfileStatus;
   /** lastSeen of the owning lane, if any. */
   lastSeen?: string;
+  hasSavedLogins?: boolean;
 }
 
 function samePath(a: string, b: string): boolean {
@@ -125,6 +127,7 @@ export async function listProfiles(now: number = Date.now()): Promise<ProfileEnt
         path,
         sizeBytes,
         status: cls.status,
+        hasSavedLogins: lanes.some(l => samePath(l.chromeProfileDir, path) && !!l.savedLogins?.length),
         ...(cls.lane ? { lane: cls.lane } : {}),
         ...(cls.lastSeen ? { lastSeen: cls.lastSeen } : {}),
       };
@@ -174,7 +177,9 @@ export function selectPruneCandidates(
 ): ProfileEntry[] {
   const byName = !!(opts.names && opts.names.length > 0);
   return profiles.filter((p) => {
+    if (p.path.endsWith(".portpilot-deleting")) return false;
     if (PROTECTED.has(p.status)) return false; // never touch live rooms
+    if (p.hasSavedLogins || p.lane?.savedLogins?.length) return false; // all associations protect a shared profile
     if (byName) return matchesAnyName(p.name, opts.names!);
     const statusIncluded =
       (p.status === "orphaned" && opts.includeOrphaned) ||
@@ -211,8 +216,42 @@ export function assertWithinProfilesRoot(target: string): void {
  *  root. The guard makes it impossible to remove anything outside
  *  ~/.portpilot/profiles. */
 export async function deleteProfileDir(path: string): Promise<void> {
+  return deleteProfile(path, false);
+}
+
+async function deleteProfile(path: string, explicitErase: boolean): Promise<void> {
   assertWithinProfilesRoot(path);
-  await rm(path, { recursive: true, force: true });
+  if (path.endsWith(".portpilot-deleting")) throw new Error("profile deletion pending; refusing cleanup of in-progress data");
+  const tombstone = `${resolve(path)}.portpilot-deleting`;
+  assertWithinProfilesRoot(tombstone);
+  let moved = false;
+  // Confirmation holds this same lock while verifying the profile. Moving the
+  // directory under the lock makes subsequent confirmations fail closed, while
+  // slow recursive deletion happens outside the expiring registry lock lease.
+  await withLock(lockPath(), async () => {
+    let pending = false;
+    try { await access(tombstone); pending = true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (pending) throw new Error("profile deletion already in progress; saved login records preserved");
+    if (!explicitErase && (await listLanes()).some(l => samePath(l.chromeProfileDir, path) && l.savedLogins?.length)) {
+      throw new Error("profile has saved login records; use explicit Erase");
+    }
+    try { await rename(path, tombstone); moved = true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  });
+  if (!moved) return;
+  try { await rm(tombstone, { recursive: true, force: true }); }
+  catch (error) {
+    // Preserve the original identity when deletion fails; never overwrite a
+    // replacement directory created meanwhile.
+    await withLock(lockPath(), async () => {
+      try { await access(path); }
+      catch (missing) {
+        if ((missing as NodeJS.ErrnoException).code === "ENOENT") await rename(tombstone, path);
+      }
+    });
+    throw error;
+  }
 }
 
 /**
@@ -252,8 +291,19 @@ export async function forgetProfile(opts: {
   profileDir: string;
   laneId?: string;
 }): Promise<{ removedProfile: boolean; removedLane: boolean }> {
-  await deleteProfileDir(opts.profileDir);
   let removedLane = false;
-  if (opts.laneId) removedLane = await removeLane(opts.laneId);
+  const selected = opts.laneId ? (await listLanes()).find(l => l.id === opts.laneId) : undefined;
+  if (opts.laneId && !selected) throw new Error("unknown immutable PPID; refusing Erase");
+  if (selected && !samePath(selected.chromeProfileDir, opts.profileDir)) throw new Error("PPID does not match profile to erase");
+  // Recursive deletion may outlast the registry lock lease. Read fresh state
+  // under the lock only after successful deletion, preserving concurrent writes.
+  await deleteProfile(opts.profileDir, true);
+  await updateRegistry(lanes => {
+    return lanes.filter(l => {
+      if (!samePath(l.chromeProfileDir, opts.profileDir)) return true;
+      removedLane = true;
+      return false;
+    });
+  });
   return { removedProfile: true, removedLane };
 }

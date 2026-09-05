@@ -17,8 +17,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const flags: Record<string, string | boolean | string[]> = {};
   const setFlag = (key: string, value: string | boolean): void => {
     const previous = flags[key];
-    if (typeof value === "string" && typeof previous === "string") flags[key] = [previous, value];
-    else if (typeof value === "string" && Array.isArray(previous)) flags[key] = [...previous, value];
+    if (key === "purpose" && typeof value === "string" && typeof previous === "string") flags[key] = [previous, value];
+    else if (key === "purpose" && typeof value === "string" && Array.isArray(previous)) flags[key] = [...previous, value];
     else flags[key] = value;
   };
   for (let i = 0; i < rest.length; i++) {

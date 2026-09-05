@@ -172,7 +172,7 @@ function buildProfileDir(
 function takenProfileDirs(lanes: Lane[]): Set<string> {
   const out = new Set<string>();
   for (const lane of lanes) {
-    if (lane.status === "released") continue;
+    if (lane.status === "released" && !lane.savedLogins?.length) continue;
     out.add(lane.chromeProfileDir.toLowerCase());
   }
   return out;

@@ -23,6 +23,7 @@ export interface ProfileEntry {
     status: ProfileStatus;
     /** lastSeen of the owning lane, if any. */
     lastSeen?: string;
+    hasSavedLogins?: boolean;
 }
 /**
  * Classify a single on-disk profile path against the registry's lanes. Pure

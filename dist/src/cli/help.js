@@ -4,6 +4,14 @@ USAGE:
   portpilot <command> [options]
 
 COMMANDS:
+  remember-login --lane-id <PPID> --website <hostname[:port]> --confirmed
+                  [--account-label "Work"] [--json]
+                                Record only a user-confirmed website login
+  find-login --cwd <p> --website <hostname[:port]> [--account-label "Work"] [--json]
+                                Lookup first, then open the exact returned PPID
+                                No match: stop. Ambiguous: ask. Never create a replacement.
+                                Local metadata is exposed to the requesting agent, contains no
+                                credentials, and does not prove current authentication.
   list                          List all lanes
                   [--cwd <p>] [--owner <n>] [--purpose <tag>] [--json]
   remember-profile --lane-id <PPID>

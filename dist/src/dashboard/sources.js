@@ -26,6 +26,8 @@ function toUnified(l) {
         out.profileLabel = l.profileLabel;
     if (l.profilePurposes !== undefined)
         out.profilePurposes = l.profilePurposes;
+    if (l.savedLogins !== undefined)
+        out.savedLogins = l.savedLogins;
     if (l.appPort !== undefined)
         out.appPort = l.appPort;
     if (l.chromeDebugPort !== undefined)

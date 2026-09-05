@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-09-05
+
+### Added
+
+- Confirmed saved website logins tied to immutable PPIDs: CLI `remember-login`
+  and `find-login`, MCP `remember_login` and `find_saved_login`. Explicit user
+  confirmation is required. Website matching uses the exact normalized hostname
+  including port, with no implicit www/subdomain matching. Local metadata is
+  exposed to the requesting agent, contains no credentials, and does not prove
+  current authentication. Generic labels/purposes remain backward compatible.
+- Saved-login records protect lanes/profiles from ordinary removal and pruning;
+  release remains permitted. Explicit profile forgetting removes matching records
+  atomically after profile deletion. Lookup retains missing/unverifiable profiles
+  when determining ambiguity and reports unavailable PPIDs. A single unavailable
+  profile fails with restore/verify guidance instead of suggesting a replacement.
+
+### Fixed
+
+- Repeated CLI flags accumulate only for purpose tags; scalar flags, including
+  dry-run, use the last value. Text lists show every complete PPID.
+- MCP explicit owner listing uses exact string matching, without changing core
+  canonical owner semantics. CLI/MCP list reject explicitly blank cwd filters.
+
 ### Added
 
 - Saved browser profiles can have a friendly label and purpose tags, allowing

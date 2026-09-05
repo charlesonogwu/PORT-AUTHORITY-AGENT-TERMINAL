@@ -15,9 +15,10 @@ function pad(s, width) {
     return s + " ".repeat(width - s.length);
 }
 export function formatLanesTable(lanes) {
-    const header = COLS.map((c) => pad(c.label, c.width)).join("  ");
+    const columns = [{ key: "id", label: "PPID", width: Math.max(4, ...lanes.map((lane) => lane.id.length)) }, ...COLS];
+    const header = columns.map((c) => pad(c.label, c.width)).join("  ");
     const rows = lanes.map((lane) => {
-        return COLS.map((c) => {
+        return columns.map((c) => {
             let value;
             if (c.key === "appPortStr")
                 value = lane.appPort ? String(lane.appPort) : "-";

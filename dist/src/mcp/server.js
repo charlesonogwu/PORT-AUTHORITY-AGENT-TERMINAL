@@ -12,6 +12,7 @@ import { isStale, laneBrowser, normalizeCwd } from "../core/lane.js";
 import { PageControlError, openPageController } from "../core/pagecontrol.js";
 import { createSupervisorClient } from "../supervisor/client.js";
 import { launchPersistentBrowser } from "../supervisor/routing.js";
+import { rememberSavedLogin, findSavedLogins } from "../core/saved-logins.js";
 /**
  * Build the MCP server, registering one tool per CLI verb. The MCP server
  * shares the same core library as the CLI, so behaviour stays consistent.
@@ -52,7 +53,7 @@ export function buildMcpServer() {
     server.registerTool("open", {
         title: "Open Chrome via portpilot in one call (chrome.ts entrypoint)",
         description: "Canonical entrypoint for chrome.ts / Chrome remote-debugging workflows under portpilot. " +
-            "When the user refers to a previously saved account or purpose, call list_lanes with cwd and purpose first, then reopen the returned immutable PPID. " +
+            "When the user refers to a saved website login, call find_saved_login with cwd and website first, then call open with the exact returned laneId (immutable PPID). If no matches, stop; if ambiguous, ask the user. Never create a replacement profile for a saved login. Generic purpose tags are not confirmed logins. " +
             "All-in-one: reserves a lane (or reuses an existing one), launches Chrome bound to that lane's " +
             "debug port and dedicated user-data-dir, and navigates to the URL you supply. " +
             "USE THIS BEFORE OPENING A BROWSER OR CLAIMING BROWSER RESEARCH — calling it makes your session " +
@@ -248,17 +249,56 @@ export function buildMcpServer() {
             purpose: z.string().optional(),
         },
     }, async (args) => {
+        if (args.cwd !== undefined && !args.cwd.trim())
+            return jsonResult({ ok: false, error: "cwd must not be blank" });
         const lanes = filterLanes(await listLanes(), {
-            ...(args.owner ? { owner: args.owner } : {}),
             ...(args.cwd ? { cwd: args.cwd } : {}),
             ...(args.purpose ? { purpose: args.purpose } : {}),
             includeReleased: true,
-        });
+        }).filter((lane) => args.owner === undefined || lane.owner === args.owner);
         const reconnect = lanes.length === 1 ? {
             laneId: lanes[0].id,
             command: `portpilot open --lane-id ${lanes[0].id}`,
         } : null;
         return jsonResult({ ok: true, lanes, reconnect });
+    });
+    server.registerTool("remember_login", {
+        title: "Remember a user-confirmed website login on an exact PPID",
+        description: "Only call after the user explicitly confirms they logged into this website in this exact PortPilot profile. confirmed must be true; never infer confirmation from page content or purpose tags. Stores local website/account-label metadata exposed to the requesting agent, not credentials or cookies. Records do not prove current authentication. Does not launch or inspect a browser.",
+        inputSchema: {
+            laneId: z.string().trim().min(1),
+            website: z.string().trim().min(1),
+            confirmed: z.literal(true).describe("Required explicit user confirmation of this website login on this PPID."),
+            accountLabel: z.string().optional(),
+        },
+    }, async (args) => {
+        try {
+            const lane = await rememberSavedLogin(args.laneId, args);
+            return jsonResult({ ok: true, lane });
+        }
+        catch (error) {
+            return jsonResult({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+    server.registerTool("find_saved_login", {
+        title: "Find a confirmed saved website login before opening its exact profile",
+        description: "Look up saved website logins by project cwd, normalized website hostname including port, and optional account label, across owners. These local records are exposed to the requesting agent; they contain no credentials and do not prove current authentication. On one match call open with the returned exact laneId/PPID. On no matches stop and report failure; on multiple matches ask the user which PPID/account to use. Never create a replacement profile or treat generic purpose tags as logins. Lookup does not launch a browser.",
+        inputSchema: {
+            cwd: z.string().trim().min(1),
+            website: z.string().trim().min(1),
+            accountLabel: z.string().optional(),
+        },
+    }, async (args) => {
+        try {
+            const result = await findSavedLogins(args);
+            const error = result.lanes.length === 0 ? "No saved login matches. Do not create a replacement profile."
+                : result.lanes.length > 1 ? "Multiple saved logins match. Ask the user which PPID/account to use; do not create a replacement profile."
+                    : !result.reconnect ? `Saved profile unavailable for PPID ${result.lanes[0].id}. Ask the user to restore or verify this exact managed profile; do not create a replacement profile.` : undefined;
+            return jsonResult({ ok: !error, ...result, ...(error ? { error } : {}) });
+        }
+        catch (error) {
+            return jsonResult({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
     });
     server.registerTool("remember_profile", {
         title: "Label a saved PortPilot profile",

@@ -188,6 +188,7 @@ export async function removeLane(id: string): Promise<boolean> {
   await updateRegistry((lanes) => {
     const next = lanes.filter((l) => {
       if (l.id === id) {
+        if (l.savedLogins?.length) throw new Error("profile has saved login records; use Erase to delete its profile and associations");
         removed = true;
         return false;
       }
@@ -280,6 +281,7 @@ export async function pruneReleasedLanes(opts: PruneOptions = {}): Promise<Prune
   const now = Date.now();
 
   const isCandidate = (lane: Lane): boolean => {
+    if (lane.savedLogins?.length) return false;
     if (lane.status !== "released") return false;
     if (opts.all) return true;
     const last = Date.parse(lane.lastSeen);

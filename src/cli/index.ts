@@ -19,6 +19,7 @@ import { ParsedArgs, flagBool, flagString, flagStrings, parseArgs, parseDuration
 import { formatLanesTable, formatReserveBlock } from "./format.js";
 import { HELP } from "./help.js";
 import { launchPersistentBrowser } from "../supervisor/routing.js";
+import { rememberSavedLogin, findSavedLogins } from "../core/saved-logins.js";
 
 interface CliContext {
   args: ParsedArgs;
@@ -66,6 +67,7 @@ async function selectedLane(ctx: CliContext, includeReleased = false): Promise<L
 
 async function cmdList(ctx: CliContext): Promise<void> {
   const cwd = flagString(ctx.args, "cwd");
+  if ("cwd" in ctx.args.flags && !cwd?.trim()) fail(ctx, "--cwd must not be blank", 2);
   const purpose = flagString(ctx.args, "purpose");
   const owner = flagString(ctx.args, "owner");
   const lanes = filterLanes(await listLanes(), {
@@ -88,6 +90,37 @@ async function cmdList(ctx: CliContext): Promise<void> {
   }
   ctx.stdout.write(formatLanesTable(lanes) + "\n");
   if (reconnect) ctx.stdout.write(`\nReopen exact profile: ${reconnect.command}\n`);
+}
+
+async function cmdRememberLogin(ctx: CliContext): Promise<void> {
+  const laneId = flagString(ctx.args, "lane-id");
+  const website = flagString(ctx.args, "website");
+  if (!laneId?.trim()) fail(ctx, "missing required --lane-id", 2);
+  if (!website?.trim()) fail(ctx, "missing required --website", 2);
+  const confirmed = ctx.args.flags.confirmed === true || ctx.args.flags.confirmed === "true";
+  if (!confirmed) fail(ctx, "--confirmed is required, only after the user confirms this website login", 2);
+  const lane = await rememberSavedLogin(laneId!, { website: website!, confirmed, accountLabel: flagString(ctx.args, "account-label") });
+  if (ctx.json) emit(ctx, { ok: true, lane });
+  else ctx.stdout.write(`Remembered confirmed website login for PPID ${lane.id}. This does not prove current authentication.\n`);
+}
+
+async function cmdFindLogin(ctx: CliContext): Promise<void> {
+  const cwd = flagString(ctx.args, "cwd");
+  const website = flagString(ctx.args, "website");
+  if (!cwd?.trim()) fail(ctx, "--cwd is required and must not be blank", 2);
+  if (!website?.trim()) fail(ctx, "missing required --website", 2);
+  const result = await findSavedLogins({ cwd: cwd!, website: website!, accountLabel: flagString(ctx.args, "account-label") });
+  const error = result.lanes.length === 0
+    ? "No saved login matches. Do not create a replacement profile."
+    : result.lanes.length > 1 ? "Multiple saved logins match. Ask the user which PPID/account to use; do not create a replacement profile."
+    : !result.reconnect ? `Saved profile unavailable for PPID ${result.lanes[0]!.id}. Ask the user to restore or verify this exact managed profile; do not create a replacement profile.` : undefined;
+  if (ctx.json) emit(ctx, { ok: !error, ...result, ...(error ? { error } : {}) });
+  else {
+    if (result.lanes.length) ctx.stdout.write(formatLanesTable(result.lanes) + "\n");
+    if (error) ctx.stderr.write(error + "\n");
+    else if (result.reconnect) ctx.stdout.write(`Reopen exact profile: ${result.reconnect.command}\nThis record does not prove current authentication.\n`);
+  }
+  if (error) process.exitCode = 2;
 }
 
 async function cmdRememberProfile(ctx: CliContext): Promise<void> {
@@ -1098,6 +1131,10 @@ async function dispatch(args: ParsedArgs): Promise<void> {
       return cmdAdoptProfile(ctx);
     case "remember-profile":
       return cmdRememberProfile(ctx);
+    case "remember-login":
+      return cmdRememberLogin(ctx);
+    case "find-login":
+      return cmdFindLogin(ctx);
     case "check":
       return cmdCheck(ctx);
     case "release":

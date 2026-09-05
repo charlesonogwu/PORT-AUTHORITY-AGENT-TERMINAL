@@ -25,6 +25,8 @@ export interface LiveSession {
   task?: string
   profileLabel?: string
   profilePurposes?: string[]
+  /** Historical user confirmations, not proof of a current sign-in. */
+  savedLogins?: { website: string; confirmedAt: string; accountLabel?: string }[]
   pid: number
   chromeDebugPort: number
   /**

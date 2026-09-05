@@ -10,9 +10,9 @@ export function parseArgs(argv) {
     const flags = {};
     const setFlag = (key, value) => {
         const previous = flags[key];
-        if (typeof value === "string" && typeof previous === "string")
+        if (key === "purpose" && typeof value === "string" && typeof previous === "string")
             flags[key] = [previous, value];
-        else if (typeof value === "string" && Array.isArray(previous))
+        else if (key === "purpose" && typeof value === "string" && Array.isArray(previous))
             flags[key] = [...previous, value];
         else
             flags[key] = value;
