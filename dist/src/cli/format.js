@@ -6,6 +6,7 @@ const COLS = [
     { key: "appPortStr", label: "APP", width: 5 },
     { key: "chromePortStr", label: "CHROME", width: 7 },
     { key: "status", label: "STATUS", width: 9 },
+    { key: "profileStr", label: "SAVED PROFILE", width: 22 },
     { key: "cwd", label: "CWD", width: 32 },
 ];
 function pad(s, width) {
@@ -14,9 +15,10 @@ function pad(s, width) {
     return s + " ".repeat(width - s.length);
 }
 export function formatLanesTable(lanes) {
-    const header = COLS.map((c) => pad(c.label, c.width)).join("  ");
+    const columns = [{ key: "id", label: "PPID", width: Math.max(4, ...lanes.map((lane) => lane.id.length)) }, ...COLS];
+    const header = columns.map((c) => pad(c.label, c.width)).join("  ");
     const rows = lanes.map((lane) => {
-        return COLS.map((c) => {
+        return columns.map((c) => {
             let value;
             if (c.key === "appPortStr")
                 value = lane.appPort ? String(lane.appPort) : "-";
@@ -25,6 +27,9 @@ export function formatLanesTable(lanes) {
             else if (c.key === "sessionStr") {
                 const s = laneSessionId(lane);
                 value = s === DEFAULT_SESSION_ID ? "-" : s;
+            }
+            else if (c.key === "profileStr") {
+                value = lane.profileLabel ?? lane.profilePurposes?.join(",") ?? "-";
             }
             else
                 value = String(lane[c.key] ?? "-");

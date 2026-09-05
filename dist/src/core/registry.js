@@ -25,6 +25,9 @@ export async function listLanes() {
     const reg = await readRegistry();
     return reg.lanes;
 }
+export function normalizeProfilePurpose(value) {
+    return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+}
 export function filterLanes(lanes, filter) {
     const wantStatuses = Array.isArray(filter.status)
         ? filter.status
@@ -43,12 +46,34 @@ export function filterLanes(lanes, filter) {
             return false;
         if (filter.browser && laneBrowser(lane) !== filter.browser)
             return false;
+        if (filter.purpose) {
+            const purpose = normalizeProfilePurpose(filter.purpose);
+            if (!purpose || !(lane.profilePurposes ?? []).some((item) => normalizeProfilePurpose(item) === purpose))
+                return false;
+        }
         if (wantStatuses && !wantStatuses.includes(lane.status))
             return false;
         if (!filter.includeReleased && !wantStatuses && lane.status === "released")
             return false;
         return true;
     });
+}
+export async function rememberLaneProfile(laneId, input) {
+    let updated;
+    const label = input.label?.trim().slice(0, 80);
+    const purposes = [...new Set((input.purposes ?? []).map(normalizeProfilePurpose).filter(Boolean))].sort();
+    await updateRegistry((lanes) => lanes.map((lane) => {
+        if (lane.id !== laneId)
+            return lane;
+        updated = {
+            ...lane,
+            ...(label ? { profileLabel: label } : {}),
+            ...(purposes.length ? { profilePurposes: purposes } : {}),
+            lastSeen: nowIso(),
+        };
+        return updated;
+    }));
+    return updated;
 }
 export async function findLane(filter) {
     const lanes = await listLanes();
@@ -124,6 +149,8 @@ export async function removeLane(id) {
     await updateRegistry((lanes) => {
         const next = lanes.filter((l) => {
             if (l.id === id) {
+                if (l.savedLogins?.length)
+                    throw new Error("profile has saved login records; use Erase to delete its profile and associations");
                 removed = true;
                 return false;
             }
@@ -192,6 +219,8 @@ export async function pruneReleasedLanes(opts = {}) {
     const cutoff = opts.all ? Number.POSITIVE_INFINITY : (opts.olderThanMs ?? DEFAULT_PRUNE_AGE_MS);
     const now = Date.now();
     const isCandidate = (lane) => {
+        if (lane.savedLogins?.length)
+            return false;
         if (lane.status !== "released")
             return false;
         if (opts.all)

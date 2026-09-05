@@ -8,6 +8,15 @@ export function parseArgs(argv) {
     const command = first ?? "help";
     const positional = [];
     const flags = {};
+    const setFlag = (key, value) => {
+        const previous = flags[key];
+        if (key === "purpose" && typeof value === "string" && typeof previous === "string")
+            flags[key] = [previous, value];
+        else if (key === "purpose" && typeof value === "string" && Array.isArray(previous))
+            flags[key] = [...previous, value];
+        else
+            flags[key] = value;
+    };
     for (let i = 0; i < rest.length; i++) {
         const token = rest[i];
         if (token === "--") {
@@ -17,16 +26,16 @@ export function parseArgs(argv) {
         if (token.startsWith("--")) {
             const eq = token.indexOf("=");
             if (eq !== -1) {
-                flags[token.slice(2, eq)] = token.slice(eq + 1);
+                setFlag(token.slice(2, eq), token.slice(eq + 1));
                 continue;
             }
             const key = token.slice(2);
             const next = rest[i + 1];
             if (next === undefined || next.startsWith("--") || next.startsWith("-")) {
-                flags[key] = true;
+                setFlag(key, true);
             }
             else {
-                flags[key] = next;
+                setFlag(key, next);
                 i++;
             }
             continue;
@@ -43,9 +52,17 @@ export function flagString(args, name, fallback) {
     const v = args.flags[name];
     if (typeof v === "string")
         return v;
+    if (Array.isArray(v))
+        return v[v.length - 1];
     if (v === true)
         return undefined;
     return fallback;
+}
+export function flagStrings(args, name) {
+    const value = args.flags[name];
+    if (typeof value === "string")
+        return [value];
+    return Array.isArray(value) ? value : [];
 }
 export function flagBool(args, name, fallback = false) {
     const v = args.flags[name];

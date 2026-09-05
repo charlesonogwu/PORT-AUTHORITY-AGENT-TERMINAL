@@ -694,6 +694,11 @@ function SessionRow({
         </TableCell>
         <TableCell>
           <div className="font-medium">{s.project}</div>
+          {s.profileLabel && (
+            <div className="truncate text-[11px] text-muted-foreground" title={s.profileLabel}>
+              {s.profileLabel}
+            </div>
+          )}
         </TableCell>
         <TableCell>
           <BrowserCell browser={s.browser} />
@@ -813,10 +818,37 @@ function ExpandedRow({ s }: { s: LiveSession }) {
         />
         <Field label="browser version" value={s.browserVersion ?? "?"} />
         {s.task && <Field label="task (declared)" value={s.task} />}
+        {s.profilePurposes && s.profilePurposes.length > 0 && (
+          <Field label="saved profile purposes" value={s.profilePurposes.join(", ")} />
+        )}
         {s.appPort && <Field label="app port" mono value={`:${s.appPort}`} />}
         {s.laneId && (
           <div className="space-y-1">
             <Field label="immutable PPID / lane id" mono value={s.laneId} />
+            {s.savedLogins && s.savedLogins.length > 0 && (
+              <div className="space-y-1 break-words">
+                <div className="text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
+                  Remembered website associations
+                </div>
+                <ul className="space-y-1">
+                  {s.savedLogins.map((login, i) => (
+                    <li key={i}>
+                      {login.website}{login.accountLabel ? ` (${login.accountLabel})` : ""}
+                      <div className="text-[10px] text-muted-foreground">
+                        Historical user confirmation: {login.confirmedAt}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[10px] text-muted-foreground">
+                  Not currently verified. These records do not prove you are still signed in.
+                </p>
+              </div>
+            )}
+            <p className="text-[10px] text-muted-foreground">
+              Close/Kill keeps profile cookies/logins and remembered website associations.
+              Erase deletes both, including profile history, and cannot be undone.
+            </p>
             <div className="flex items-center gap-2">
               <code className="break-all text-[10px] text-muted-foreground">{`paat open --lane-id ${s.laneId}`}</code>
               <Button
@@ -1382,7 +1414,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
       disabled={busy}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={`Terminate Chrome process pid ${pid}`}
+      title={`Terminate browser process pid ${pid}. Keeps profile cookies/logins and remembered website associations.`}
     >
       {busy ? (
         "killing…"
@@ -1458,12 +1490,12 @@ function EraseButton({ s, onErased }: { s: LiveSession; onErased: () => void }) 
       disabled={busy}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title="Erase this session's saved logins, cookies & history. Closes Chrome and cannot be undone."
+      title="Erase deletes profile cookies/logins, history AND remembered website associations. Closes the browser and cannot be undone. Close/Kill keeps both profile data and remembered associations."
     >
       {busy ? (
         "erasing…"
       ) : confirming ? (
-        "Erase all data?"
+        "Erase logins & associations?"
       ) : (
         <>
           <Eraser className="size-3" />

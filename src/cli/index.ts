@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { adoptProfileLane, allocateLane, checkLane, findFreePort } from "../core/allocator.js";
 import { Lane, isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
-import { AmbiguousLaneError, DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, resolveLaneSelector, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
+import { AmbiguousLaneError, DEFAULT_PRUNE_AGE_MS, filterLanes, findLane, listLanes, markStaleLanes, pruneReleasedLanes, rememberLaneProfile, removeLane, resolveLaneSelector, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { scanPorts, hasSonar } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
 import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
@@ -15,10 +15,11 @@ import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachi
 import { installShortcut, shortcutStatus, uninstallShortcut } from "./shortcut.js";
 import { installMcpFor, type McpClient } from "./install-mcp.js";
 import { formatMissingDependencyMessage, isMissingDependencyError, missingDependencyName } from "./mcp-preflight.js";
-import { ParsedArgs, flagBool, flagString, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
+import { ParsedArgs, flagBool, flagString, flagStrings, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
 import { formatLanesTable, formatReserveBlock } from "./format.js";
 import { HELP } from "./help.js";
 import { launchPersistentBrowser } from "../supervisor/routing.js";
+import { rememberSavedLogin, findSavedLogins } from "../core/saved-logins.js";
 
 interface CliContext {
   args: ParsedArgs;
@@ -65,9 +66,22 @@ async function selectedLane(ctx: CliContext, includeReleased = false): Promise<L
 }
 
 async function cmdList(ctx: CliContext): Promise<void> {
-  const lanes = await listLanes();
+  const cwd = flagString(ctx.args, "cwd");
+  if ("cwd" in ctx.args.flags && !cwd?.trim()) fail(ctx, "--cwd must not be blank", 2);
+  const purpose = flagString(ctx.args, "purpose");
+  const owner = flagString(ctx.args, "owner");
+  const lanes = filterLanes(await listLanes(), {
+    ...(cwd ? { cwd } : {}),
+    ...(purpose ? { purpose } : {}),
+    ...(owner ? { owner } : {}),
+    includeReleased: true,
+  });
+  const reconnect = lanes.length === 1 ? {
+    command: `portpilot open --lane-id ${lanes[0]!.id}`,
+    reason: "one exact saved profile matched; reopen this PPID instead of creating a new lane",
+  } : null;
   if (ctx.json) {
-    emit(ctx, { ok: true, lanes });
+    emit(ctx, { ok: true, lanes, reconnect });
     return;
   }
   if (lanes.length === 0) {
@@ -75,6 +89,50 @@ async function cmdList(ctx: CliContext): Promise<void> {
     return;
   }
   ctx.stdout.write(formatLanesTable(lanes) + "\n");
+  if (reconnect) ctx.stdout.write(`\nReopen exact profile: ${reconnect.command}\n`);
+}
+
+async function cmdRememberLogin(ctx: CliContext): Promise<void> {
+  const laneId = flagString(ctx.args, "lane-id");
+  const website = flagString(ctx.args, "website");
+  if (!laneId?.trim()) fail(ctx, "missing required --lane-id", 2);
+  if (!website?.trim()) fail(ctx, "missing required --website", 2);
+  const confirmed = ctx.args.flags.confirmed === true || ctx.args.flags.confirmed === "true";
+  if (!confirmed) fail(ctx, "--confirmed is required, only after the user confirms this website login", 2);
+  const lane = await rememberSavedLogin(laneId!, { website: website!, confirmed, accountLabel: flagString(ctx.args, "account-label") });
+  if (ctx.json) emit(ctx, { ok: true, lane });
+  else ctx.stdout.write(`Remembered confirmed website login for PPID ${lane.id}. This does not prove current authentication.\n`);
+}
+
+async function cmdFindLogin(ctx: CliContext): Promise<void> {
+  const cwd = flagString(ctx.args, "cwd");
+  const website = flagString(ctx.args, "website");
+  if (!cwd?.trim()) fail(ctx, "--cwd is required and must not be blank", 2);
+  if (!website?.trim()) fail(ctx, "missing required --website", 2);
+  const result = await findSavedLogins({ cwd: cwd!, website: website!, accountLabel: flagString(ctx.args, "account-label") });
+  const error = result.lanes.length === 0
+    ? "No saved login matches. Do not create a replacement profile."
+    : result.lanes.length > 1 ? "Multiple saved logins match. Ask the user which PPID/account to use; do not create a replacement profile."
+    : !result.reconnect ? `Saved profile unavailable for PPID ${result.lanes[0]!.id}. Ask the user to restore or verify this exact managed profile; do not create a replacement profile.` : undefined;
+  if (ctx.json) emit(ctx, { ok: !error, ...result, ...(error ? { error } : {}) });
+  else {
+    if (result.lanes.length) ctx.stdout.write(formatLanesTable(result.lanes) + "\n");
+    if (error) ctx.stderr.write(error + "\n");
+    else if (result.reconnect) ctx.stdout.write(`Reopen exact profile: ${result.reconnect.command}\nThis record does not prove current authentication.\n`);
+  }
+  if (error) process.exitCode = 2;
+}
+
+async function cmdRememberProfile(ctx: CliContext): Promise<void> {
+  const laneId = flagString(ctx.args, "lane-id");
+  const label = flagString(ctx.args, "label");
+  const purposes = flagStrings(ctx.args, "purpose");
+  if (!laneId) fail(ctx, "missing required --lane-id", 2);
+  if (!label && purposes.length === 0) fail(ctx, "provide --label and/or at least one --purpose", 2);
+  const lane = await rememberLaneProfile(laneId!, { ...(label ? { label } : {}), purposes });
+  if (!lane) fail(ctx, `no lane found for immutable PPID ${laneId}`, 2);
+  if (ctx.json) emit(ctx, { ok: true, lane });
+  else ctx.stdout.write(`Remembered ${lane!.profileLabel ?? lane!.id}: ${(lane!.profilePurposes ?? []).join(", ") || "no purpose tags"}\n`);
 }
 
 async function cmdStatus(ctx: CliContext): Promise<void> {
@@ -1071,6 +1129,12 @@ async function dispatch(args: ParsedArgs): Promise<void> {
       return cmdReserve(ctx);
     case "adopt-profile":
       return cmdAdoptProfile(ctx);
+    case "remember-profile":
+      return cmdRememberProfile(ctx);
+    case "remember-login":
+      return cmdRememberLogin(ctx);
+    case "find-login":
+      return cmdFindLogin(ctx);
     case "check":
       return cmdCheck(ctx);
     case "release":

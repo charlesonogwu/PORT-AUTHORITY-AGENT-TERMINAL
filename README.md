@@ -333,6 +333,10 @@ the only path to termination, and it refuses anything that isn't Chromium-family
 | Command | Purpose |
 |---|---|
 | `paat list`                               | List every lane |
+| `paat list --cwd <p> --purpose <tag>`     | Find saved profiles by workspace and intended purpose |
+| `paat remember-profile --lane-id <PPID> --label "Vendor support" --purpose vendor-portal` | Generic metadata (not a confirmed website login) |
+| `paat remember-login --lane-id <PPID> --website example.com --confirmed --account-label "Work"` | Record a website login only after explicit user confirmation |
+| `paat find-login --cwd /path/to/project --website example.com --account-label "Work" --json` | Find confirmed saved logins, then reopen the exact returned PPID |
 | `paat status`                             | List + live port observations + warnings |
 | `paat reserve --owner <n> --cwd <p> --task <s>` | Reserve a lane (idempotent per owner+cwd+session) |
 | `paat check --owner <n> --cwd <p>`        | Verify the lane is safe to use right now |
@@ -350,6 +354,43 @@ the only path to termination, and it refuses anything that isn't Chromium-family
 | `paat mcp`                                | Run as an MCP stdio server |
 
 Add `--json` to any command for machine-readable output.
+
+Profile labels and purpose tags are local organizational metadata. They let an
+agent find the same immutable PPID across tasks and agent owners, but they do
+not claim or verify that any website is currently signed in. If several saved
+profiles match, PortPilot returns every candidate and requires an exact PPID
+instead of guessing.
+
+### Confirmed saved website logins
+
+After the user explicitly confirms a login in an exact PortPilot profile, use
+`remember-login --lane-id <PPID> --website example.com --confirmed` (MCP:
+`remember_login` with `confirmed: true`). An optional `accountLabel`, such as
+"Work", distinguishes accounts. Never infer confirmation from a purpose tag or
+page content. Records contain `website`, `confirmedAt`, and optional
+`accountLabel`, and remain tied to the immutable PPID.
+
+For later requests, first use `find-login --cwd /path/to/project --website
+example.com --json` (MCP: `find_saved_login`). Lookup crosses agent owners and
+matches the exact normalized hostname including port: `example.com:8443` is
+distinct from `example.com`, `www.example.com`, and other subdomains. Missing or
+unverifiable profiles remain candidates for ambiguity checks and are reported in
+`unavailableProfileIds`. On one match with a non-null `reconnect`, use
+`open --lane-id <returned-PPID>` (MCP: `open` with `laneId`). If that one profile
+is unavailable (`reconnect: null`), stop and ask the user to restore or verify
+the exact managed profile; do not create a replacement.
+On no matches, stop and report failure; on ambiguity, ask which PPID/account to
+use. Never create a replacement profile to satisfy a saved-login request.
+
+This is local metadata exposed to the requesting agent. It contains no
+credentials, passwords, cookies, or tokens and does not prove current
+authentication. Generic labels/purpose tags remain supported separately.
+Choose account labels with that visibility in mind.
+
+Release is permitted and preserves saved-login records. Ordinary lane removal,
+registry pruning, and profile pruning protect saved logins. Explicit profile
+forgetting is destructive: after profile deletion, matching registry cleanup is
+atomic. Use it only when intentionally discarding that saved profile.
 
 ## Live dashboard
 

@@ -39,6 +39,16 @@ export interface Lane {
      */
     sessionId: string;
     task?: string;
+    /** Historical user confirmation only; never proof of current authentication. */
+    savedLogins?: {
+        website: string;
+        confirmedAt: string;
+        accountLabel?: string;
+    }[];
+    /** User-facing name for the intended saved browser account/profile. */
+    profileLabel?: string;
+    /** Normalized purpose tags used to rediscover this PPID across agents. */
+    profilePurposes?: string[];
     appPort?: number;
     /**
      * Remote-debugging port. For Chrome lanes this is the CDP port; for Firefox

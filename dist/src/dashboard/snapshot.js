@@ -135,6 +135,12 @@ function buildLiveSession(live, ppLane, cdp, processSnap, births) {
         session.cwd = cwd;
     if (lane?.task)
         session.task = lane.task;
+    if (lane?.profileLabel)
+        session.profileLabel = lane.profileLabel;
+    if (lane?.profilePurposes)
+        session.profilePurposes = lane.profilePurposes;
+    if (lane?.savedLogins !== undefined)
+        session.savedLogins = lane.savedLogins;
     if (lane?.appPort !== undefined)
         session.appPort = lane.appPort;
     if (cdp.version)

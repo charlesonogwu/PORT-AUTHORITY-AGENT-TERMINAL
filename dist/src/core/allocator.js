@@ -99,7 +99,7 @@ function buildProfileDir(owner, project, sessionId, taken, override, browser) {
 function takenProfileDirs(lanes) {
     const out = new Set();
     for (const lane of lanes) {
-        if (lane.status === "released")
+        if (lane.status === "released" && !lane.savedLogins?.length)
             continue;
         out.add(lane.chromeProfileDir.toLowerCase());
     }
