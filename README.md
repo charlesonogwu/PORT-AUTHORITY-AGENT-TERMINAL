@@ -333,6 +333,8 @@ the only path to termination, and it refuses anything that isn't Chromium-family
 | Command | Purpose |
 |---|---|
 | `paat list`                               | List every lane |
+| `paat list --cwd <p> --purpose <tag>`     | Find saved profiles by workspace and intended purpose |
+| `paat remember-profile --lane-id <PPID> --label "Vendor support" --purpose vendor-portal` | Label one exact saved profile for later agents |
 | `paat status`                             | List + live port observations + warnings |
 | `paat reserve --owner <n> --cwd <p> --task <s>` | Reserve a lane (idempotent per owner+cwd+session) |
 | `paat check --owner <n> --cwd <p>`        | Verify the lane is safe to use right now |
@@ -350,6 +352,12 @@ the only path to termination, and it refuses anything that isn't Chromium-family
 | `paat mcp`                                | Run as an MCP stdio server |
 
 Add `--json` to any command for machine-readable output.
+
+Profile labels and purpose tags are local organizational metadata. They let an
+agent find the same immutable PPID across tasks and agent owners, but they do
+not claim or verify that any website is currently signed in. If several saved
+profiles match, PortPilot returns every candidate and requires an exact PPID
+instead of guessing.
 
 ## Live dashboard
 

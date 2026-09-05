@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { adoptProfileLane, allocateLane, checkLane, findFreePort } from "../core/allocator.js";
-import { AmbiguousLaneError, listLanes, markStaleLanes, removeLane, resolveLaneSelector, setLaneStatus, touchLane } from "../core/registry.js";
+import { AmbiguousLaneError, filterLanes, listLanes, markStaleLanes, rememberLaneProfile, removeLane, resolveLaneSelector, setLaneStatus, touchLane } from "../core/registry.js";
 import { hasSonar, scanPorts } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
 import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
@@ -52,6 +52,7 @@ export function buildMcpServer() {
     server.registerTool("open", {
         title: "Open Chrome via portpilot in one call (chrome.ts entrypoint)",
         description: "Canonical entrypoint for chrome.ts / Chrome remote-debugging workflows under portpilot. " +
+            "When the user refers to a previously saved account or purpose, call list_lanes with cwd and purpose first, then reopen the returned immutable PPID. " +
             "All-in-one: reserves a lane (or reuses an existing one), launches Chrome bound to that lane's " +
             "debug port and dedicated user-data-dir, and navigates to the URL you supply. " +
             "USE THIS BEFORE OPENING A BROWSER OR CLAIMING BROWSER RESEARCH — calling it makes your session " +
@@ -240,14 +241,39 @@ export function buildMcpServer() {
     });
     server.registerTool("list_lanes", {
         title: "List lanes",
-        description: "List every lane currently in the registry, including released ones.",
+        description: "Find saved browser profiles by workspace and intended purpose before creating another lane. A single match includes an exact PPID reconnect command; multiple matches are returned without guessing. Purpose metadata describes intent and is not proof that a website is currently authenticated.",
         inputSchema: {
             owner: z.string().optional(),
+            cwd: z.string().optional(),
+            purpose: z.string().optional(),
         },
     }, async (args) => {
-        const lanes = await listLanes();
-        const filtered = args.owner ? lanes.filter((l) => l.owner === args.owner) : lanes;
-        return jsonResult({ ok: true, lanes: filtered });
+        const lanes = filterLanes(await listLanes(), {
+            ...(args.owner ? { owner: args.owner } : {}),
+            ...(args.cwd ? { cwd: args.cwd } : {}),
+            ...(args.purpose ? { purpose: args.purpose } : {}),
+            includeReleased: true,
+        });
+        const reconnect = lanes.length === 1 ? {
+            laneId: lanes[0].id,
+            command: `portpilot open --lane-id ${lanes[0].id}`,
+        } : null;
+        return jsonResult({ ok: true, lanes, reconnect });
+    });
+    server.registerTool("remember_profile", {
+        title: "Label a saved PortPilot profile",
+        description: "Attach a friendly label and normalized purpose tags to one exact PPID. This never changes the PPID or profile directory and never inspects or claims that a website is logged in.",
+        inputSchema: {
+            laneId: z.string().min(1),
+            label: z.string().min(1).max(80).optional(),
+            purposes: z.array(z.string().min(1)).max(12).optional(),
+        },
+    }, async (args) => {
+        if (!args.label && (!args.purposes || args.purposes.length === 0)) {
+            return jsonResult({ ok: false, error: "provide label and/or at least one purpose" });
+        }
+        const lane = await rememberLaneProfile(args.laneId, { label: args.label, purposes: args.purposes });
+        return lane ? jsonResult({ ok: true, lane }) : jsonResult({ ok: false, error: `no lane found for immutable PPID ${args.laneId}` });
     });
     server.registerTool("adopt_profile", {
         title: "Adopt an orphaned PortPilot browser profile",

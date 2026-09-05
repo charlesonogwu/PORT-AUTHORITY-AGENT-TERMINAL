@@ -51,6 +51,11 @@ export interface LaneFilter {
   status?: LaneStatus | LaneStatus[];
   includeReleased?: boolean;
   browser?: import("./lane.js").BrowserKind;
+  purpose?: string;
+}
+
+export function normalizeProfilePurpose(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 }
 
 export function filterLanes(lanes: Lane[], filter: LaneFilter): Lane[] {
@@ -67,10 +72,34 @@ export function filterLanes(lanes: Lane[], filter: LaneFilter): Lane[] {
     if (cwd && normalizeCwd(lane.cwd) !== cwd) return false;
     if (wantSession !== null && laneSessionId(lane) !== wantSession) return false;
     if (filter.browser && laneBrowser(lane) !== filter.browser) return false;
+    if (filter.purpose) {
+      const purpose = normalizeProfilePurpose(filter.purpose);
+      if (!purpose || !(lane.profilePurposes ?? []).some((item) => normalizeProfilePurpose(item) === purpose)) return false;
+    }
     if (wantStatuses && !wantStatuses.includes(lane.status)) return false;
     if (!filter.includeReleased && !wantStatuses && lane.status === "released") return false;
     return true;
   });
+}
+
+export async function rememberLaneProfile(
+  laneId: string,
+  input: { label?: string; purposes?: string[] },
+): Promise<Lane | undefined> {
+  let updated: Lane | undefined;
+  const label = input.label?.trim().slice(0, 80);
+  const purposes = [...new Set((input.purposes ?? []).map(normalizeProfilePurpose).filter(Boolean))].sort();
+  await updateRegistry((lanes) => lanes.map((lane) => {
+    if (lane.id !== laneId) return lane;
+    updated = {
+      ...lane,
+      ...(label ? { profileLabel: label } : {}),
+      ...(purposes.length ? { profilePurposes: purposes } : {}),
+      lastSeen: nowIso(),
+    };
+    return updated;
+  }));
+  return updated;
 }
 
 export async function findLane(filter: LaneFilter): Promise<Lane | undefined> {

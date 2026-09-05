@@ -21,6 +21,8 @@ export interface UnifiedLane {
     cwd: string;
     sessionId: string;
     task?: string;
+    profileLabel?: string;
+    profilePurposes?: string[];
     appPort?: number;
     chromeDebugPort?: number;
     chromeProfileDir: string;

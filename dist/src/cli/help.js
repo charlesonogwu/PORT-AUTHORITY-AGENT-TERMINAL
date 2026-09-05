@@ -5,6 +5,10 @@ USAGE:
 
 COMMANDS:
   list                          List all lanes
+                  [--cwd <p>] [--owner <n>] [--purpose <tag>] [--json]
+  remember-profile --lane-id <PPID>
+                                Label one saved profile for reliable rediscovery
+                  [--label "Vendor support"] [--purpose vendor-portal] [--purpose support]
   status                        Show lanes + live port observations + warnings
   reserve --owner <n> --cwd <p> Reserve a lane (allocates app & Chrome ports + profile dir)
                   [--session <id>]   parallel session id (different sessions = different ports)
@@ -132,6 +136,8 @@ EXAMPLES:
   portpilot open   --owner codex --cwd C:\\Users\\me\\Downloads\\vend-site --browser firefox --url about:blank
   portpilot open   --owner codex --cwd C:\\Users\\me\\Downloads\\vend-site --browser edge --mode background
   portpilot list --json
+  portpilot remember-profile --lane-id lane_example --label "Vendor support" --purpose vendor-portal
+  portpilot list --cwd C:\Users\me\Downloads\vend-site --purpose vendor-portal --json
   portpilot doctor
 
 Storage: %HOME%/.portpilot/lanes.json (override with PORTPILOT_HOME).

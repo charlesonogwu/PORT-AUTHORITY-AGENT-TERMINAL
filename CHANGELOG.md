@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Saved browser profiles can have a friendly label and purpose tags, allowing
+  CLI, MCP agents, and the dashboard to rediscover and reopen the correct PPID
+  across agent owners without guessing or creating duplicate profiles.
+
 ---
 
 ## [0.4.2] — immutable PPID reconnect

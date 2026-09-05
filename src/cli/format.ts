@@ -1,12 +1,13 @@
 import { DEFAULT_SESSION_ID, Lane, laneSessionId } from "../core/lane.js";
 
-const COLS: { key: keyof Lane | "appPortStr" | "chromePortStr" | "sessionStr"; label: string; width: number }[] = [
+const COLS: { key: keyof Lane | "appPortStr" | "chromePortStr" | "sessionStr" | "profileStr"; label: string; width: number }[] = [
   { key: "owner", label: "OWNER", width: 10 },
   { key: "project", label: "PROJECT", width: 18 },
   { key: "sessionStr", label: "SESSION", width: 14 },
   { key: "appPortStr", label: "APP", width: 5 },
   { key: "chromePortStr", label: "CHROME", width: 7 },
   { key: "status", label: "STATUS", width: 9 },
+  { key: "profileStr", label: "SAVED PROFILE", width: 22 },
   { key: "cwd", label: "CWD", width: 32 },
 ];
 
@@ -25,6 +26,8 @@ export function formatLanesTable(lanes: Lane[]): string {
       else if (c.key === "sessionStr") {
         const s = laneSessionId(lane);
         value = s === DEFAULT_SESSION_ID ? "-" : s;
+      } else if (c.key === "profileStr") {
+        value = lane.profileLabel ?? lane.profilePurposes?.join(",") ?? "-";
       } else value = String((lane as unknown as Record<string, unknown>)[c.key] ?? "-");
       return pad(value, c.width);
     }).join("  ");

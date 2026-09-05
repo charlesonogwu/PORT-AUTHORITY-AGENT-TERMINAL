@@ -176,3 +176,92 @@ test("CLI explicitly adopts an orphaned PortPilot profile and returns its PPID",
     assert.match(payload.lane.id, /^lane_/);
   });
 });
+
+test("CLI remembers a friendly profile purpose without changing its PPID or profile", async () => {
+  await withHome(async (home) => {
+    const cwd = join(home, "workspace");
+    const created = JSON.parse(
+      runCli(["reserve", "--owner", "codex", "--cwd", cwd, "--session", "saved", "--json"], home).stdout,
+    );
+
+    const remembered = runCli([
+      "remember-profile",
+      "--lane-id", created.lane.id,
+      "--label", "Vendor support",
+      "--purpose", "vendor-portal",
+      "--purpose", "support",
+      "--json",
+    ], home);
+
+    assert.equal(remembered.code, 0, remembered.stderr);
+    const payload = JSON.parse(remembered.stdout);
+    assert.equal(payload.lane.id, created.lane.id);
+    assert.equal(payload.lane.chromeProfileDir, created.lane.chromeProfileDir);
+    assert.equal(payload.lane.profileLabel, "Vendor support");
+    assert.deepEqual(payload.lane.profilePurposes, ["support", "vendor-portal"]);
+  });
+});
+
+test("CLI finds a saved profile by purpose across agent owners in one workspace", async () => {
+  await withHome(async (home) => {
+    const cwd = join(home, "workspace");
+    const vendor = JSON.parse(
+      runCli(["reserve", "--owner", "codex", "--cwd", cwd, "--session", "vendor", "--json"], home).stdout,
+    );
+    const billing = JSON.parse(
+      runCli(["reserve", "--owner", "claude", "--cwd", cwd, "--session", "billing", "--json"], home).stdout,
+    );
+    runCli([
+      "remember-profile", "--lane-id", vendor.lane.id,
+      "--label", "Vendor portal", "--purpose", "vendor-portal", "--json",
+    ], home);
+    runCli([
+      "remember-profile", "--lane-id", billing.lane.id,
+      "--label", "Billing portal", "--purpose", "billing", "--json",
+    ], home);
+
+    const found = runCli(["list", "--cwd", cwd, "--purpose", "Vendor Portal", "--json"], home);
+
+    assert.equal(found.code, 0, found.stderr);
+    const payload = JSON.parse(found.stdout);
+    assert.equal(payload.lanes.length, 1);
+    assert.equal(payload.lanes[0].id, vendor.lane.id);
+    assert.equal(payload.reconnect.command, `portpilot open --lane-id ${vendor.lane.id}`);
+    assert.equal(payload.reconnect.reason, "one exact saved profile matched; reopen this PPID instead of creating a new lane");
+  });
+});
+
+test("CLI returns every matching PPID instead of guessing when a purpose is ambiguous", async () => {
+  await withHome(async (home) => {
+    const cwd = join(home, "workspace");
+    const one = JSON.parse(
+      runCli(["reserve", "--owner", "codex", "--cwd", cwd, "--session", "one", "--json"], home).stdout,
+    );
+    const two = JSON.parse(
+      runCli(["reserve", "--owner", "claude", "--cwd", cwd, "--session", "two", "--json"], home).stdout,
+    );
+    for (const lane of [one.lane, two.lane]) {
+      runCli(["remember-profile", "--lane-id", lane.id, "--purpose", "support", "--json"], home);
+    }
+
+    const found = runCli(["list", "--cwd", cwd, "--purpose", "support", "--json"], home);
+
+    assert.equal(found.code, 0, found.stderr);
+    const payload = JSON.parse(found.stdout);
+    assert.deepEqual(payload.lanes.map((lane: { id: string }) => lane.id).sort(), [one.lane.id, two.lane.id].sort());
+    assert.equal(payload.reconnect, null);
+  });
+});
+
+test("CLI text output shows the friendly saved-profile label", async () => {
+  await withHome(async (home) => {
+    const cwd = join(home, "profile-output");
+    const reserved = runCli(["reserve", "--owner", "codex", "--cwd", cwd, "--json"], home);
+    const lane = JSON.parse(reserved.stdout).lane;
+    runCli(["remember-profile", "--lane-id", lane.id, "--label", "Vendor support"], home);
+    const listed = runCli(["list", "--cwd", cwd], home);
+    assert.equal(listed.code, 0);
+    assert.match(listed.stdout, /SAVED PROFILE/);
+    assert.match(listed.stdout, /Vendor support/);
+  });
+});

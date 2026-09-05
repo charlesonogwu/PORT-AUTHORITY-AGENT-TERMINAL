@@ -71,6 +71,8 @@ export interface LiveSession {
   cwd?: string;
   cwdConfidence: Confidence;
   task?: string;
+  profileLabel?: string;
+  profilePurposes?: string[];
   pid: number;
   chromeDebugPort: number;
   /**
@@ -295,6 +297,8 @@ function buildLiveSession(
   };
   if (cwd) session.cwd = cwd;
   if (lane?.task) session.task = lane.task;
+  if (lane?.profileLabel) session.profileLabel = lane.profileLabel;
+  if (lane?.profilePurposes) session.profilePurposes = lane.profilePurposes;
   if (lane?.appPort !== undefined) session.appPort = lane.appPort;
   if (cdp.version) session.browserVersion = cdp.version;
   if (cdp.error) session.cdpError = cdp.error;

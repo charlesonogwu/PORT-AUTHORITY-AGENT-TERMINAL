@@ -46,6 +46,8 @@ export interface LiveSession {
     cwd?: string;
     cwdConfidence: Confidence;
     task?: string;
+    profileLabel?: string;
+    profilePurposes?: string[];
     pid: number;
     chromeDebugPort: number;
     /**

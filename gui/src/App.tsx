@@ -694,6 +694,11 @@ function SessionRow({
         </TableCell>
         <TableCell>
           <div className="font-medium">{s.project}</div>
+          {s.profileLabel && (
+            <div className="truncate text-[11px] text-muted-foreground" title={s.profileLabel}>
+              {s.profileLabel}
+            </div>
+          )}
         </TableCell>
         <TableCell>
           <BrowserCell browser={s.browser} />
@@ -813,6 +818,9 @@ function ExpandedRow({ s }: { s: LiveSession }) {
         />
         <Field label="browser version" value={s.browserVersion ?? "?"} />
         {s.task && <Field label="task (declared)" value={s.task} />}
+        {s.profilePurposes && s.profilePurposes.length > 0 && (
+          <Field label="saved profile purposes" value={s.profilePurposes.join(", ")} />
+        )}
         {s.appPort && <Field label="app port" mono value={`:${s.appPort}`} />}
         {s.laneId && (
           <div className="space-y-1">

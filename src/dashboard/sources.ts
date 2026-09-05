@@ -26,6 +26,8 @@ export interface UnifiedLane {
   cwd: string;
   sessionId: string;
   task?: string;
+  profileLabel?: string;
+  profilePurposes?: string[];
   appPort?: number;
   chromeDebugPort?: number;
   chromeProfileDir: string;
@@ -58,6 +60,8 @@ function toUnified(l: Lane): UnifiedLane {
     lastSeen: l.lastSeen,
   };
   if (l.task !== undefined) out.task = l.task;
+  if (l.profileLabel !== undefined) out.profileLabel = l.profileLabel;
+  if (l.profilePurposes !== undefined) out.profilePurposes = l.profilePurposes;
   if (l.appPort !== undefined) out.appPort = l.appPort;
   if (l.chromeDebugPort !== undefined) out.chromeDebugPort = l.chromeDebugPort;
   if (l.browserScript !== undefined) out.browserScript = l.browserScript;

@@ -13,8 +13,14 @@ export interface LaneFilter {
     status?: LaneStatus | LaneStatus[];
     includeReleased?: boolean;
     browser?: import("./lane.js").BrowserKind;
+    purpose?: string;
 }
+export declare function normalizeProfilePurpose(value: string): string;
 export declare function filterLanes(lanes: Lane[], filter: LaneFilter): Lane[];
+export declare function rememberLaneProfile(laneId: string, input: {
+    label?: string;
+    purposes?: string[];
+}): Promise<Lane | undefined>;
 export declare function findLane(filter: LaneFilter): Promise<Lane | undefined>;
 export interface LaneSelector extends LaneFilter {
     /** Immutable PortPilot lane identity (called PPID in user-facing flows). */
