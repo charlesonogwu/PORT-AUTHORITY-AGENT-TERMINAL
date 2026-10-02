@@ -31,8 +31,6 @@ use std::time::Duration;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(target_os = "windows")]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
-#[cfg(target_os = "windows")]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 /// Refuse to keep the supervisor inside a disposable parent Job Object. If
 /// the host job forbids breakaway, CreateProcess fails and PortPilot fails
@@ -54,9 +52,11 @@ pub fn supervisor_startup_error() -> Option<&'static str> {
 
 #[cfg(target_os = "windows")]
 fn configure_persistent_process(command: &mut Command) {
-    command.creation_flags(
-        CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
-    );
+    // Do NOT combine DETACHED_PROCESS with CREATE_NO_WINDOW: Windows ignores
+    // NO_WINDOW in that combination, and the npm .cmd shim's Node child can
+    // allocate a visible console. Job breakaway provides persistent lifetime;
+    // console detachment is neither needed nor safe for this launch chain.
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
 }
 
 /// Build a Command pre-configured with the platform's "hide-the-console"
@@ -144,6 +144,140 @@ mod tests {
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
+
+    #[test]
+    #[ignore = "console probe invoked through a disposable npm-style batch shim"]
+    fn console_probe_worker() {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        }
+        let output = std::env::var("PORTPILOT_CONSOLE_PROBE").unwrap();
+        fs::write(output, unsafe { GetConsoleWindow() }.is_null().to_string()).unwrap();
+    }
+
+    // Catch a console allocated by the batch shim's child, not merely a
+    // hidden/detached cmd.exe. No supervisor or browser is started here.
+    fn assert_batch_descendant_has_no_console(persistent: bool) {
+        let root = std::env::temp_dir().join(format!(
+            "portpilot-console-{}-{}-{}",
+            std::process::id(),
+            persistent,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let shim = root.join("paat.cmd");
+        let result = root.join("console.txt");
+        fs::write(
+            &shim,
+            "@echo off\r\n\"%PORTPILOT_PROBE_EXE%\" --exact cli::tests::console_probe_worker --ignored\r\n",
+        ).unwrap();
+        let mut command = super::quiet_command(&shim);
+        if persistent {
+            configure_persistent_process(&mut command);
+        }
+        command
+            .env("PORTPILOT_PROBE_EXE", std::env::current_exe().unwrap())
+            .env("PORTPILOT_CONSOLE_PROBE", &result)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                // The persistent probe escaped the launcher's job, so closing
+                // that job cannot clean it up. Kill only this test-owned tree
+                // while the original child handle still pins its identity.
+                let _ = super::quiet_command("taskkill.exe")
+                    .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let probe = fs::read_to_string(&result);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "probe failed or timed out"
+        );
+        assert_eq!(
+            probe.unwrap(),
+            "true",
+            "batch descendant allocated a console"
+        );
+    }
+
+    #[test]
+    #[ignore = "worker assigned to an explicit breakaway-allowed test job"]
+    fn supervisor_console_worker() {
+        let signal = std::env::var("PORTPILOT_CONSOLE_START").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::path::Path::new(&signal).exists() {
+            assert!(Instant::now() < deadline, "launcher never signaled");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_batch_descendant_has_no_console(true);
+    }
+
+    #[test]
+    fn supervisor_batch_descendant_has_no_console() {
+        // Test runners may themselves be inside a restrictive job. Explicitly
+        // model the permitted breakaway boundary used by the desktop host.
+        let signal =
+            std::env::temp_dir().join(format!("portpilot-console-start-{}", std::process::id()));
+        let mut worker = super::quiet_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::tests::supervisor_console_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("PORTPILOT_CONSOLE_START", &signal)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let job = unsafe { CreateJobObjectW(None, None).unwrap() };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of_val(&info) as u32,
+            )
+            .unwrap();
+            AssignProcessToJobObject(job, HANDLE(worker.as_raw_handle())).unwrap();
+        }
+        fs::write(&signal, b"go").unwrap();
+        let status = worker.wait().unwrap();
+        unsafe { CloseHandle(job).unwrap() };
+        fs::remove_file(signal).unwrap();
+        assert!(
+            status.success(),
+            "supervisor console regression worker failed"
+        );
+    }
+
+    #[test]
+    fn repeated_snapshot_batch_descendants_have_no_console() {
+        for _ in 0..3 {
+            assert_batch_descendant_has_no_console(false);
+        }
+    }
 
     #[test]
     #[ignore = "worker invoked by supervisor_breaks_away_from_kill_on_close_job"]
