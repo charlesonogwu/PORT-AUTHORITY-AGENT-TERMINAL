@@ -10,6 +10,7 @@ mod cli;
 mod commands;
 mod hide_watcher;
 mod paths;
+mod snapshot_worker;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

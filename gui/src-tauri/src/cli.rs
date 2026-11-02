@@ -85,6 +85,14 @@ fn find_paat_binary() -> Result<String, String> {
         .into())
 }
 
+/// Command that starts the dashboard's long-lived helper, `paat dashboard-serve`
+/// (see snapshot_worker.rs). Windowless, like every other spawn here.
+pub fn dashboard_helper_command() -> Result<Command, String> {
+    let mut command = quiet_command(find_paat_binary()?);
+    command.arg("dashboard-serve");
+    Ok(command)
+}
+
 /// Start the user-scoped browser supervisor. The dashboard is launched by
 /// Explorer/login autostart, outside disposable MCP process jobs; the
 /// supervisor inherits that durable lifetime boundary.

@@ -11,6 +11,7 @@
  * view.
  */
 import { BrowserKind } from "../core/lane.js";
+import type { PowerShellRunner } from "../core/powershell-host.js";
 import { EntrySource } from "./sources.js";
 export interface CdpTab {
     id: string;
@@ -151,4 +152,5 @@ export interface DashboardSnapshot {
 }
 export declare function buildSnapshot(opts?: {
     cdpTimeoutMs?: number;
+    powershell?: PowerShellRunner;
 }): Promise<DashboardSnapshot>;

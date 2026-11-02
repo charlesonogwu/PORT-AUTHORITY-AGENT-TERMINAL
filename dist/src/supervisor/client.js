@@ -18,6 +18,16 @@ export function supervisorEndpoint(home = portpilotHome()) {
 export function supervisorRequestTimeout(method, override) {
     return override ?? (method === "launch" ? 40_000 : method === "close" ? 10_000 : 3_000);
 }
+/** Ping the supervisor and describe the answer. Never throws: "not running" is a status, not an error. */
+export async function getSupervisorStatus(options = {}) {
+    try {
+        const result = await createSupervisorClient({ ...options, timeoutMs: options.timeoutMs ?? 1_000 }).ping();
+        return { ok: true, running: true, ...result };
+    }
+    catch (error) {
+        return { ok: false, running: false, error: error instanceof Error ? error.message : String(error) };
+    }
+}
 export function createSupervisorClient(options = {}) {
     const home = options.home ?? portpilotHome();
     const endpoint = supervisorEndpoint(home);

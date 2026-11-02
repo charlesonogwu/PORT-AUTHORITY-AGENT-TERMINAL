@@ -1,3 +1,4 @@
+import type { PowerShellRunner } from "./powershell-host.js";
 /**
  * One observation of a TCP listener on the local machine.
  */
@@ -16,6 +17,9 @@ export interface ScanOptions {
     preferSonar?: boolean;
     includeIpv6?: boolean;
     signal?: AbortSignal;
+    /** Long-lived PowerShell session for the Windows queries. Without it, each
+     * query starts its own powershell.exe (fine for one-shot CLI calls). */
+    powershell?: PowerShellRunner;
 }
 export interface ScanResult {
     observations: PortObservation[];
