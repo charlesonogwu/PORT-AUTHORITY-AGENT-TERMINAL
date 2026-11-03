@@ -15,6 +15,7 @@ mod macos_application;
 mod paths;
 mod process_identity;
 mod runtime;
+mod snapshot_worker;
 
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
@@ -62,6 +63,9 @@ pub fn run() {
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let runtime = runtime::RuntimeState::load(&paths::runtime_provider_config_path());
 
+    #[cfg(not(target_os = "windows"))]
+    let startup_runtime = runtime.clone();
+
     let app = tauri::Builder::default()
         // Single-instance plugin: a second `paat-dashboard.exe` invocation
         // brings the existing window to front instead of spawning a duplicate.
@@ -90,6 +94,12 @@ pub fn run() {
                 install_macos_menu(_app)?;
                 lifecycle::restore_main_window(_app.handle());
             }
+            // Browser lifetime belongs to this independently launched native
+            // app, never to a disposable MCP stdio worker.
+            #[cfg(target_os = "windows")]
+            cli::record_supervisor_startup(cli::start_supervisor_background());
+            #[cfg(not(target_os = "windows"))]
+            cli::record_supervisor_startup(startup_runtime.start_supervisor_background());
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {

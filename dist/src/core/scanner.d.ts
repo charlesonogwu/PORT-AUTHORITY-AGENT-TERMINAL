@@ -1,3 +1,4 @@
+import type { PowerShellRunner } from "./powershell-host.js";
 /**
  * One observation of a TCP listener on the local machine.
  */
@@ -6,6 +7,8 @@ export interface PortObservation {
     pid?: number;
     command?: string;
     commandLine?: string;
+    /** OS-reported process creation time when the native scanner can provide it. */
+    processStartedAt?: string;
     protocol?: "tcp" | "tcp6";
     source: "sonar" | "native";
     raw?: unknown;
@@ -14,12 +17,23 @@ export interface ScanOptions {
     preferSonar?: boolean;
     includeIpv6?: boolean;
     signal?: AbortSignal;
+    /** Long-lived PowerShell session for the Windows queries. Without it, each
+     * query starts its own powershell.exe (fine for one-shot CLI calls). */
+    powershell?: PowerShellRunner;
 }
 export interface ScanResult {
     observations: PortObservation[];
     source: "sonar" | "native" | "empty";
     errors: string[];
 }
+interface ExecResult {
+    stdout: string;
+    stderr: string;
+    code: number | null;
+}
+/** lsof exits 1 with no output when there are no matching listeners. A null
+ * exit means the process was killed/timed out and must never mean "no ports". */
+export declare function isAuthoritativeLsofResult(result: ExecResult): boolean;
 /**
  * Detect whether the user has Sonar installed and on PATH.
  * We probe `sonar --help` rather than `--version` because some builds report a
@@ -46,3 +60,4 @@ export declare function scanPorts(opts?: ScanOptions): Promise<ScanResult>;
  */
 export declare function isPortInUse(observations: PortObservation[], port: number): boolean;
 export declare function observationsForPort(observations: PortObservation[], port: number): PortObservation[];
+export {};

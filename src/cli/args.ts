@@ -7,14 +7,20 @@
 export interface ParsedArgs {
   command: string;
   positional: string[];
-  flags: Record<string, string | boolean>;
+  flags: Record<string, string | boolean | string[]>;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const [first, ...rest] = argv;
   const command = first ?? "help";
   const positional: string[] = [];
-  const flags: Record<string, string | boolean> = {};
+  const flags: Record<string, string | boolean | string[]> = {};
+  const setFlag = (key: string, value: string | boolean): void => {
+    const previous = flags[key];
+    if (key === "purpose" && typeof value === "string" && typeof previous === "string") flags[key] = [previous, value];
+    else if (key === "purpose" && typeof value === "string" && Array.isArray(previous)) flags[key] = [...previous, value];
+    else flags[key] = value;
+  };
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i]!;
     if (token === "--") {
@@ -24,15 +30,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (token.startsWith("--")) {
       const eq = token.indexOf("=");
       if (eq !== -1) {
-        flags[token.slice(2, eq)] = token.slice(eq + 1);
+        setFlag(token.slice(2, eq), token.slice(eq + 1));
         continue;
       }
       const key = token.slice(2);
       const next = rest[i + 1];
       if (next === undefined || next.startsWith("--") || next.startsWith("-")) {
-        flags[key] = true;
+        setFlag(key, true);
       } else {
-        flags[key] = next;
+        setFlag(key, next);
         i++;
       }
       continue;
@@ -49,8 +55,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
 export function flagString(args: ParsedArgs, name: string, fallback?: string): string | undefined {
   const v = args.flags[name];
   if (typeof v === "string") return v;
+  if (Array.isArray(v)) return v[v.length - 1];
   if (v === true) return undefined;
   return fallback;
+}
+
+export function flagStrings(args: ParsedArgs, name: string): string[] {
+  const value = args.flags[name];
+  if (typeof value === "string") return [value];
+  return Array.isArray(value) ? value : [];
 }
 
 export function flagBool(args: ParsedArgs, name: string, fallback = false): boolean {

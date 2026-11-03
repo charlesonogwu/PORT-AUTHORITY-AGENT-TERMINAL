@@ -56,6 +56,17 @@ export async function collectProcessSnapshot(opts = {}) {
     if (process.platform !== "win32")
         return EMPTY_PROCESS_SNAPSHOT;
     const timeoutMs = opts.timeoutMs ?? 4000;
+    // The dashboard's helper passes its long-lived PowerShell session, so a
+    // refresh costs one query instead of a whole powershell.exe start.
+    if (opts.powershell) {
+        try {
+            const result = await opts.powershell.run(COLLECT_SCRIPT, { timeoutMs });
+            return parseCollectorOutput(result.stdout);
+        }
+        catch {
+            return EMPTY_PROCESS_SNAPSHOT;
+        }
+    }
     return new Promise((resolve) => {
         let settled = false;
         const settle = (v) => {
@@ -88,18 +99,21 @@ export async function collectProcessSnapshot(opts = {}) {
         });
         child.on("close", () => {
             clearTimeout(timer);
-            try {
-                const trimmed = stdout.trim();
-                if (!trimmed)
-                    return settle(EMPTY_PROCESS_SNAPSHOT);
-                const raw = JSON.parse(trimmed);
-                settle(parseSnapshot(raw));
-            }
-            catch {
-                settle(EMPTY_PROCESS_SNAPSHOT);
-            }
+            settle(parseCollectorOutput(stdout));
         });
     });
+}
+/** Parse the collector's JSON. Partial data beats no data, so bad output yields an empty snapshot. */
+function parseCollectorOutput(stdout) {
+    const trimmed = stdout.trim();
+    if (!trimmed)
+        return EMPTY_PROCESS_SNAPSHOT;
+    try {
+        return parseSnapshot(JSON.parse(trimmed));
+    }
+    catch {
+        return EMPTY_PROCESS_SNAPSHOT;
+    }
 }
 /**
  * Sum the working-set memory of a process AND all its descendants, in MB.

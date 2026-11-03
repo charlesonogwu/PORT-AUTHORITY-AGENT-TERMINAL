@@ -41,12 +41,11 @@ import {
 } from "@/api/client"
 import { cn } from "@/lib/utils"
 
-// 3-second poll cadence balances "live feel" with subprocess cost. Each
-// poll spawns `paat dashboard-snapshot --json` (Node, ~500ms cold start on
-// Windows) so 2s was burning ~25-50% of every poll interval on process
-// spawn alone. 3s keeps the dashboard feeling current while halving that
-// background churn. The poll also auto-pauses when the window is hidden
-// (see useSnapshot) so the cost only applies when the user is looking.
+// 3-second poll cadence keeps the dashboard feeling live. Each poll is one
+// request to the long-lived `paat dashboard-serve` helper, which starts no
+// new processes (previously every poll started two Node processes and three
+// PowerShells). The poll also auto-pauses when the window is hidden (see
+// useSnapshot), and the helper's PowerShell session stops after 30s idle.
 const POLL_MS = 3_000
 const KILL_CONFIRM_MS = 3_000
 
@@ -639,6 +638,11 @@ function SessionRow({
         </TableCell>
         <TableCell>
           <div className="font-medium">{s.project}</div>
+          {s.profileLabel && (
+            <div className="truncate text-[11px] text-muted-foreground" title={s.profileLabel}>
+              {s.profileLabel}
+            </div>
+          )}
         </TableCell>
         <TableCell>
           <BrowserCell browser={s.browser} />
@@ -774,8 +778,51 @@ function ExpandedRow({ s }: { s: LiveSession }) {
         />
         <Field label="browser version" value={s.browserVersion ?? "?"} />
         {s.task && <Field label="task (declared)" value={s.task} />}
+        {s.profilePurposes && s.profilePurposes.length > 0 && (
+          <Field label="saved profile purposes" value={s.profilePurposes.join(", ")} />
+        )}
         {s.appPort && <Field label="app port" mono value={`:${s.appPort}`} />}
-        {s.laneId && <Field label="lane id" mono value={s.laneId} />}
+        {s.laneId && (
+          <div className="space-y-1">
+            <Field label="immutable PPID / lane id" mono value={s.laneId} />
+            {s.savedLogins && s.savedLogins.length > 0 && (
+              <div className="space-y-1 break-words">
+                <div className="text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
+                  Remembered website associations
+                </div>
+                <ul className="space-y-1">
+                  {s.savedLogins.map((login, i) => (
+                    <li key={i}>
+                      {login.website}{login.accountLabel ? ` (${login.accountLabel})` : ""}
+                      <div className="text-[10px] text-muted-foreground">
+                        Historical user confirmation: {login.confirmedAt}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[10px] text-muted-foreground">
+                  Not currently verified. These records do not prove you are still signed in.
+                </p>
+              </div>
+            )}
+            <p className="text-[10px] text-muted-foreground">
+              Close/Kill keeps profile cookies/logins and remembered website associations.
+              Erase deletes both, including profile history, and cannot be undone.
+            </p>
+            <div className="flex items-center gap-2">
+              <code className="break-all text-[10px] text-muted-foreground">{`paat open --lane-id ${s.laneId}`}</code>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-6 px-2 text-[10px]"
+                onClick={() => void navigator.clipboard.writeText(`paat open --lane-id ${s.laneId}`)}
+              >
+                Copy reconnect
+              </Button>
+            </div>
+          </div>
+        )}
         {s.agentInferenceEvidence && s.agentInferenceEvidence.length > 0 && (
           <div>
             <div className="mb-0.5 text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
@@ -1420,7 +1467,7 @@ function KillButton({ laneId, pid, processStart, enabled, onKilled }: { laneId?:
       disabled={busy || !enabled}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={enabled ? `Terminate verified browser process pid ${pid}` : "Kill is disabled for inferred or external processes."}
+      title={enabled ? `Terminate verified browser process pid ${pid}. Keeps profile cookies/logins and remembered website associations.` : "Kill is disabled for inferred or external processes."}
     >
       {busy ? (
         "killing…"
@@ -1496,12 +1543,12 @@ function EraseButton({ s, enabled, onErased }: { s: LiveSession; enabled: boolea
       disabled={busy || !enabled}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={enabled ? "Erase this session's saved logins, cookies & history. Closes the browser and cannot be undone." : "Erase is disabled for inferred or external processes."}
+      title={enabled ? "Erase this session's saved logins, cookies, history and remembered website associations. Closes the browser and cannot be undone." : "Erase is disabled for inferred or external processes."}
     >
       {busy ? (
         "erasing…"
       ) : confirming ? (
-        "Erase all data?"
+        "Erase logins & associations?"
       ) : (
         <>
           <Eraser className="size-3" />
@@ -1577,6 +1624,13 @@ export function App() {
         )}
         {snap && (
           <>
+            {(snap.warnings?.length ?? 0) > 0 && (
+              <Alert variant="destructive" className="mb-6">
+                <AlertTriangle className="size-4" />
+                <AlertTitle>PortPilot needs attention</AlertTitle>
+                <AlertDescription>{snap.warnings!.join(" ")}</AlertDescription>
+              </Alert>
+            )}
             <ConflictsBanner snap={snap} />
             <div className="mb-3 flex items-center justify-between">
               <SectionLabel className="mb-0">LIVE BROWSER SESSIONS</SectionLabel>

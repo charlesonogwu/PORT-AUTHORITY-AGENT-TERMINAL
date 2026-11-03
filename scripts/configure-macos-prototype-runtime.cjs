@@ -45,8 +45,10 @@ function buildConfig(options) {
   if (packageJson.name !== "port-authority-agent-terminal-mcp") {
     throw new Error("--package-root is not the PortPilot npm package");
   }
-  if (packageJson.version !== "0.4.0") {
-    throw new Error(`the Release B prototype requires PortPilot 0.4.0, found ${String(packageJson.version)}`);
+  const version = String(packageJson.version);
+  const parts = /^([0-9]+)\.([0-9]+)\.([0-9]+)$/.exec(version);
+  if (version !== "0.4.0" && (!parts || (Number(parts[1]) === 0 && (Number(parts[2]) < 4 || (Number(parts[2]) === 4 && Number(parts[3]) < 5))))) {
+    throw new Error(`the prototype requires the legacy 0.4.0 runtime or a compatible 0.4.5+ build, found ${version}`);
   }
   const cliEntry = canonicalFile(
     path.join(packageRoot, "dist", "src", "cli", "index.js"),

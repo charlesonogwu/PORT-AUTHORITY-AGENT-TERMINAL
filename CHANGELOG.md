@@ -9,6 +9,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-11-02
+
+### Added
+
+- `paat dashboard-serve`: a long-lived JSON-lines helper that answers the
+  desktop dashboard's refreshes over stdin/stdout. Internal; the dashboard
+  starts and stops it.
+
+### Changed
+
+- The desktop dashboard no longer starts new processes on every 3-second
+  refresh. Each refresh used to run `paat dashboard-snapshot` and
+  `paat supervisor status` as fresh cmd.exe + node.exe pairs, and the snapshot
+  then started powershell.exe three times (about eight programs and 1.5 s of
+  CPU per refresh on Windows). The dashboard now keeps one helper alive, and
+  the helper reuses one PowerShell session for every query: CPU per refresh
+  measured under 0.1 s, with no programs started per refresh. The PowerShell
+  session stops after 30 s idle and the helper after 2 minutes, so a hidden
+  dashboard costs nothing. If the helper can't run (for example an older
+  `paat` on PATH), the dashboard falls back to the previous one-shot calls.
+- If the persistent PowerShell session can't start (for example under
+  Constrained Language Mode), each query falls back to its own
+  `powershell.exe -Command`, exactly as before.
+
+## [0.4.4] — 2026-10-01
+
+### Fixed
+
+- Windows dashboard supervisor startup no longer combines incompatible console
+  flags that allowed npm batch-shim descendants to open a blank terminal window.
+  Job breakaway and persistent browser lifetime remain enabled. Windows CI now
+  runs the real console-suppression and job-lifetime regression tests.
+
+## [0.4.3] — 2026-09-05
+
+### Added
+
+- Confirmed saved website logins tied to immutable PPIDs: CLI `remember-login`
+  and `find-login`, MCP `remember_login` and `find_saved_login`. Explicit user
+  confirmation is required. Website matching uses the exact normalized hostname
+  including port, with no implicit www/subdomain matching. Local metadata is
+  exposed to the requesting agent, contains no credentials, and does not prove
+  current authentication. Generic labels/purposes remain backward compatible.
+- Saved-login records protect lanes/profiles from ordinary removal and pruning;
+  release remains permitted. Explicit profile forgetting removes matching records
+  atomically after profile deletion. Lookup retains missing/unverifiable profiles
+  when determining ambiguity and reports unavailable PPIDs. A single unavailable
+  profile fails with restore/verify guidance instead of suggesting a replacement.
+
+### Fixed
+
+- Repeated CLI flags accumulate only for purpose tags; scalar flags, including
+  dry-run, use the last value. Text lists show every complete PPID.
+- MCP explicit owner listing uses exact string matching, without changing core
+  canonical owner semantics. CLI/MCP list reject explicitly blank cwd filters.
+
+### Added
+
+- Saved browser profiles can have a friendly label and purpose tags, allowing
+  CLI, MCP agents, and the dashboard to rediscover and reopen the correct PPID
+  across agent owners without guessing or creating duplicate profiles.
+
+---
+
+## [0.4.2] — immutable PPID reconnect
+
+### Fixed
+
+- Persistent browser profiles can be reopened by immutable lane ID with
+  `--lane-id`, even after release, staleness, supervisor restart, or debug-port
+  reassignment. Exact reopen never silently creates a replacement profile.
+- Tuple lookup now fails closed when one owner/project/session maps to distinct
+  profiles, and reports the candidate PPIDs instead of choosing arbitrarily.
+- Duplicate records for the same browser profile deterministically retain one
+  stable PPID and retire the redundant port claims.
+
+### Added
+
+- CLI and MCP exact-ID selection for open, check, page control, browser close,
+  release, and existing-lane launch operations.
+- Guarded orphan-profile adoption, restricted to existing directories beneath
+  PortPilot's own profiles directory; normal browser profiles are refused.
+- The dashboard shows and copies the exact `paat open --lane-id <PPID>` reconnect
+  command.
+
+---
+
+## [0.4.1] — persistent browser supervisor
+
+### Fixed
+
+- Persistent browser processes are now launched by a user-scoped PortPilot
+  supervisor started by the native dashboard, rather than by disposable MCP
+  workers. Cancelling or restarting an MCP controller no longer owns the
+  browser process lifetime.
+- MCP and CLI reconnect through an authenticated local socket and reverify the
+  lane's browser, profile, debugging port, and process before reuse.
+
+### Added
+
+- `close_browser` (MCP) and `close-browser` (CLI) explicitly terminate one
+  reverified lane browser. `release_lane` remains bookkeeping-only.
+- Registry metadata distinguishes browser lifecycle and supervisor identity
+  without changing existing lane-allocation status semantics.
+- Windows lifecycle coverage proves a supervised process survives controller
+  termination, reconnects with the same PID, and exits only on explicit close.
+
 ---
 
 ## [0.4.0] — macOS browser safety/runtime foundation

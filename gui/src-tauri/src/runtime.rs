@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 const RUNTIME_IDENTITY: &str = "portpilot-runtime";
@@ -41,6 +42,10 @@ pub struct RuntimeHandshake {
 pub trait RuntimeProvider: Send + Sync {
     fn handshake(&self) -> &RuntimeHandshake;
     fn run_json(&self, args: &[String]) -> Result<Value, String>;
+    #[cfg(not(target_os = "windows"))]
+    fn dashboard_helper_command(&self) -> Result<Command, String>;
+    #[cfg(not(target_os = "windows"))]
+    fn supervisor_command(&self) -> Result<Command, String>;
 }
 
 #[derive(Clone)]
@@ -113,6 +118,57 @@ impl RuntimeState {
             .run_json(args)
     }
 
+    /// Start the helper through the same verified runtime as one-shot calls.
+    #[cfg(not(target_os = "windows"))]
+    pub fn dashboard_helper_command(&self) -> Result<Command, String> {
+        self.provider
+            .as_ref()
+            .ok_or_else(|| {
+                self.error
+                    .clone()
+                    .unwrap_or_else(|| "PortPilot runtime provider is unavailable".into())
+            })?
+            .dashboard_helper_command()
+    }
+
+    /// The native app owns the supervisor lifetime; never start it under an MCP worker.
+    #[cfg(not(target_os = "windows"))]
+    pub fn start_supervisor_background(&self) -> Result<(), String> {
+        let provider = self.provider.as_ref().ok_or_else(|| {
+            self.error
+                .clone()
+                .unwrap_or_else(|| "PortPilot runtime provider is unavailable".into())
+        })?;
+        let mut command = provider.supervisor_command()?;
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("failed to start the verified PortPilot supervisor: {e}"))?;
+        // Reap the child even after readiness, without tying its lifetime to the dashboard.
+        let pid = child.id();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        for _ in 0..100 {
+            if self
+                .run_json(&["supervisor".into(), "status".into()])
+                .ok()
+                .and_then(|value| value.get("running").and_then(Value::as_bool))
+                == Some(true)
+            {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Err(format!(
+            "verified PortPilot supervisor (pid {pid}) did not become ready within 10 seconds"
+        ))
+    }
+
+    #[cfg(not(target_os = "windows"))]
     pub fn portpilot_version(&self) -> Option<&str> {
         self.provider
             .as_ref()
@@ -348,13 +404,19 @@ impl InstalledRuntimeProvider {
         Ok(provider)
     }
 
-    fn run_direct(&self, args: &[String]) -> Result<Value, String> {
+    fn command(&self) -> Command {
         let mut command = quiet_command(&self.node_executable);
-        command.arg(&self.cli_entry).args(args);
+        command.arg(&self.cli_entry);
         if let Some(home) = &self.portpilot_home {
             command.env("PORTPILOT_HOME", home);
         }
-        let output = command
+        command
+    }
+
+    fn run_direct(&self, args: &[String]) -> Result<Value, String> {
+        let output = self
+            .command()
+            .args(args)
             .output()
             .map_err(|e| format!("failed to start the verified PortPilot runtime: {e}"))?;
         if !output.status.success() {
@@ -441,6 +503,20 @@ impl InstalledRuntimeProvider {
 }
 
 impl RuntimeProvider for InstalledRuntimeProvider {
+    #[cfg(not(target_os = "windows"))]
+    fn supervisor_command(&self) -> Result<Command, String> {
+        let mut command = self.command();
+        command.args(["supervisor", "serve"]);
+        Ok(command)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn dashboard_helper_command(&self) -> Result<Command, String> {
+        let mut command = self.command();
+        command.arg("dashboard-serve");
+        Ok(command)
+    }
+
     fn handshake(&self) -> &RuntimeHandshake {
         &self.handshake
     }
@@ -473,6 +549,49 @@ mod tests {
             platform: expected_node_platform().into(),
             architecture: expected_node_architecture().into(),
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn helper_uses_the_verified_node_cli_and_home_without_a_path_lookup() {
+        let provider = InstalledRuntimeProvider {
+            node_executable: PathBuf::from("/verified/node"),
+            cli_entry: PathBuf::from("/verified/package/dist/cli.js"),
+            portpilot_home: Some(PathBuf::from("/verified/home")),
+            handshake: compatible(),
+        };
+        let command = provider.dashboard_helper_command().unwrap();
+        assert_eq!(command.get_program(), "/verified/node");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec!["/verified/package/dist/cli.js", "dashboard-serve"]
+        );
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "PORTPILOT_HOME"
+                && value == Some(std::ffi::OsStr::new("/verified/home"))));
+        let supervisor = provider.supervisor_command().unwrap();
+        assert_eq!(supervisor.get_program(), command.get_program());
+        assert_eq!(
+            supervisor.get_args().collect::<Vec<_>>(),
+            vec!["/verified/package/dist/cli.js", "supervisor", "serve"]
+        );
+        let direct = provider.command();
+        assert_eq!(direct.get_program(), command.get_program());
+        assert_eq!(direct.get_args().next(), command.get_args().next());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unavailable_runtime_cannot_start_a_helper() {
+        let state = RuntimeState {
+            provider: None,
+            error: Some("verification failed".into()),
+        };
+        assert_eq!(
+            state.dashboard_helper_command().unwrap_err(),
+            "verification failed"
+        );
     }
 
     #[test]

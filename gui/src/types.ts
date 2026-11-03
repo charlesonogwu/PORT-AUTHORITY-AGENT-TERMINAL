@@ -23,6 +23,10 @@ export interface LiveSession {
   cwd?: string
   cwdConfidence: Confidence
   task?: string
+  profileLabel?: string
+  profilePurposes?: string[]
+  /** Historical user confirmations, not proof of a current sign-in. */
+  savedLogins?: { website: string; confirmedAt: string; accountLabel?: string }[]
   pid: number
   /** macOS process creation identity used to reject stale PID reuse. */
   processStart?: string
@@ -87,6 +91,7 @@ export interface DashboardSnapshot {
   generatedAt: string
   scanSource: "sonar" | "native" | "empty"
   scanErrors: string[]
+  warnings?: string[]
   home: string
   registryPath: string
   config: {

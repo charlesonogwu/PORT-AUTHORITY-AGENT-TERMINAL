@@ -135,6 +135,12 @@ function buildLiveSession(live, ppLane, cdp, processSnap, births) {
         session.cwd = cwd;
     if (lane?.task)
         session.task = lane.task;
+    if (lane?.profileLabel)
+        session.profileLabel = lane.profileLabel;
+    if (lane?.profilePurposes)
+        session.profilePurposes = lane.profilePurposes;
+    if (lane?.savedLogins !== undefined)
+        session.savedLogins = lane.savedLogins;
     if (lane?.appPort !== undefined)
         session.appPort = lane.appPort;
     if (cdp.version)
@@ -237,14 +243,16 @@ export async function buildSnapshot(opts = {}) {
     // pass the meter reflects current truth: only lanes that have actually
     // checked in recently count.
     await markStaleLanes();
+    // `opts.powershell` is the dashboard helper's long-lived session; without
+    // it (one-shot CLI calls) each PowerShell query starts its own process.
     const [portpilotLanes, scan, config, processSnap, births] = await Promise.all([
         readPortpilotLanes(),
-        scanPorts(),
+        scanPorts({ powershell: opts.powershell }),
         loadConfig(),
         // One PowerShell round-trip for the entire snapshot's worth of agent
         // inference. Empty on non-Windows or on failure, in which case the
         // legacy profile-keyword fallback still runs.
-        collectProcessSnapshot(),
+        collectProcessSnapshot({ powershell: opts.powershell }),
         // Persistent record of who launched each chrome, captured the first
         // time we saw it. Survives the launcher process exiting.
         BirthRegistry.load(),

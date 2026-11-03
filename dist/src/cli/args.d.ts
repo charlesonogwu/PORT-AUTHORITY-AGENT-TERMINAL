@@ -6,10 +6,11 @@
 export interface ParsedArgs {
     command: string;
     positional: string[];
-    flags: Record<string, string | boolean>;
+    flags: Record<string, string | boolean | string[]>;
 }
 export declare function parseArgs(argv: string[]): ParsedArgs;
 export declare function flagString(args: ParsedArgs, name: string, fallback?: string): string | undefined;
+export declare function flagStrings(args: ParsedArgs, name: string): string[];
 export declare function flagBool(args: ParsedArgs, name: string, fallback?: boolean): boolean;
 export declare function flagInt(args: ParsedArgs, name: string): number | undefined;
 export declare function parsePortRange(spec: string | undefined): {

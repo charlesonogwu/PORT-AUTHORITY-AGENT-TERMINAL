@@ -8,9 +8,24 @@ separate from this app.
 
 The prototype uses a configured Node executable and PortPilot npm runtime from a
 verified absolute path. It does not search or execute an arbitrary `PATH` entry.
-The configured runtime version must match the version expected by the app. A
+The configured runtime version must match the version expected by the app.
+Use a build of this branch at version 0.4.5 or newer for `dashboard-serve`,
+`runtime-handshake`, and the native action checks; the public 0.4.5 CLI does not
+yet include the native handshake/action extensions. Install the locally packed
+CLI with `npm install --ignore-scripts` and `PAAT_SKIP_POSTINSTALL=1` to preserve
+MCP settings, shortcuts, and autostart. The legacy 0.4.0 bridge remains supported. A
 public build should instead bundle a version-matched arm64 runtime sidecar so an
 end user does not need Node or npm.
+
+## Dashboard refresh
+
+The app starts one `dashboard-serve` helper using the same verified absolute
+Node executable, CLI entry, and optional `PORTPILOT_HOME` as its one-shot calls.
+Each refresh requests snapshot and supervisor status over JSON lines. Broken
+helpers back off for 60 seconds while the original one-shot path remains
+available; an idle helper stops after two minutes. Native port and process scans
+can still start system utilities, but refreshes no longer launch fresh Node
+processes. Windows retains main's helper launcher and fallback behavior.
 
 ## App lifecycle
 
@@ -18,8 +33,9 @@ end user does not need Node or npm.
   continues running.
 - Opening PortPilot again or clicking its Dock icon restores the existing window
   and does not start a second instance.
-- Command+Q quits PortPilot and stops its watcher. It does not install or leave a
-  helper process behind. A browser that was already hidden can remain hidden
+- Command+Q quits PortPilot and stops its watcher. Closing the app’s input pipe
+  also stops its dashboard helper. The browser supervisor, started through the
+  verified runtime, remains independent so existing browser sessions survive. A browser that was already hidden can remain hidden
   after quit, but PortPilot will not enforce hidden state for a newly restarted
   browser while the app is not running.
 
