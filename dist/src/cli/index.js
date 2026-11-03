@@ -853,6 +853,19 @@ async function cmdDashboardSnapshot(ctx) {
     // and there's no reasonable human-readable fallback for ~3KB of nested data.
     ctx.stdout.write(JSON.stringify(snap) + "\n");
 }
+/**
+ * `paat dashboard-serve`: the desktop dashboard's long-lived helper. It reads
+ * one JSON request per stdin line and answers on stdout (protocol in
+ * src/dashboard/serve.ts), replacing a fresh `dashboard-snapshot` plus
+ * `supervisor status` process pair on every dashboard refresh.
+ */
+async function cmdDashboardServe() {
+    const { runDashboardServer } = await import("../dashboard/serve.js");
+    await runDashboardServer(process.stdin, process.stdout);
+    // The dashboard has gone. Give the last reply a moment to flush, then exit
+    // even if a stray socket or timer would otherwise keep Node alive.
+    setTimeout(() => process.exit(0), 2_000).unref();
+}
 function formatBytes(n) {
     if (n < 1024)
         return `${n} B`;
@@ -1030,20 +1043,12 @@ async function cmdSupervisor(ctx) {
         return;
     }
     if (sub === "status") {
-        const { createSupervisorClient } = await import("../supervisor/client.js");
-        try {
-            const result = await createSupervisorClient({ timeoutMs: 1_000 }).ping();
-            if (ctx.json)
-                emit(ctx, { ok: true, running: true, ...result });
-            else
-                ctx.stdout.write(`supervisor: running (${result.supervisorId})\n`);
-        }
-        catch (error) {
-            if (ctx.json)
-                emit(ctx, { ok: false, running: false, error: error.message });
-            else
-                ctx.stdout.write("supervisor: not running\n");
-        }
+        const { getSupervisorStatus } = await import("../supervisor/client.js");
+        const status = await getSupervisorStatus({ timeoutMs: 1_000 });
+        if (ctx.json)
+            emit(ctx, status);
+        else
+            ctx.stdout.write(status.running ? `supervisor: running (${status.supervisorId})\n` : "supervisor: not running\n");
         return;
     }
     fail(ctx, `unknown supervisor subcommand: ${sub}. Try: serve, status`, 1);
@@ -1209,6 +1214,8 @@ async function dispatch(args) {
             return cmdDashboard(ctx);
         case "dashboard-snapshot":
             return cmdDashboardSnapshot(ctx);
+        case "dashboard-serve":
+            return cmdDashboardServe();
         case "shortcut":
             return cmdShortcut(ctx);
         case "install-mcp":

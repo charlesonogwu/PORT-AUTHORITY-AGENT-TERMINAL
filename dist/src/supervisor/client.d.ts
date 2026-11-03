@@ -12,4 +12,13 @@ export interface SupervisorClient {
     close(request: SupervisorCloseRequest): Promise<SupervisorCloseResult>;
 }
 export declare function supervisorRequestTimeout(method: SupervisorMethod, override?: number): number;
+export interface SupervisorStatus {
+    ok: boolean;
+    running: boolean;
+    supervisorId?: string;
+    protocolVersion?: number;
+    error?: string;
+}
+/** Ping the supervisor and describe the answer. Never throws: "not running" is a status, not an error. */
+export declare function getSupervisorStatus(options?: SupervisorClientOptions): Promise<SupervisorStatus>;
 export declare function createSupervisorClient(options?: SupervisorClientOptions): SupervisorClient;

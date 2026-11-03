@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-11-02
+
+### Added
+
+- `paat dashboard-serve`: a long-lived JSON-lines helper that answers the
+  desktop dashboard's refreshes over stdin/stdout. Internal; the dashboard
+  starts and stops it.
+
+### Changed
+
+- The desktop dashboard no longer starts new processes on every 3-second
+  refresh. Each refresh used to run `paat dashboard-snapshot` and
+  `paat supervisor status` as fresh cmd.exe + node.exe pairs, and the snapshot
+  then started powershell.exe three times (about eight programs and 1.5 s of
+  CPU per refresh on Windows). The dashboard now keeps one helper alive, and
+  the helper reuses one PowerShell session for every query: CPU per refresh
+  measured under 0.1 s, with no programs started per refresh. The PowerShell
+  session stops after 30 s idle and the helper after 2 minutes, so a hidden
+  dashboard costs nothing. If the helper can't run (for example an older
+  `paat` on PATH), the dashboard falls back to the previous one-shot calls.
+- If the persistent PowerShell session can't start (for example under
+  Constrained Language Mode), each query falls back to its own
+  `powershell.exe -Command`, exactly as before.
+
 ## [0.4.4] — 2026-10-01
 
 ### Fixed

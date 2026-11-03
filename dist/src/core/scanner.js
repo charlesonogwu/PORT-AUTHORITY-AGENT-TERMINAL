@@ -26,6 +26,17 @@ function runCommand(cmd, args, opts = {}) {
         });
     });
 }
+/** Run a PowerShell query in the caller's long-lived session when it has one;
+ * otherwise start powershell.exe for just this query. In a session, `signal`
+ * is only checked before the query starts; a running query finishes (or hits
+ * its timeout) rather than being cancelled. */
+async function runPowerShell(script, opts) {
+    if (opts.powershell) {
+        opts.signal?.throwIfAborted();
+        return opts.powershell.run(script, { timeoutMs: opts.timeoutMs });
+    }
+    return runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { signal: opts.signal, timeoutMs: opts.timeoutMs });
+}
 /** lsof exits 1 with no output when there are no matching listeners. A null
  * exit means the process was killed/timed out and must never mean "no ports". */
 export function isAuthoritativeLsofResult(result) {
@@ -147,7 +158,7 @@ async function lookupUnixProcesses(pids, signal) {
     }
     return { byPid };
 }
-async function lookupWindowsProcesses(pids, signal) {
+async function lookupWindowsProcesses(pids, signal, powershell) {
     const byPid = new Map();
     const wanted = Array.from(new Set(Array.from(pids).filter((p) => Number.isInteger(p) && p > 0)));
     if (wanted.length === 0)
@@ -155,7 +166,7 @@ async function lookupWindowsProcesses(pids, signal) {
     const filter = wanted.map((p) => `ProcessId=${p}`).join(" OR ");
     const ps = `Get-CimInstance Win32_Process -Filter "${filter.replace(/"/g, '\\"')}" | Select-Object ProcessId,Name,CommandLine,@{Name='CreationDate';Expression={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress -Depth 3`;
     try {
-        const res = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { signal, timeoutMs: 8000 });
+        const res = await runPowerShell(ps, { signal, timeoutMs: 8000, powershell });
         if (!res.stdout.trim())
             return { byPid };
         let parsed;
@@ -190,7 +201,7 @@ async function scanWindowsNative(opts) {
     let stdout = "";
     let primaryAvailable = false;
     try {
-        const res = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { signal: opts.signal, timeoutMs: 8000 });
+        const res = await runPowerShell(ps, { signal: opts.signal, timeoutMs: 8000, powershell: opts.powershell });
         if (res.code === 0) {
             primaryAvailable = true;
             stdout = res.stdout;
@@ -261,7 +272,7 @@ async function scanWindowsNative(opts) {
         throw new Error("PortPilot native scanner unavailable: both Get-NetTCPConnection and netstat failed");
     }
     const observations = Array.from(seen.values());
-    const lookup = await lookupWindowsProcesses(observations.map((o) => o.pid).filter((p) => typeof p === "number"), opts.signal);
+    const lookup = await lookupWindowsProcesses(observations.map((o) => o.pid).filter((p) => typeof p === "number"), opts.signal, opts.powershell);
     for (const obs of observations) {
         if (typeof obs.pid !== "number")
             continue;

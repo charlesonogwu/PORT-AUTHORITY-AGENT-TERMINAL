@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { isWindows } from "./paths.js";
+import type { PowerShellRunner } from "./powershell-host.js";
 
 /**
  * One observation of a TCP listener on the local machine.
@@ -20,6 +21,9 @@ export interface ScanOptions {
   preferSonar?: boolean;
   includeIpv6?: boolean;
   signal?: AbortSignal;
+  /** Long-lived PowerShell session for the Windows queries. Without it, each
+   * query starts its own powershell.exe (fine for one-shot CLI calls). */
+  powershell?: PowerShellRunner;
 }
 
 export interface ScanResult {
@@ -59,6 +63,21 @@ function runCommand(cmd: string, args: string[], opts: { signal?: AbortSignal; t
       resolve({ stdout, stderr, code });
     });
   });
+}
+
+/** Run a PowerShell query in the caller's long-lived session when it has one;
+ * otherwise start powershell.exe for just this query. In a session, `signal`
+ * is only checked before the query starts; a running query finishes (or hits
+ * its timeout) rather than being cancelled. */
+async function runPowerShell(
+  script: string,
+  opts: { signal?: AbortSignal; timeoutMs: number; powershell?: PowerShellRunner },
+): Promise<ExecResult> {
+  if (opts.powershell) {
+    opts.signal?.throwIfAborted();
+    return opts.powershell.run(script, { timeoutMs: opts.timeoutMs });
+  }
+  return runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { signal: opts.signal, timeoutMs: opts.timeoutMs });
 }
 
 /** lsof exits 1 with no output when there are no matching listeners. A null
@@ -189,14 +208,14 @@ async function lookupUnixProcesses(pids: Iterable<number>, signal?: AbortSignal)
   return { byPid };
 }
 
-async function lookupWindowsProcesses(pids: Iterable<number>, signal?: AbortSignal): Promise<ProcessLookup> {
+async function lookupWindowsProcesses(pids: Iterable<number>, signal?: AbortSignal, powershell?: PowerShellRunner): Promise<ProcessLookup> {
   const byPid = new Map<number, { command?: string; commandLine?: string; processStartedAt?: string }>();
   const wanted = Array.from(new Set(Array.from(pids).filter((p) => Number.isInteger(p) && p > 0)));
   if (wanted.length === 0) return { byPid };
   const filter = wanted.map((p) => `ProcessId=${p}`).join(" OR ");
   const ps = `Get-CimInstance Win32_Process -Filter "${filter.replace(/"/g, '\\"')}" | Select-Object ProcessId,Name,CommandLine,@{Name='CreationDate';Expression={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress -Depth 3`;
   try {
-    const res = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { signal, timeoutMs: 8000 });
+    const res = await runPowerShell(ps, { signal, timeoutMs: 8000, powershell });
     if (!res.stdout.trim()) return { byPid };
     let parsed: unknown;
     try {
@@ -228,7 +247,7 @@ async function scanWindowsNative(opts: ScanOptions): Promise<PortObservation[]> 
   let stdout = "";
   let primaryAvailable = false;
   try {
-    const res = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { signal: opts.signal, timeoutMs: 8000 });
+    const res = await runPowerShell(ps, { signal: opts.signal, timeoutMs: 8000, powershell: opts.powershell });
     if (res.code === 0) {
       primaryAvailable = true;
       stdout = res.stdout;
@@ -288,7 +307,7 @@ async function scanWindowsNative(opts: ScanOptions): Promise<PortObservation[]> 
     throw new Error("PortPilot native scanner unavailable: both Get-NetTCPConnection and netstat failed");
   }
   const observations = Array.from(seen.values());
-  const lookup = await lookupWindowsProcesses(observations.map((o) => o.pid).filter((p): p is number => typeof p === "number"), opts.signal);
+  const lookup = await lookupWindowsProcesses(observations.map((o) => o.pid).filter((p): p is number => typeof p === "number"), opts.signal, opts.powershell);
   for (const obs of observations) {
     if (typeof obs.pid !== "number") continue;
     const meta = lookup.byPid.get(obs.pid);

@@ -38,12 +38,11 @@ import {
 } from "@/api/client"
 import { cn } from "@/lib/utils"
 
-// 3-second poll cadence balances "live feel" with subprocess cost. Each
-// poll spawns `paat dashboard-snapshot --json` (Node, ~500ms cold start on
-// Windows) so 2s was burning ~25-50% of every poll interval on process
-// spawn alone. 3s keeps the dashboard feeling current while halving that
-// background churn. The poll also auto-pauses when the window is hidden
-// (see useSnapshot) so the cost only applies when the user is looking.
+// 3-second poll cadence keeps the dashboard feeling live. Each poll is one
+// request to the long-lived `paat dashboard-serve` helper, which starts no
+// new processes (previously every poll started two Node processes and three
+// PowerShells). The poll also auto-pauses when the window is hidden (see
+// useSnapshot), and the helper's PowerShell session stops after 30s idle.
 const POLL_MS = 3_000
 const KILL_CONFIRM_MS = 3_000
 

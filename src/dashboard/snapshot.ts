@@ -13,6 +13,7 @@
 
 import { BrowserKind, canonicalizeOwner, isStale, laneSessionId } from "../core/lane.js";
 import { scanPorts } from "../core/scanner.js";
+import type { PowerShellRunner } from "../core/powershell-host.js";
 import { evaluateChromeAttach, ChromeAttachVerdict, isChromeProcess } from "../core/chrome.js";
 import { loadConfig } from "../core/config.js";
 import { portpilotHome, registryPath } from "../core/paths.js";
@@ -401,7 +402,7 @@ function detectConflicts(
   return conflicts;
 }
 
-export async function buildSnapshot(opts: { cdpTimeoutMs?: number } = {}): Promise<DashboardSnapshot> {
+export async function buildSnapshot(opts: { cdpTimeoutMs?: number; powershell?: PowerShellRunner } = {}): Promise<DashboardSnapshot> {
   const cdpTimeoutMs = opts.cdpTimeoutMs ?? 1500;
   // Promote any registry entry whose lastSeen is too old to "stale" before
   // we read. Without this, an active-status zombie keeps consuming a slot
@@ -409,14 +410,16 @@ export async function buildSnapshot(opts: { cdpTimeoutMs?: number } = {}): Promi
   // pass the meter reflects current truth: only lanes that have actually
   // checked in recently count.
   await markStaleLanes();
+  // `opts.powershell` is the dashboard helper's long-lived session; without
+  // it (one-shot CLI calls) each PowerShell query starts its own process.
   const [portpilotLanes, scan, config, processSnap, births] = await Promise.all([
     readPortpilotLanes(),
-    scanPorts(),
+    scanPorts({ powershell: opts.powershell }),
     loadConfig(),
     // One PowerShell round-trip for the entire snapshot's worth of agent
     // inference. Empty on non-Windows or on failure, in which case the
     // legacy profile-keyword fallback still runs.
-    collectProcessSnapshot(),
+    collectProcessSnapshot({ powershell: opts.powershell }),
     // Persistent record of who launched each chrome, captured the first
     // time we saw it. Survives the launcher process exiting.
     BirthRegistry.load(),
