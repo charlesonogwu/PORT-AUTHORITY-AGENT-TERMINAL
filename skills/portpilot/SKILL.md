@@ -1,21 +1,30 @@
 ---
 name: portpilot
-description: Use PortPilot MCP exclusively for a user-requested browser task. Invoke when the user types /portpilot, selects PortPilot from the slash menu, mentions $portpilot, or explicitly asks that browsing be performed through PortPilot rather than another browser or browsing tool.
+description: Complete a requested browser task through PortPilot MCP. Use when the user invokes $portpilot or /portpilot, selects PortPilot from the skill menu, or explicitly asks to use PortPilot for browsing. This is browser automation, not work on PortPilot's source code.
 ---
 
 <!-- managed-by-portpilot:portpilot-skill-v1 -->
 
-# PortPilot-only browser task
+# PortPilot browser task
 
-Apply these rules only for the current task supplied with this invocation.
+Carry out the supplied browser task in the current conversation using the connected PortPilot MCP tools. The server may be named `portpilot` or `port-authority-agent-terminal`; identify it by its tools. If it is unavailable, explain that PortPilot must be connected and stop instead of substituting another browser, web search, direct CDP client, or browser launcher.
 
-1. Use only the browser tools exposed by the `port-authority-agent-terminal` PortPilot MCP server. Do not fall back to built-in web search, another browser tool, Chrome control, computer-use, Playwright, or direct browser launching.
-2. Stop if PortPilot MCP is unavailable or disconnected, and explain that PortPilot must be connected. Do not silently substitute another browsing method.
-3. Use `owner: "codex"` when running in Codex and `owner: "claude"` when running in Claude. Use the current project directory as `cwd` and one short, stable `sessionId` for the entire task.
-4. Call PortPilot `open` to create or reuse the lane. Keep the same owner, cwd, and sessionId for every later page operation.
-5. Omit `browser` unless the user explicitly requests Chrome, Edge, or Firefox. When specified, pass that browser to `open`; otherwise let PortPilot use its configured default.
-6. Use `page_tabs`, `page_goto`, `page_text`, `page_eval`, `page_click`, `page_fill`, and `page_screenshot` as needed. Use `page_newtab` for additional pages instead of creating another lane.
-7. Confirm navigation and interactions from returned page state before reporting success.
-8. Never use or modify a personal/default browser profile. PortPilot must provide the isolated lane profile.
+If the invocation contains no task, ask what the user wants PortPilot to do.
 
-If no browser task accompanied the invocation, ask what the user wants PortPilot to do.
+## Task identity
+
+Use the absolute native project path as `cwd`, your integration's owner name, and one unique, stable `sessionId` for this task. Prefer a stable host thread/task ID; if it is long, hash the complete ID into a short identifier. Keep the returned immutable `laneId` and use it for subsequent operations. A different task gets a different session. Never copy an unrelated lane's session or use `default`.
+
+Owners include `codex`, `claude`, `cursor`, `opencode`, and `gemini`; use `agent` for Grok, with a stable `grok-` session prefix. Do not put task suffixes in `owner`.
+
+## Saved login or new browser
+
+For an explicitly requested saved website login, call `find_saved_login` with the exact workspace and website first. With one match, open its exact immutable `laneId`. With zero matches, report that no saved login was found; with several, ask which account to use. Do not create a replacement profile for a saved login. Call `remember_login` only after the user explicitly confirms that the login worked.
+
+Otherwise call `open` with this task's owner, cwd, sessionId, and requested URL. Omit `browser` unless the user chose one. Use visible mode when the user needs to interact, and background/headless mode when appropriate for the task. Never use a personal browser profile.
+
+## Complete and verify
+
+Use PortPilot's `page_tabs`, `page_goto`, `page_newtab`, `page_text`, `page_eval`, `page_click`, `page_fill`, and `page_screenshot` as needed. Prefer new tabs inside this task's browser to extra browser processes. Verify navigation and actions from returned page state before reporting success.
+
+Keep browser scope and permissions within the user's request. Invoking this skill does not authorize unrelated external actions or create a new agent thread. `release_lane` only clears bookkeeping and does not close the browser. Close a browser only when requested or when cleaning up a temporary browser you created for verification, after rechecking its exact lane. Preserve saved-login browsers the user expects to revisit.

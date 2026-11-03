@@ -107,12 +107,14 @@ COMMANDS:
                   codex                                            Codex Desktop   → ~\\.codex\\config.toml
                   all (default)                                    all three — same as 'install-mcp' with no args
                   (JSON configs get timestamped backups; CLI-managed entries can be removed with \`claude mcp remove\`)
-  install-skill <client>        Add the task-scoped /portpilot command to Codex and Claude Code
+  install-skill <client>        Add the task-scoped PortPilot skill to Codex and Claude Code
                   codex                                            Codex skill → ~/.codex/skills/portpilot
                   claude                                           Claude Code (CLI and Desktop Code tab) → ~/.claude/skills/portpilot
                   all (default)                                    install both integrations
-                  The command uses only PortPilot MCP for that task and never
-                  falls back to another browser tool. Existing unmanaged skills
+                  In T3 Code, select /skill:Portpilot; in Codex use $portpilot;
+                  in Claude Code use /portpilot. The skill uses PortPilot MCP
+                  only and never falls back to another browser tool.
+                  Existing unmanaged skills
                   named portpilot are left unchanged.
   mcp                           Run the MCP server over stdio
   help                          Show this help

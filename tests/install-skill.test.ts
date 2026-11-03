@@ -26,14 +26,16 @@ test("canonical PortPilot skill enforces task-scoped MCP-only browser control", 
   const metadata = await readFile(join(source, "agents", "openai.yaml"), "utf8");
 
   assert.match(skill, /^---\r?\nname: portpilot\r?\n/m);
-  assert.match(skill, /only for the current task/i);
-  assert.match(skill, /only.*PortPilot MCP/i);
-  assert.match(skill, /do not fall back/i);
-  assert.match(skill, /stop.*PortPilot MCP.*unavailable/is);
-  assert.match(skill, /same owner.*cwd.*sessionId/is);
+  assert.match(skill, /Carry out the supplied browser task.*connected PortPilot MCP tools/i);
+  assert.match(skill, /If it is unavailable.*stop instead of substituting/i);
+  assert.match(skill, /absolute native project path as `cwd`/i);
+  assert.match(skill, /one unique, stable `sessionId`/i);
+  assert.match(skill, /find_saved_login/);
+  assert.match(skill, /exact immutable `laneId`/i);
   assert.match(skill, /page_newtab/);
-  assert.match(skill, /omit.*browser.*unless.*user/is);
-  assert.match(skill, /personal.*browser profile/i);
+  assert.match(skill, /Omit `browser` unless the user chose one/i);
+  assert.match(skill, /Never use a personal browser profile/i);
+  assert.match(skill, /`release_lane` only clears bookkeeping and does not close the browser/i);
   assert.match(metadata, /display_name: "PortPilot"/);
   assert.match(metadata, /allow_implicit_invocation: false/);
 });
@@ -162,6 +164,8 @@ test("CLI help and npm lifecycle expose the PortPilot skill installer", async ()
   const help = spawnSync(process.execPath, [cli, "help"], { encoding: "utf8" });
   assert.equal(help.status, 0);
   assert.match(help.stdout, /install-skill <client>/);
+  assert.match(help.stdout, /\/skill:Portpilot/);
+  assert.match(help.stdout, /\$portpilot/);
   assert.match(help.stdout, /\/portpilot/);
   assert.match(help.stdout, /Claude Code.*Desktop Code tab/i);
 

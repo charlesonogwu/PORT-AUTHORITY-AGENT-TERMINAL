@@ -12,10 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - A task-scoped PortPilot skill for Codex and Claude Code, including the Code
-  tab inside Claude Desktop. Invoking `/portpilot` in Claude Code or selecting
-  PortPilot from Codex's slash skill list forces that browser task through
-  PortPilot MCP and refuses fallback browsing. Ordinary Claude Desktop Chat
-  and Cowork do not load local Claude Code skills.
+  tab inside Claude Desktop. Claude Code uses `/portpilot`; T3 Code's GUI
+  exposes the skill as `/skill:Portpilot`, and Codex also accepts `$portpilot`.
+  The MCP connection supplies tools separately from the skill. Ordinary Claude
+  Desktop Chat and Cowork do not load local Claude Code skills.
 - `paat install-skill <codex|claude|all>` installs the integration safely and
   idempotently; npm postinstall wires it automatically.
 - Claude Code MCP setup now falls back to a backed-up merge into
