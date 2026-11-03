@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-11-03
+
+### Fixed
+
+- Agents were handed browser debug ports and app ports that were already in
+  use, so `open` failed with `unsafe-foreign-chrome`. PortPilot treated a port
+  as free whenever it was missing from the operating system's listener list,
+  and on some Windows 11 builds that list silently drops live listeners, a
+  different partial set on every call (seen live: one listing showed 11 of the
+  machine's listeners and missed both another lane's browser on 9322 and a
+  service on 3000). PortPilot now asks the kernel directly (a loopback connect
+  and bind) before it hands out a port, and when the listener list leaves a
+  debug port out it names the holder from the browser's own command line.
+- The launch check, the supervisor's start-up bookkeeping and `close_browser`
+  confirm a lane's debug port the same way, so a running browser is no longer
+  mistaken for a closed one (which could start a second browser on the same
+  profile, or mark a running browser as crashed).
+- A lane whose debug port another browser or program took while the lane was
+  idle now gets a fresh port on its next `open`, keeping its profile and
+  logins, instead of failing every time. If PortPilot cannot tell who holds
+  the port, it keeps the port and refuses, so it never orphans the lane's own
+  browser.
+- When the supervisor refuses a launch, agents now get its reason, for example
+  "debug port 9322 is in use by another browser (chrome.exe, pid 47648,
+  profile …)", instead of "PortPilot supervisor is unavailable … restart the
+  PortPilot dashboard", which sent people after the wrong problem.
+
 ## [0.4.5] — 2026-11-02
 
 ### Added

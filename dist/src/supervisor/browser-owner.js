@@ -1,3 +1,4 @@
+import { describePortHolder } from "../core/browsers.js";
 import { laneBrowser, nowIso } from "../core/lane.js";
 function withIdentity(lane, args) {
     const status = args.state === "active"
@@ -99,8 +100,10 @@ export function createBrowserOwner(deps) {
                         }));
                         return { laneId: lane.id, ...(pid !== undefined ? { pid } : {}), reused: true };
                     }
-                    if (verdict.kind !== "safe-free")
-                        throw new Error(`unsafe to launch lane ${lane.id}: ${verdict.kind}`);
+                    if (verdict.kind !== "safe-free") {
+                        const holder = describePortHolder(verdict);
+                        throw new Error(`unsafe to launch lane ${lane.id}: ${verdict.kind}${holder ? `; ${holder}` : ""}`);
+                    }
                     await deps.persist(withIdentity(lane, {
                         supervisorId: deps.supervisorId,
                         state: "starting",

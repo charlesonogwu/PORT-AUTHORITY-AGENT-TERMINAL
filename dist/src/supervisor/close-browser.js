@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { evaluateBrowserAttach } from "../core/browsers.js";
+import { confirmObservations } from "../core/port-truth.js";
 import { scanNative } from "../core/scanner.js";
 async function terminateTree(pid) {
     if (process.platform === "win32") {
@@ -24,7 +25,16 @@ async function terminateTree(pid) {
 }
 /** Explicitly close one lane browser after a fresh browser/port/profile check. */
 export async function closeBrowserForLane(lane, deps = {}) {
-    const scanNow = deps.scan ?? (async () => ({ observations: await scanNative(), source: "native", errors: [] }));
+    // The listener table can omit the lane's browser; confirm its port with the
+    // kernel so a live browser is never reported as already closed.
+    const live = deps.portTruth ?? (deps.scan ? undefined : {});
+    const scanTable = deps.scan ?? (async () => ({ observations: await scanNative(), source: "native", errors: [] }));
+    const scanNow = async () => {
+        const scan = await scanTable();
+        if (!live)
+            return scan;
+        return { ...scan, observations: await confirmObservations([lane.chromeDebugPort], scan.observations, live) };
+    };
     const scan = await scanNow();
     const verdict = evaluateBrowserAttach(lane, scan.observations);
     if (verdict.kind === "safe-free")

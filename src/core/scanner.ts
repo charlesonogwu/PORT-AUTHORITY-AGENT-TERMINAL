@@ -407,6 +407,64 @@ function parseSsOutput(stdout: string): PortObservation[] {
   return out;
 }
 
+/** One running process, as the OS process list reports it. */
+export interface ProcessRecord {
+  pid: number;
+  /** Executable name when the OS reports it separately (Windows). */
+  name?: string;
+  commandLine: string;
+  /** OS-reported creation time (ISO-8601 UTC), in the same format as PortObservation.processStartedAt. */
+  startedAt?: string;
+}
+
+/**
+ * List processes whose command line names a remote-debugging port.
+ *
+ * The process list is a different OS source from the TCP listener table, and
+ * every browser PortPilot launches carries `--remote-debugging-port` on its
+ * command line, so this can name the browser behind a port even when the
+ * listener table leaves that port out. Throws when the list is unavailable.
+ */
+export async function listDebugPortProcesses(opts: { signal?: AbortSignal; powershell?: PowerShellRunner } = {}): Promise<ProcessRecord[]> {
+  if (isWindows()) {
+    const ps = `Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%remote-debugging-port%'" | Select-Object ProcessId,Name,CommandLine,@{Name='CreationDate';Expression={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress -Depth 3`;
+    const res = await runPowerShell(ps, { signal: opts.signal, timeoutMs: 8000, powershell: opts.powershell });
+    if (res.code !== 0) throw new Error(`process list failed (code ${res.code}): ${res.stderr.trim()}`);
+    return parseWindowsProcessJson(res.stdout);
+  }
+  const res = await runCommand("ps", ["-ww", "-A", "-o", "pid=", "-o", "command="], { signal: opts.signal, timeoutMs: 8_000 });
+  if (res.code !== 0) throw new Error(`ps failed (code ${res.code}): ${res.stderr.trim()}`);
+  return parseUnixDebugPortProcesses(res.stdout);
+}
+
+/** Parse `Get-CimInstance Win32_Process | ConvertTo-Json`: one object for a single match, an array otherwise. */
+export function parseWindowsProcessJson(stdout: string): ProcessRecord[] {
+  if (!stdout.trim()) return [];
+  const parsed = JSON.parse(stdout) as unknown;
+  const records: ProcessRecord[] = [];
+  for (const item of Array.isArray(parsed) ? parsed : [parsed]) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as { ProcessId?: unknown; Name?: unknown; CommandLine?: unknown; CreationDate?: unknown };
+    if (typeof o.ProcessId !== "number" || typeof o.CommandLine !== "string") continue;
+    records.push({
+      pid: o.ProcessId,
+      ...(typeof o.Name === "string" ? { name: o.Name } : {}),
+      commandLine: o.CommandLine,
+      ...(typeof o.CreationDate === "string" ? { startedAt: o.CreationDate } : {}),
+    });
+  }
+  return records;
+}
+
+/** Keep the `ps -o pid= -o command=` rows whose command line names a debug port. */
+export function parseUnixDebugPortProcesses(stdout: string): ProcessRecord[] {
+  const records: ProcessRecord[] = [];
+  for (const [pid, meta] of parseUnixPsOutput(stdout)) {
+    if (meta.commandLine?.includes("remote-debugging-port")) records.push({ pid, commandLine: meta.commandLine });
+  }
+  return records;
+}
+
 export async function scanNative(opts: ScanOptions = {}): Promise<PortObservation[]> {
   opts.signal?.throwIfAborted();
   if (isWindows()) return scanWindowsNative(opts);

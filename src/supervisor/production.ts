@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { assertModeSupported, evaluateBrowserAttach, launchBrowserForLane } from "../core/browsers.js";
+import { assertModeSupported, evaluateBrowserAttachLive, launchBrowserForLane } from "../core/browsers.js";
 import { loadConfig } from "../core/config.js";
 import { resolveChromeMode } from "../core/chrome.js";
 import type { Lane } from "../core/lane.js";
 import { laneBrowser } from "../core/lane.js";
 import { portpilotHome } from "../core/paths.js";
 import { listLanes, updateRegistry } from "../core/registry.js";
+import { confirmObservations } from "../core/port-truth.js";
 import { scanNative } from "../core/scanner.js";
 import { createBrowserOwner } from "./browser-owner.js";
 import { createSupervisorClient } from "./client.js";
@@ -37,7 +38,7 @@ export async function startProductionSupervisor(home = portpilotHome()): Promise
   const owner = createBrowserOwner({
     supervisorId,
     getLane: async (id) => (await listLanes()).find((lane) => lane.id === id),
-    check: async (lane, signal) => evaluateBrowserAttach(lane, await scanNative({ signal })),
+    check: async (lane, signal) => evaluateBrowserAttachLive(lane, await scanNative({ signal })),
     launch: async (lane, request) => {
       const config = await loadConfig();
       const mode = resolveChromeMode(request.mode, config.chromeMode);
@@ -67,7 +68,12 @@ export async function startProductionSupervisor(home = portpilotHome()): Promise
   };
   const handle = await startSupervisorServer({ home, handlers, supervisorId, waitUntilReady });
   try {
-    const observations = await scanNative();
+    // A listener table that drops a live browser's port would mark that
+    // browser crashed; confirm every lane's debug port with the kernel first.
+    const lanePorts = (await listLanes())
+      .filter((lane) => lane.status !== "released")
+      .map((lane) => lane.chromeDebugPort);
+    const observations = await confirmObservations(lanePorts, await scanNative());
     await updateRegistry((lanes) => reconcileBrowserLanes(lanes, observations, supervisorId));
     resolveReady();
     return handle;
