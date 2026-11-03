@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "windows"))]
 use serde_json::Value;
 #[cfg(target_os = "macos")]
 use std::collections::{HashMap, HashSet};
@@ -123,10 +124,10 @@ pub fn enrich_snapshot(snapshot: &mut Value) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn enrich_snapshot(_snapshot: &mut Value) {}
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 mod tests {
     use super::*;
 
