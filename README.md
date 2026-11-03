@@ -217,8 +217,23 @@ How to use it:
      only); "visible" when a human must log in or solve a captcha; "headless"
      only if you know the target site allows it. Firefox supports visible and
      headless only.
-   - sessionId (optional): only when you need several separate browsers in
-     this same project at once.
+   - sessionId (optional): a stable identifier for this task. Use a different
+     value for a different task. On macOS, MCP uses a stable host task ID when available
+     if the session is omitted. Otherwise MCP asks the agent for an explicit task ID
+     before allocating a lane. It never guesses an older task's default lane
+     or creates a new identity on each reconnect. Calls within the same task
+     keep reusing its lane; use `page_newtab` for additional pages.
+     Host IDs are read from `PORTPILOT_TASK_ID`, `T3CODE_THREAD_ID`,
+     `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, or `CLAUDE_CODE_SESSION_ID`.
+     Mac CLI calls inherit the same host identity. Hosts that share one MCP
+     connection across tasks must pass distinct `sessionId` values.
+     Without host identity, manual CLI calls retain their existing `default`
+     behavior; pass `--session <task-id>` for task isolation. Windows keeps
+     its existing explicit-session behavior.
+   A lane returned by `list_lanes` can belong to an older task. Do not reopen
+   it just because it is the only result. Use an exact `laneId` when the user
+   deliberately wants that saved profile, or `find_saved_login` for a saved
+   website login. Existing profiles and saved logins are retained.
 2. Drive the page. Two options:
    - PortPilot's page_* tools work on EVERY backend: page_goto (navigate +
      wait), page_eval (run a JS expression, get JSON back), page_text,

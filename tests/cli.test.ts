@@ -15,7 +15,7 @@ interface RunResult {
 
 function runCli(args: string[], home: string): RunResult {
   const res = spawnSync(process.execPath, [CLI, ...args], {
-    env: { ...process.env, PORTPILOT_HOME: home },
+    env: { ...process.env, PORTPILOT_HOME: home, PORTPILOT_TASK_ID: "", T3CODE_THREAD_ID: "", CODEX_THREAD_ID: "", CODEX_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" },
     encoding: "utf8",
   });
   return { stdout: res.stdout ?? "", stderr: res.stderr ?? "", code: res.status };

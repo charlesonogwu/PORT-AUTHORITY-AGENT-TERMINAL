@@ -12,16 +12,25 @@ import { BrowserKind, Lane, isStale, laneBrowser, normalizeCwd, nowIso } from ".
 import { PageControlError, PageController, openPageController } from "../core/pagecontrol.js";
 import { createSupervisorClient } from "../supervisor/client.js";
 import { launchPersistentBrowser } from "../supervisor/routing.js";
+import { resolveTaskSession, taskSessionFromEnvironment, taskSessionId } from "../core/task-session.js";
 import { rememberSavedLogin, findSavedLogins } from "../core/saved-logins.js";
 
 /**
  * Build the MCP server, registering one tool per CLI verb. The MCP server
  * shares the same core library as the CLI, so behaviour stays consistent.
  */
-export function buildMcpServer(): McpServer {
+export function buildMcpServer(options: { taskId?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {}): McpServer {
+  // Use a stable host identity when available. Without one, require the
+  // agent to name its task instead of guessing or sharing an older browser.
+  const taskSession = options.taskId
+    ? taskSessionId(options.taskId)
+    : taskSessionFromEnvironment(options.environment ?? process.env);
+  const isolateTasks = (options.platform ?? process.platform) === "darwin";
+  const sessionFor = (owner: string, session: string | undefined) =>
+    isolateTasks ? resolveTaskSession(owner, session, taskSession) : session;
   const server = new McpServer(
     { name: "portpilot", version: "0.1.0" },
-    { capabilities: { tools: {} }, instructions: "Coordinate dev server ports, Chrome debug ports, and Chrome profiles between local AI coding agents." },
+    { capabilities: { tools: {} }, instructions: "Coordinate dev server ports, Chrome debug ports, and Chrome profiles between local AI coding agents. Use one unique, stable sessionId per task (prefer the host thread ID) and reuse it only within that task. Different tasks must have different sessionIds. Reopen a saved profile only by its exact laneId when that profile is deliberately requested." },
   );
 
   const portRangeShape = {
@@ -48,7 +57,7 @@ export function buildMcpServer(): McpServer {
       const lane = await resolveLaneSelector({
         owner: args.owner,
         cwd: args.cwd,
-        ...(args.sessionId ? { sessionId: args.sessionId } : {}),
+        ...(isolateTasks ? { sessionId: sessionFor(args.owner, args.sessionId) } : args.sessionId ? { sessionId: args.sessionId } : {}),
         includeReleased,
       });
       return lane ? { lane } : { error: `no lane found for owner=${args.owner} cwd=${args.cwd}` };
@@ -98,7 +107,7 @@ export function buildMcpServer(): McpServer {
             'Pass ONLY the LLM provider name: "claude", "codex", "gemini", "cursor", "windsurf", "copilot", "chatgpt", "openhands", "aider", "goose", or "opencode". DO NOT add prefixes, suffixes, batch numbers, or per-task identifiers — for example "codex-test-alpha", "agent-random-1", and "batch2-agent-3" are all WRONG. If you need to distinguish multiple parallel sessions of the same agent, put that distinction in the `sessionId` field, not here. Server normalizes anyway: any custom suffix is stripped from this field and auto-promoted to sessionId.',
           ),
         task: z.string().optional().describe("Short description of what you're doing."),
-        sessionId: z.string().optional().describe("Optional parallel-session id — ONLY when you truly need a second independent browser in the same project (e.g. two different logins). Every extra sessionId launches a WHOLE separate browser (~0.5-1.5 GB RAM). If you just need more pages, reuse your existing lane and open tabs with page_newtab instead (~100-200 MB per tab)."),
+        sessionId: z.string().optional().describe("Stable identifier for THIS task. Use a different identifier for a different task; never copy a session from an unrelated lane. On macOS, omitted or default uses a stable host task ID when available; otherwise a task-specific sessionId is required. Repeated calls within one task reuse its browser. Use page_newtab for additional pages in the same task, or an exact laneId to deliberately reopen a saved profile."),
         mode: z
           .enum(["visible", "background", "headless"])
           .optional()
@@ -132,7 +141,7 @@ export function buildMcpServer(): McpServer {
         owner,
         cwd,
         ...(args.laneId ? { laneId: args.laneId } : {}),
-        sessionId: args.sessionId,
+        sessionId: args.laneId ? undefined : sessionFor(owner, args.sessionId),
         task: args.task,
         ...(requestedBrowser ? { browser: requestedBrowser } : {}),
       });
@@ -243,7 +252,7 @@ export function buildMcpServer(): McpServer {
           .string()
           .optional()
           .describe(
-            "Optional parallel session id. Different sessions for the same (owner, cwd) get different ports and profile dirs, so one agent can run multiple concurrent browser instances. Omit for the implicit 'default' session. RAM note: each extra session is a whole separate browser (~0.5-1.5 GB); if you only need more pages, use page_newtab on your existing lane instead.",
+            "Stable identifier for this task. Different tasks receive different ports and profiles. On macOS, omitted or default uses a stable host task ID when available; otherwise a task-specific sessionId is required. Reuse it only within the same task; use page_newtab for more pages in that task.",
           ),
         task: z.string().optional().describe("Short description of the task this lane is for."),
         appPortRange: z.object(portRangeShape).optional(),
@@ -261,7 +270,7 @@ export function buildMcpServer(): McpServer {
       const result = await allocateLane({
         owner: args.owner,
         cwd: args.cwd,
-        sessionId: args.sessionId,
+        sessionId: sessionFor(args.owner, args.sessionId),
         task: args.task,
         appPortRange: args.appPortRange,
         chromeDebugRange: args.chromeDebugRange,
@@ -278,7 +287,7 @@ export function buildMcpServer(): McpServer {
     "list_lanes",
     {
       title: "List lanes",
-      description: "Find saved browser profiles by workspace and intended purpose before creating another lane. A single match includes an exact PPID reconnect command; multiple matches are returned without guessing. Purpose metadata describes intent and is not proof that a website is currently authenticated.",
+      description: "List browser lanes by workspace and purpose. Results can belong to other tasks: do not reconnect merely because one lane exists. New tasks use their own task session. Reconnect an exact PPID only for this task or an explicitly requested saved profile; use find_saved_login for a saved website login. Purpose metadata is not proof of authentication.",
       inputSchema: {
         owner: z.string().optional(),
         cwd: z.string().optional(),
@@ -292,7 +301,7 @@ export function buildMcpServer(): McpServer {
         ...(args.purpose ? { purpose: args.purpose } : {}),
         includeReleased: true,
       }).filter((lane) => args.owner === undefined || lane.owner === args.owner);
-      const reconnect = lanes.length === 1 ? {
+      const reconnect = lanes.length === 1 && (!isolateTasks || lanes[0]!.sessionId === taskSession) ? {
         laneId: lanes[0]!.id,
         command: `portpilot open --lane-id ${lanes[0]!.id}`,
       } : null;
@@ -384,7 +393,7 @@ export function buildMcpServer(): McpServer {
     },
     async (args) => {
       try {
-        const result = await adoptProfileLane(args);
+        const result = await adoptProfileLane({ ...args, sessionId: sessionFor(args.owner, args.sessionId) });
         return jsonResult({ ok: true, adopted: true, lane: result.lane });
       } catch (error) {
         return jsonResult({ ok: false, error: error instanceof Error ? error.message : String(error) });
