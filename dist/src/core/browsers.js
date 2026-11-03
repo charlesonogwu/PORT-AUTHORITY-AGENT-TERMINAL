@@ -2,6 +2,7 @@ import { laneBrowser } from "./lane.js";
 import { evaluateChromeAttach, launchChromeForLane, } from "./chrome.js";
 import { UnsupportedFirefoxModeError, evaluateFirefoxAttach, launchFirefoxForLane, } from "./firefox.js";
 import { evaluateEdgeAttach, launchEdgeForLane } from "./edge.js";
+import { confirmObservations } from "./port-truth.js";
 /**
  * The one place launch/attach decisions fan out by browser backend. Everything
  * upstream (allocator, MCP tools, CLI, dashboard) calls these and stays
@@ -47,6 +48,34 @@ export function evaluateBrowserAttach(lane, observations) {
     if (browser === "edge")
         return evaluateEdgeAttach(lane, observations);
     return evaluateChromeAttach(lane, observations);
+}
+/**
+ * Attach-safety verdict checked against the kernel as well as the listener
+ * table. The table can leave a live debug port out (then the plain verdict
+ * says safe-free and PortPilot would launch a second browser onto a port
+ * another one already serves) or keep a row for a socket that is gone.
+ * Use this wherever the verdict decides a launch, an attach or a close.
+ */
+export async function evaluateBrowserAttachLive(lane, observations, deps = {}) {
+    if (!lane.chromeDebugPort)
+        return evaluateBrowserAttach(lane, observations);
+    return evaluateBrowserAttach(lane, await confirmObservations([lane.chromeDebugPort], observations, deps));
+}
+/** Plain-language description of who holds a lane's debug port, for refusals. */
+export function describePortHolder(verdict) {
+    if (verdict.kind !== "unsafe-foreign-chrome" && verdict.kind !== "unsafe-unknown")
+        return undefined;
+    const { observation } = verdict;
+    if (!observation.command && !observation.commandLine && observation.pid === undefined) {
+        return `debug port ${verdict.port} is in use by a program PortPilot could not identify`;
+    }
+    const holder = verdict.kind === "unsafe-foreign-chrome" ? "another browser" : "another program";
+    const details = [
+        observation.command,
+        observation.pid !== undefined ? `pid ${observation.pid}` : undefined,
+        verdict.kind === "unsafe-foreign-chrome" && verdict.foundProfile ? `profile ${verdict.foundProfile}` : undefined,
+    ].filter((part) => Boolean(part));
+    return `debug port ${verdict.port} is in use by ${holder}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
 }
 /** Launch the lane's browser. Options are the Chrome option shape; the
  *  Firefox path honours the shared subset (mode/dryRun/binaryPath/initialUrl/

@@ -5,7 +5,7 @@ import { adoptProfileLane, allocateLane, checkLane, findFreePort } from "../core
 import { AmbiguousLaneError, filterLanes, listLanes, markStaleLanes, rememberLaneProfile, removeLane, resolveLaneSelector, setLaneStatus, touchLane } from "../core/registry.js";
 import { hasSonar, scanPorts } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
-import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
+import { assertModeSupported, browserLabel, describePortHolder, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
 import { loadConfig } from "../core/config.js";
 import { portpilotHome, profilesDir } from "../core/paths.js";
 import { isStale, laneBrowser, normalizeCwd } from "../core/lane.js";
@@ -125,7 +125,7 @@ export function buildMcpServer() {
         if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
             return jsonResult({
                 ok: false,
-                error: `unsafe to launch ${label} on lane ${lane.id}: ${result.verdict.kind}`,
+                error: `unsafe to launch ${label} on lane ${lane.id}: ${result.verdict.kind}${holderSuffix(result.verdict)}`,
                 verdict: result.verdict,
                 lane,
             });
@@ -421,7 +421,7 @@ export function buildMcpServer() {
         const lane = selected.lane;
         const result = await checkLane(lane);
         if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
-            return jsonResult({ ok: false, error: `unsafe to launch Chrome: ${result.verdict.kind}`, verdict: result.verdict });
+            return jsonResult({ ok: false, error: `unsafe to launch Chrome: ${result.verdict.kind}${holderSuffix(result.verdict)}`, verdict: result.verdict });
         }
         if (result.verdict.kind === "safe-attach") {
             const attached = await launchPersistentBrowser(lane, {});
@@ -480,7 +480,7 @@ export function buildMcpServer() {
         const label = browserLabel(browser);
         const result = await checkLane(lane);
         if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
-            return jsonResult({ ok: false, error: `unsafe to launch ${label}: ${result.verdict.kind}`, verdict: result.verdict });
+            return jsonResult({ ok: false, error: `unsafe to launch ${label}: ${result.verdict.kind}${holderSuffix(result.verdict)}`, verdict: result.verdict });
         }
         if (result.verdict.kind === "safe-attach") {
             const attached = await launchPersistentBrowser(lane, {});
@@ -728,6 +728,11 @@ function jsonResult(payload) {
         content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
         structuredContent: payload,
     };
+}
+/** "; debug port 9322 is in use by another browser (...)" for refusal messages, or "". */
+function holderSuffix(verdict) {
+    const holder = describePortHolder(verdict);
+    return holder ? `; ${holder}` : "";
 }
 /**
  * Run the portpilot MCP server over stdio. This is the entrypoint used by

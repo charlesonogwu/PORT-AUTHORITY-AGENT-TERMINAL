@@ -1,7 +1,9 @@
 import { laneBrowser, DEFAULT_APP_PORT_RANGE, DEFAULT_CHROME_DEBUG_RANGE, DEFAULT_SESSION_ID, canonicalizeOwner, isStale, laneSessionId, newLaneId, normalizeCwd, nowIso, ownerSlug, projectSlug, sessionSlug, } from "./lane.js";
 import { profileDirFor, profilesDir } from "./paths.js";
 import { isPortInUse, scanPorts } from "./scanner.js";
-import { evaluateBrowserAttach, normalizeBrowserKind } from "./browsers.js";
+import { evaluateBrowserAttach, evaluateBrowserAttachLive, normalizeBrowserKind } from "./browsers.js";
+import { probePort } from "./port-probe.js";
+import { confirmObservations } from "./port-truth.js";
 import { listLanes, resolveLaneSelectorFrom, updateRegistry } from "./registry.js";
 import { CapacityError, loadConfig } from "./config.js";
 import { realpath, stat } from "node:fs/promises";
@@ -18,12 +20,40 @@ function rangeIter(range) {
         out.push(p);
     return out;
 }
-function pickPort(range, taken) {
+/**
+ * First port in `range` that is neither taken nor, when a probe is given,
+ * busy according to the kernel. The listener table behind `taken` can miss
+ * live listeners, so it alone must not decide that a port is free. An
+ * "unknown" probe answer falls back to the table's view.
+ */
+async function pickPort(range, taken, probe) {
     for (const p of rangeIter(range)) {
-        if (!taken.has(p))
-            return p;
+        if (taken.has(p))
+            continue;
+        if (probe && (await probe(p)) === "busy")
+            continue;
+        return p;
     }
     return undefined;
+}
+/** Live-check settings for one allocation; undefined means "trust the observations as given". */
+function resolvePortTruth(portTruth, observationsProvided) {
+    const deps = portTruth ?? (observationsProvided ? undefined : {});
+    return deps ? { ...deps, probe: deps.probe ?? probePort } : undefined;
+}
+/**
+ * True when a verdict PROVES that something other than this lane's browser
+ * holds the port: a browser with a different known profile, or an identified
+ * non-browser process. An unidentified holder could be the lane's own
+ * browser whose command line could not be read, so it does not qualify:
+ * moving the lane then would orphan that browser.
+ */
+function heldBySomeoneElse(verdict) {
+    if (verdict.kind === "unsafe-foreign-chrome")
+        return verdict.foundProfile !== undefined;
+    if (verdict.kind === "unsafe-unknown")
+        return Boolean(verdict.observation.command || verdict.observation.commandLine);
+    return false;
 }
 function buildContext(observations, lanes) {
     const occupied = new Set();
@@ -221,12 +251,21 @@ export async function allocateLane(opts) {
     const explicitSession = typeof opts.sessionId === "string" && opts.sessionId.trim().length > 0;
     const sessionRaw = explicitSession ? opts.sessionId : canon.custom;
     const sessionId = exactTarget ? laneSessionId(exactTarget) : sessionSlug(sessionRaw);
+    // Correct the snapshot for the debug ports a reconnect might keep. Done
+    // before taking the registry lock because naming a port's holder can mean
+    // listing processes, which takes a moment.
+    const live = resolvePortTruth(opts.portTruth, observationsProvided);
+    const verdictObservations = live
+        ? await confirmObservations((await listLanes())
+            .filter((lane) => lane.id === opts.laneId || laneMatchesKey(lane, ownerCanonical, normalizeCwd(opts.cwd), sessionId))
+            .map((lane) => lane.chromeDebugPort), observations, live)
+        : observations;
     const config = await loadConfig();
     let alreadyExisted = false;
     let result;
     let warning;
     let activeLaneCount;
-    await updateRegistry((lanes) => {
+    await updateRegistry(async (lanes) => {
         // Auto-promote any lane whose lastSeen is too old to "stale" before
         // making any decisions. Without this, an agent that crashed or was
         // killed without calling release_lane leaves a lane sitting in
@@ -291,12 +330,12 @@ export async function allocateLane(opts) {
                     appPort = undefined;
                 if (isHeldByOther("chromeDebugPort", chromeDebugPort))
                     chromeDebugPort = undefined;
-                if (chromeDebugPort !== undefined) {
-                    const verdict = evaluateBrowserAttach(existing, observations);
-                    if (verdict.kind === "unsafe-foreign-chrome" || verdict.kind === "unsafe-unknown") {
-                        chromeDebugPort = undefined;
-                    }
-                }
+            }
+            if (chromeDebugPort !== undefined && heldBySomeoneElse(evaluateBrowserAttach(existing, verdictObservations))) {
+                // Another browser or program took this lane's debug port while the
+                // lane was away. Keeping it would make every launch refuse forever;
+                // the lane keeps its profile and gets a fresh port instead.
+                chromeDebugPort = undefined;
             }
             const needApp = appPort === undefined && opts.withAppPort !== false;
             const needChrome = chromeDebugPort === undefined && opts.withChromePort !== false;
@@ -304,13 +343,13 @@ export async function allocateLane(opts) {
                 const ctx = buildContext(observations, lanes);
                 if (needApp) {
                     const appRange = opts.appPortRange ?? config.appPortRange ?? DEFAULT_APP_PORT_RANGE;
-                    appPort = pickPort(appRange, new Set([...ctx.occupied, ...ctx.reservedAppPorts]));
+                    appPort = await pickPort(appRange, new Set([...ctx.occupied, ...ctx.reservedAppPorts]), live?.probe);
                     if (appPort === undefined)
                         throw new Error(`No free app port in range ${appRange.start}-${appRange.end}`);
                 }
                 if (needChrome) {
                     const chromeRange = opts.chromeDebugRange ?? config.chromeDebugRange ?? DEFAULT_CHROME_DEBUG_RANGE;
-                    chromeDebugPort = pickPort(chromeRange, new Set([...ctx.occupied, ...ctx.reservedChromePorts]));
+                    chromeDebugPort = await pickPort(chromeRange, new Set([...ctx.occupied, ...ctx.reservedChromePorts]), live?.probe);
                     if (chromeDebugPort === undefined)
                         throw new Error(`No free Chrome debug port in range ${chromeRange.start}-${chromeRange.end}`);
                 }
@@ -342,8 +381,8 @@ export async function allocateLane(opts) {
         const wantChrome = opts.withChromePort !== false;
         const appTaken = new Set([...ctx.occupied, ...ctx.reservedAppPorts]);
         const chromeTaken = new Set([...ctx.occupied, ...ctx.reservedChromePorts]);
-        const appPort = wantApp ? pickPort(appRange, appTaken) : undefined;
-        const chromeDebugPort = wantChrome ? pickPort(chromeRange, chromeTaken) : undefined;
+        const appPort = wantApp ? await pickPort(appRange, appTaken, live?.probe) : undefined;
+        const chromeDebugPort = wantChrome ? await pickPort(chromeRange, chromeTaken, live?.probe) : undefined;
         if (wantApp && appPort === undefined) {
             throw new Error(`No free app port in range ${appRange.start}-${appRange.end}`);
         }
@@ -422,21 +461,23 @@ export async function adoptProfileLane(opts) {
 export async function findFreePort(opts = {}) {
     const range = opts.range ?? DEFAULT_CHROME_DEBUG_RANGE;
     const observations = opts.observations ?? (await scanPorts()).observations;
+    const live = resolvePortTruth(opts.portTruth, opts.observations !== undefined);
     const lanes = await listLanes();
     const ctx = buildContext(observations, lanes);
     const taken = new Set([...ctx.occupied, ...ctx.reservedChromePorts, ...ctx.reservedAppPorts]);
-    return pickPort(range, taken);
+    return pickPort(range, taken, live?.probe);
 }
 /**
  * Check whether a lane is safe to use right now. This is what an agent should
  * call before attaching its browser automation script. The return value is
  * structured for both human and agent consumption.
  */
-export async function checkLane(lane) {
+export async function checkLane(lane, portTruth = {}) {
     const scan = await scanPorts();
     // Routed by the lane's browser: Firefox lanes are judged against Firefox
     // processes + -profile args, never mistaken for (or matched to) Chrome CDP.
-    const verdict = evaluateBrowserAttach(lane, scan.observations);
+    // Checked against the kernel too: the listener table can omit the port.
+    const verdict = await evaluateBrowserAttachLive(lane, scan.observations, portTruth);
     const appPortInUse = typeof lane.appPort === "number" ? isPortInUse(scan.observations, lane.appPort) : false;
     const appPortObservation = typeof lane.appPort === "number"
         ? scan.observations.find((o) => o.port === lane.appPort)

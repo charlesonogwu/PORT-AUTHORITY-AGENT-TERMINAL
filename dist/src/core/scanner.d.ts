@@ -48,6 +48,31 @@ export declare function parseUnixPsOutput(stdout: string): Map<number, {
     command?: string;
     commandLine?: string;
 }>;
+/** One running process, as the OS process list reports it. */
+export interface ProcessRecord {
+    pid: number;
+    /** Executable name when the OS reports it separately (Windows). */
+    name?: string;
+    commandLine: string;
+    /** OS-reported creation time (ISO-8601 UTC), in the same format as PortObservation.processStartedAt. */
+    startedAt?: string;
+}
+/**
+ * List processes whose command line names a remote-debugging port.
+ *
+ * The process list is a different OS source from the TCP listener table, and
+ * every browser PortPilot launches carries `--remote-debugging-port` on its
+ * command line, so this can name the browser behind a port even when the
+ * listener table leaves that port out. Throws when the list is unavailable.
+ */
+export declare function listDebugPortProcesses(opts?: {
+    signal?: AbortSignal;
+    powershell?: PowerShellRunner;
+}): Promise<ProcessRecord[]>;
+/** Parse `Get-CimInstance Win32_Process | ConvertTo-Json`: one object for a single match, an array otherwise. */
+export declare function parseWindowsProcessJson(stdout: string): ProcessRecord[];
+/** Keep the `ps -o pid= -o command=` rows whose command line names a debug port. */
+export declare function parseUnixDebugPortProcesses(stdout: string): ProcessRecord[];
 export declare function scanNative(opts?: ScanOptions): Promise<PortObservation[]>;
 /**
  * Run a port scan, preferring sonar when available and falling back to
