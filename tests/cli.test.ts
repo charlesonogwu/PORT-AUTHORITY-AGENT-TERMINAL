@@ -15,7 +15,7 @@ interface RunResult {
 
 function runCli(args: string[], home: string): RunResult {
   const res = spawnSync(process.execPath, [CLI, ...args], {
-    env: { ...process.env, PORTPILOT_HOME: home },
+    env: { ...process.env, PORTPILOT_HOME: home, PORTPILOT_TASK_ID: "cli-tests", T3CODE_THREAD_ID: "", CODEX_THREAD_ID: "", CODEX_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" },
     encoding: "utf8",
   });
   return { stdout: res.stdout ?? "", stderr: res.stderr ?? "", code: res.status };
@@ -36,6 +36,25 @@ test("portpilot help prints usage", () => {
   assert.match(res.stdout, /USAGE:/);
   assert.match(res.stdout, /reserve --owner/);
 });
+
+test("portpilot runtime-handshake reports a machine-readable compatible identity", async () => {
+  await withHome(async (home) => {
+    const res = runCli(["runtime-handshake", "--json"], home);
+    assert.equal(res.code, 0, res.stderr);
+    const parsed = JSON.parse(res.stdout);
+    const metadata = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8"));
+    assert.deepEqual(parsed, {
+      ok: true,
+      identity: "portpilot-runtime",
+      portpilotVersion: metadata.version,
+      protocolVersion: 1,
+      registrySchemaVersion: 1,
+      platform: process.platform,
+      architecture: process.arch,
+    });
+  });
+});
+
 
 test("portpilot list on empty registry", async () => {
   await withHome(async (home) => {

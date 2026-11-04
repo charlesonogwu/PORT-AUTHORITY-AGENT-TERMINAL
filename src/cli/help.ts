@@ -4,6 +4,7 @@ USAGE:
   portpilot <command> [options]
 
 COMMANDS:
+  runtime-handshake             Report runtime identity and compatibility metadata as JSON
   remember-login --lane-id <PPID> --website <hostname[:port]> --confirmed
                   [--account-label "Work"] [--json]
                                 Record only a user-confirmed website login

@@ -18,6 +18,8 @@ import { formatMissingDependencyMessage, isMissingDependencyError, missingDepend
 import { flagBool, flagString, flagStrings, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
 import { formatLanesTable, formatReserveBlock } from "./format.js";
 import { HELP } from "./help.js";
+import { resolveTaskSession, taskSessionFromEnvironment } from "../core/task-session.js";
+import { runtimeHandshake } from "../core/runtime-handshake.js";
 import { launchPersistentBrowser } from "../supervisor/routing.js";
 import { rememberSavedLogin, findSavedLogins } from "../core/saved-logins.js";
 function fail(ctx, message, code = 1) {
@@ -39,6 +41,10 @@ function requireOwnerCwd(ctx) {
         fail(ctx, "missing required --cwd");
     return { owner: owner, cwd: normalizeCwd(cwd) };
 }
+function cliSession(owner, requested) {
+    const taskSession = process.platform === "darwin" ? taskSessionFromEnvironment(process.env) : undefined;
+    return process.platform === "darwin" ? resolveTaskSession(owner, requested, taskSession) : requested;
+}
 async function selectedLane(ctx, includeReleased = false) {
     const laneId = flagString(ctx.args, "lane-id");
     try {
@@ -49,7 +55,11 @@ async function selectedLane(ctx, includeReleased = false) {
             return lane;
         }
         const { owner, cwd } = requireOwnerCwd(ctx);
-        const sessionId = flagString(ctx.args, "session");
+        const requestedSession = flagString(ctx.args, "session");
+        if (process.platform === "darwin" && !requestedSession) {
+            await resolveLaneSelector({ owner, cwd, includeReleased });
+        }
+        const sessionId = cliSession(owner, requestedSession);
         const lane = await resolveLaneSelector({ owner, cwd, ...(sessionId ? { sessionId } : {}), includeReleased });
         if (!lane)
             fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}`, 2);
@@ -193,7 +203,7 @@ async function cmdStatus(ctx) {
 }
 async function cmdReserve(ctx) {
     const { owner, cwd } = requireOwnerCwd(ctx);
-    const sessionId = flagString(ctx.args, "session");
+    const sessionId = cliSession(owner, flagString(ctx.args, "session"));
     const task = flagString(ctx.args, "task");
     const browserScript = flagString(ctx.args, "browser-script");
     const appRange = parsePortRange(flagString(ctx.args, "app-range"));
@@ -239,7 +249,7 @@ async function cmdAdoptProfile(ctx) {
     const result = await adoptProfileLane({
         owner,
         cwd,
-        sessionId: flagString(ctx.args, "session"),
+        sessionId: cliSession(owner, flagString(ctx.args, "session")),
         task: flagString(ctx.args, "task"),
         profileDir: profileDir,
         browser,
@@ -414,7 +424,7 @@ async function cmdOpen(ctx) {
         fail(ctx, `no lane found for immutable PPID ${laneId}`, 2);
     const target = exact ? { owner: exact.owner, cwd: exact.cwd } : requireOwnerCwd(ctx);
     const { owner, cwd } = target;
-    const sessionId = flagString(ctx.args, "session");
+    const sessionId = cliSession(owner, flagString(ctx.args, "session"));
     const task = flagString(ctx.args, "task");
     const url = flagString(ctx.args, "url");
     const browserFlag = flagString(ctx.args, "browser");
@@ -1178,6 +1188,8 @@ async function dispatch(args) {
         return;
     }
     switch (args.command) {
+        case "runtime-handshake":
+            return emit(ctx, await runtimeHandshake());
         case "list":
             return cmdList(ctx);
         case "status":

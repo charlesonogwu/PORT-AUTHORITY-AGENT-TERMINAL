@@ -1,5 +1,5 @@
 import type { Dirent } from "node:fs";
-import { access, readdir, rm, stat, rename } from "node:fs/promises";
+import { access, lstat, realpath, readdir, rm, stat, rename } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { Lane, LaneStatus, isStale, normalizeCwd } from "./lane.js";
 import { profilesDir, lockPath } from "./paths.js";
@@ -207,8 +207,31 @@ export function assertWithinProfilesRoot(target: string): void {
     throw new Error(`refusing to delete the profiles root itself: ${t}`);
   }
   const rootWithSep = root.endsWith(sep) ? root : root + sep;
-  if (!t.toLowerCase().startsWith(rootWithSep.toLowerCase())) {
+  if (!(process.platform === "win32" ? t.toLowerCase().startsWith(rootWithSep.toLowerCase()) : t.startsWith(rootWithSep))) {
     throw new Error(`refusing to delete a path outside ${root}: ${t}`);
+  }
+}
+
+/** Filesystem-aware deletion guard. It rejects a symlink target and resolves
+ * every parent component before proving the profile remains under the active
+ * PortPilot profiles root. */
+export async function assertSafeProfileDeletion(target: string): Promise<void> {
+  assertWithinProfilesRoot(target);
+  const rootMetadata = await lstat(profilesDir());
+  if (rootMetadata.isSymbolicLink()) {
+    throw new Error(`refusing to delete through a symbolic-link profiles root: ${profilesDir()}`);
+  }
+  const metadata = await lstat(target);
+  if (metadata.isSymbolicLink()) {
+    throw new Error(`refusing to delete a symbolic-link profile: ${target}`);
+  }
+  const [canonicalRoot, canonicalTarget] = await Promise.all([
+    realpath(profilesDir()),
+    realpath(target),
+  ]);
+  const rootWithSep = canonicalRoot.endsWith(sep) ? canonicalRoot : canonicalRoot + sep;
+  if (!(process.platform === "win32" ? canonicalTarget.toLowerCase().startsWith(rootWithSep.toLowerCase()) : canonicalTarget.startsWith(rootWithSep))) {
+    throw new Error(`refusing to delete a profile that resolves outside ${canonicalRoot}`);
   }
 }
 
@@ -236,7 +259,7 @@ async function deleteProfile(path: string, explicitErase: boolean): Promise<void
     if (!explicitErase && (await listLanes()).some(l => samePath(l.chromeProfileDir, path) && l.savedLogins?.length)) {
       throw new Error("profile has saved login records; use explicit Erase");
     }
-    try { await rename(path, tombstone); moved = true; }
+    try { await assertSafeProfileDeletion(path); await rename(path, tombstone); moved = true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   });
   if (!moved) return;

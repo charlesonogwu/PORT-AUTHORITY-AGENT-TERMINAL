@@ -31,7 +31,7 @@ test("MCP open delegates browser ownership to the supervisor", async () => {
     },
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const mcp = buildMcpServer();
+  const mcp = buildMcpServer({ environment: {}, platform: "darwin" });
   const client = new Client({ name: "portpilot-test", version: "1" });
   try {
     await mcp.connect(serverTransport);
@@ -81,7 +81,7 @@ test("MCP open reopens an exact released PPID without owner or cwd", async () =>
     },
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const mcp = buildMcpServer();
+  const mcp = buildMcpServer({ environment: {}, platform: "darwin" });
   const client = new Client({ name: "portpilot-test", version: "1" });
   try {
     await mcp.connect(serverTransport);

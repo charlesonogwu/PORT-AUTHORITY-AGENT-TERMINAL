@@ -28,6 +28,8 @@ export interface LiveSession {
   /** Historical user confirmations, not proof of a current sign-in. */
   savedLogins?: { website: string; confirmedAt: string; accountLabel?: string }[]
   pid: number
+  /** macOS process creation identity used to reject stale PID reuse. */
+  processStart?: string
   chromeDebugPort: number
   /**
    * "port" — TCP debug port reachable from the dashboard

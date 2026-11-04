@@ -14,31 +14,44 @@
 // async + spawn_blocking so the multi-second close+retry never freezes the UI
 // thread — same pattern as commands/snapshot.rs.
 
-use crate::cli::run_cli_json;
+use crate::runtime::RuntimeState;
 use crate::target::{verify_live_target, LaneTarget};
 use serde_json::Value;
 use std::{thread, time::Duration};
+use tauri::State;
 
 /// Close the verified browser and wait until it has really exited.
 #[cfg(target_os = "windows")]
-fn close_verified(target: &LaneTarget) -> Result<String, String> {
+fn close_verified(
+    runtime: &RuntimeState,
+    target: &LaneTarget,
+    _process_start: Option<&str>,
+) -> Result<String, String> {
     use crate::target::ProcessPin;
 
     let pin = ProcessPin::open(target.pid)?;
-    let profile_dir = verify_live_target(target)?;
+    let profile_dir = verify_live_target(runtime, target)?;
     if let Some(pin) = pin {
-        pin.terminate_and_wait(Duration::from_secs(10)).map_err(|e| {
-            format!("could not close the browser (pid {}) before erasing: {}", target.pid, e)
-        })?;
+        pin.terminate_and_wait(Duration::from_secs(10))
+            .map_err(|e| {
+                format!(
+                    "could not close the browser (pid {}) before erasing: {}",
+                    target.pid, e
+                )
+            })?;
     }
     Ok(profile_dir)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn close_verified(target: &LaneTarget) -> Result<String, String> {
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn close_verified(
+    runtime: &RuntimeState,
+    target: &LaneTarget,
+    _process_start: Option<&str>,
+) -> Result<String, String> {
     use crate::cli::quiet_command;
 
-    let profile_dir = verify_live_target(target)?;
+    let profile_dir = verify_live_target(runtime, target)?;
     let pid = target.pid.to_string();
     let _ = quiet_command("kill").args(["-9", &pid]).output();
     for _ in 0..50 {
@@ -52,12 +65,19 @@ fn close_verified(target: &LaneTarget) -> Result<String, String> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err(format!("could not close the browser (pid {}) before erasing", target.pid))
+    Err(format!(
+        "could not close the browser (pid {}) before erasing",
+        target.pid
+    ))
 }
 
-fn erase_blocking(target: LaneTarget) -> Result<Value, String> {
+fn erase_blocking(
+    runtime: &RuntimeState,
+    target: LaneTarget,
+    process_start: Option<String>,
+) -> Result<Value, String> {
     let pid = target.pid;
-    let profile_dir = close_verified(&target)?;
+    let profile_dir = close_verified(runtime, &target, process_start.as_deref())?;
 
     // Erase via the CLI. The guarded delete + lane removal live in the
     // tested Node core; we retry because Windows can keep the profile locked
@@ -72,12 +92,11 @@ fn erase_blocking(target: LaneTarget) -> Result<Value, String> {
         args.push("--lane".into());
         args.push(id);
     }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let mut last_err = String::new();
     for attempt in 0u64..5 {
         thread::sleep(Duration::from_millis(300 * (attempt + 1)));
-        match run_cli_json(&arg_refs) {
+        match runtime.run_json(&args) {
             Ok(v) => return Ok(v),
             Err(e) => last_err = e,
         }
@@ -90,8 +109,26 @@ fn erase_blocking(target: LaneTarget) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn erase_chrome(target: LaneTarget) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || erase_blocking(target))
+pub async fn erase_chrome(
+    target: LaneTarget,
+    process_start: Option<String>,
+    runtime: State<'_, RuntimeState>,
+) -> Result<Value, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || erase_blocking(&runtime, target, process_start))
         .await
         .map_err(|e| format!("erase worker join failed: {}", e))?
+}
+
+#[cfg(target_os = "macos")]
+fn close_verified(
+    runtime: &RuntimeState,
+    target: &LaneTarget,
+    process_start: Option<&str>,
+) -> Result<String, String> {
+    let pin = crate::target::ProcessPin::open(target.pid, process_start)?;
+    let profile = verify_live_target(runtime, target)?;
+    pin.verify()?;
+    pin.terminate_and_wait(Duration::from_secs(10))?;
+    Ok(profile)
 }

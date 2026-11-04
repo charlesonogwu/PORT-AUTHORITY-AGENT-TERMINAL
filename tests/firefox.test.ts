@@ -20,6 +20,7 @@ import {
 } from "../src/core/firefox.js";
 import { UnsafeChromeArgError } from "../src/core/chrome.js";
 import { allocateLane } from "../src/core/allocator.js";
+import { findAllAgentFirefoxes, findLiveFirefoxes } from "../src/dashboard/sources.js";
 
 function laneWith(overrides: Partial<Lane> = {}): Lane {
   return {
@@ -194,6 +195,59 @@ test("extractFirefoxProfileDir handles quoted + single-dash + double-dash", () =
   assert.equal(extractFirefoxProfileDir('firefox -profile "C:/a b/ff" -no-remote'), "C:/a b/ff");
   assert.equal(extractFirefoxProfileDir("firefox --profile /home/x/ff"), "/home/x/ff");
   assert.equal(extractFirefoxProfileDir("firefox -no-remote"), undefined);
+});
+
+// ── macOS/native scanner dashboard discovery ────────────────────────────────
+
+test("findLiveFirefoxes accepts only an isolated no-remote Firefox listener", () => {
+  const found = findLiveFirefoxes([{
+    port: 9350,
+    pid: 42,
+    source: "native",
+    protocol: "tcp",
+    command: "firefox",
+    commandLine: 'firefox -profile "/tmp/portpilot/profiles/ff" -no-remote --remote-debugging-port 9350',
+  }]);
+  assert.deepEqual(found, [{
+    port: 9350,
+    pid: 42,
+    source: undefined,
+    debugMode: "port",
+    command: "firefox",
+    commandLine: 'firefox -profile "/tmp/portpilot/profiles/ff" -no-remote --remote-debugging-port 9350',
+    profileDir: "/tmp/portpilot/profiles/ff",
+    browser: "firefox",
+  }].map(({ source: _source, ...rest }) => rest));
+});
+
+test("findLiveFirefoxes refuses missing profile, no-remote, command line, and content children", () => {
+  const base = { port: 9350, source: "native" as const, protocol: "tcp" as const, command: "firefox" };
+  assert.deepEqual(findLiveFirefoxes([
+    { ...base, pid: 1, commandLine: "firefox -no-remote --remote-debugging-port 9350" },
+    { ...base, pid: 2, commandLine: "firefox -profile /tmp/ff --remote-debugging-port 9350" },
+    { ...base, pid: 3 },
+    { ...base, pid: 4, commandLine: "firefox -contentproc -profile /tmp/ff -no-remote --remote-debugging-port 9350" },
+  ]), []);
+});
+
+test("findAllAgentFirefoxes requires profile plus no-remote and ignores content processes", () => {
+  const process = (pid: number, commandLine: string) => ({
+    pid,
+    ppid: 1,
+    name: "firefox",
+    commandLine,
+  });
+  const found = findAllAgentFirefoxes({
+    processes: new Map([
+      [10, process(10, "firefox -profile /tmp/portpilot/ff -no-remote --remote-debugging-port 9350")],
+      [11, process(11, "firefox -profile /tmp/foreign --remote-debugging-port 9351")],
+      [12, process(12, "firefox -no-remote --remote-debugging-port 9352")],
+      [13, process(13, "firefox -contentproc -profile /tmp/child -no-remote --remote-debugging-port 9353")],
+      [14, process(14, "")],
+    ]),
+  });
+  assert.deepEqual(found.map((entry) => entry.pid), [10]);
+  assert.equal(found[0]?.profileDir, "/tmp/portpilot/ff");
 });
 
 // ── allocator: registry metadata + chrome backwards compatibility ────────────

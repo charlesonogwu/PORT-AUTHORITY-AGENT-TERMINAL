@@ -99,6 +99,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Cache cargo registry + build
         uses: actions/cache@v4
@@ -119,6 +121,15 @@ jobs:
 
       - name: Install tauri-cli
         run: cargo install tauri-cli --version ^2 --locked
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path gui/src-tauri/Cargo.toml --all -- --check
+
+      - name: Lint Rust without warnings
+        run: cargo clippy --manifest-path gui/src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path gui/src-tauri/Cargo.toml --all-features
 
       - name: Build dashboard
         run: node scripts/build-dashboard-tauri.cjs --strict

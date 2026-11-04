@@ -93,6 +93,8 @@ export function isAuthoritativeLsofResult(result: ExecResult): boolean {
  * non-zero exit code for `--version`.
  */
 export async function hasSonar(): Promise<boolean> {
+  // The native Mac app must never execute an optional scanner from PATH.
+  if (process.platform === "darwin") return false;
   try {
     const res = await runCommand("sonar", ["--help"], { timeoutMs: 3000 });
     return res.code === 0 || res.stdout.length > 0;

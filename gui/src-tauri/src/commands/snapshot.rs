@@ -24,12 +24,10 @@
 //    identical results,
 //  - I/O bound work makes the subprocess overhead negligible.
 //
-// If the CLI can't be found (npm install missing or broken PATH), we return
-// the bare DashboardSnapshot skeleton the UI knows how to render — empty
-// arrays + zeroed summary + a warning string so the dashboard surfaces the
-// install issue instead of going blank.
+// If the CLI cannot be reached, report an error and keep the last verified UI snapshot.
 
-use crate::cli::{dashboard_helper_command, run_cli_json, supervisor_startup_error};
+use crate::cli::supervisor_startup_error;
+use crate::runtime::RuntimeState;
 use crate::snapshot_worker::{
     split_snapshot_reply, Coalescer, WorkerSlot, IDLE_LIMIT, REQUEST_TIMEOUT, RETRY_BACKOFF,
 };
@@ -37,6 +35,7 @@ use serde_json::{json, Value};
 use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
+use tauri::State;
 
 /// The snapshot and the supervisor status, as the UI merges them.
 type SnapshotParts = (Result<Value, String>, Result<Value, String>);
@@ -69,11 +68,11 @@ fn start_idle_reaper() {
     });
 }
 
-fn one_shot_parts(reason: String) -> SnapshotParts {
+fn one_shot_parts(runtime: &RuntimeState, reason: String) -> SnapshotParts {
     eprintln!("paat-dashboard: dashboard helper unavailable ({reason}); using one-shot CLI calls");
     (
-        run_cli_json(&["dashboard-snapshot"]),
-        run_cli_json(&["supervisor", "status"]),
+        runtime.run_json(&["dashboard-snapshot".into()]),
+        runtime.run_json(&["supervisor".into(), "status".into()]),
     )
 }
 
@@ -92,14 +91,16 @@ fn parts_or_fallback(
 
 /// From the helper when possible, else from the original one-shot CLI calls
 /// so the dashboard keeps working. Blocking: runs on a spawn_blocking thread.
-fn fetch_snapshot_parts() -> SnapshotParts {
+fn fetch_snapshot_parts(runtime: &RuntimeState) -> SnapshotParts {
     let requested_at = Instant::now();
     start_idle_reaper();
     let mut guard = refresher();
     let Refresher { helper, latest } = &mut *guard;
     latest.run(requested_at, || {
-        let reply = helper.request("snapshot", REQUEST_TIMEOUT, dashboard_helper_command);
-        parts_or_fallback(reply, one_shot_parts)
+        let reply = helper.request("snapshot", REQUEST_TIMEOUT, || {
+            runtime.dashboard_helper_command()
+        });
+        parts_or_fallback(reply, |reason| one_shot_parts(runtime, reason))
     })
 }
 
@@ -107,8 +108,10 @@ fn fetch_snapshot_parts() -> SnapshotParts {
 /// helper as the refresh loop (else the one-shot CLI), so checking an action's
 /// target never starts an extra program while the helper is healthy.
 /// Blocking: call it from a spawn_blocking thread.
-pub(crate) fn fresh_snapshot() -> Result<Value, String> {
-    fetch_snapshot_parts().0
+pub(crate) fn fresh_snapshot(runtime: &RuntimeState) -> Result<Value, String> {
+    let mut snapshot = fetch_snapshot_parts(runtime).0?;
+    crate::process_identity::enrich_snapshot(&mut snapshot);
+    Ok(snapshot)
 }
 
 /// 0.2.3 fix: async + spawn_blocking. Previously this was a sync
@@ -121,11 +124,19 @@ pub(crate) fn fresh_snapshot() -> Result<Value, String> {
 /// the UI thread free to pump WM_* messages even while the snapshot is
 /// being computed.
 #[tauri::command]
-pub async fn get_snapshot() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(fetch_snapshot_parts)
-        .await
-        .map_err(|e| format!("snapshot worker join failed: {}", e))
-        .and_then(|(res, supervisor_status)| merge_snapshot(res, supervisor_status))
+pub async fn get_snapshot(runtime: State<'_, RuntimeState>) -> Result<Value, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (snapshot, supervisor) = fetch_snapshot_parts(&runtime);
+        let snapshot = snapshot.map(|mut value| {
+            crate::process_identity::enrich_snapshot(&mut value);
+            value
+        });
+        (snapshot, supervisor)
+    })
+    .await
+    .map_err(|e| format!("snapshot worker join failed: {}", e))
+    .and_then(|(res, supervisor_status)| merge_snapshot(res, supervisor_status))
 }
 
 /// Merge the supervisor's state into the snapshot as warnings. A failed
@@ -146,7 +157,10 @@ fn merge_snapshot(
         }
     };
     if let Some(error) = supervisor_startup_error() {
-        add_warning(format!("Persistent browser supervisor unavailable: {}", error));
+        add_warning(format!(
+            "Persistent browser supervisor unavailable: {}",
+            error
+        ));
     }
     let running = supervisor_status
         .as_ref()
@@ -172,9 +186,12 @@ mod tests {
 
     #[test]
     fn a_stopped_supervisor_becomes_a_snapshot_warning() {
-        let merged = merge_snapshot(Ok(json!({ "ok": true })), Ok(json!({ "running": false }))).unwrap();
+        let merged =
+            merge_snapshot(Ok(json!({ "ok": true })), Ok(json!({ "running": false }))).unwrap();
         let warnings = merged["warnings"].as_array().expect("warnings array");
-        assert!(warnings.iter().any(|w| w.as_str().unwrap_or("").contains("not responding")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("not responding")));
     }
 
     fn fallback_marker(reason: String) -> SnapshotParts {

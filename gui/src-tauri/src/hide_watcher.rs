@@ -26,6 +26,7 @@ use std::time::Duration;
 use tauri::State;
 
 use crate::commands::snapshot::fresh_snapshot;
+use crate::runtime::RuntimeState;
 use crate::target::{process_creation_time, verified_targets, LaneTarget};
 
 /// Shared map of hidden pid -> process creation time. The watcher only parks a
@@ -41,11 +42,25 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Leases for the targets that still match a fresh snapshot. A stale target
 /// is simply left out; it never drops the others.
-fn verified_leases(targets: Vec<LaneTarget>) -> Result<HashMap<u32, u64>, String> {
-    let snapshot = fresh_snapshot()?;
+fn verified_leases(
+    runtime: &RuntimeState,
+    targets: Vec<LaneTarget>,
+) -> Result<HashMap<u32, u64>, String> {
+    let before: HashMap<u32, u64> = targets
+        .iter()
+        .filter_map(|t| {
+            process_creation_time(t.pid)
+                .ok()
+                .map(|created| (t.pid, created))
+        })
+        .collect();
+    let snapshot = fresh_snapshot(runtime)?;
     Ok(verified_targets(&snapshot, targets)
         .into_iter()
-        .filter_map(|target| process_creation_time(target.pid).ok().map(|created| (target.pid, created)))
+        .filter_map(|target| {
+            let created = process_creation_time(target.pid).ok()?;
+            (before.get(&target.pid) == Some(&created)).then_some((target.pid, created))
+        })
         .collect())
 }
 
@@ -74,6 +89,7 @@ fn release_unwanted(current: &mut HashMap<u32, u64>, targets: Vec<LaneTarget>) -
 pub async fn set_hidden_targets(
     targets: Vec<LaneTarget>,
     state: State<'_, HiddenPids>,
+    runtime: State<'_, RuntimeState>,
 ) -> Result<(), String> {
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let to_verify = {
@@ -83,7 +99,8 @@ pub async fn set_hidden_targets(
     if to_verify.is_empty() {
         return Ok(());
     }
-    let leases = tauri::async_runtime::spawn_blocking(move || verified_leases(to_verify))
+    let runtime = runtime.inner().clone();
+    let leases = tauri::async_runtime::spawn_blocking(move || verified_leases(&runtime, to_verify))
         .await
         .map_err(|e| format!("hidden-target worker join failed: {}", e))??;
     let mut current = state.lock().map_err(|e| e.to_string())?;
@@ -101,6 +118,12 @@ pub fn spawn(state: HiddenPids) {
             Ok(g) => g.clone(),
             Err(_) => HashMap::new(),
         };
+        #[cfg(target_os = "macos")]
+        for (pid, created) in &pids {
+            if process_creation_time(*pid).ok().as_ref() == Some(created) {
+                let _ = crate::macos_application::enforce_hide(*pid);
+            }
+        }
         if !pids.is_empty() {
             #[cfg(target_os = "windows")]
             win::park_on_screen(&pids);
@@ -117,7 +140,7 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
         SetWindowPos, ShowWindow, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-        SW_SHOWNOACTIVATE, SW_SHOWMAXIMIZED, WINDOWPLACEMENT,
+        SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, WINDOWPLACEMENT,
     };
 
     const OFF: i32 = -32000;
@@ -141,7 +164,9 @@ mod win {
     /// Move every on-screen top-level window owned by a hidden pid off-screen.
     pub fn park_on_screen(pids: &HashMap<u32, u64>) {
         unsafe {
-            let mut ctx = Collected { windows: Vec::new() };
+            let mut ctx = Collected {
+                windows: Vec::new(),
+            };
             if EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize)).is_err() {
                 return;
             }
@@ -173,7 +198,15 @@ mod win {
         let _ = GetWindowPlacement(hwnd, &mut wp);
         // 1) Off-screen + bottom-of-z-order while still maximized/snapped: any
         //    painted frame is occluded and unfocused.
-        let _ = SetWindowPos(hwnd, HWND_BOTTOM, OFF, OFF, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            OFF,
+            OFF,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        );
         // 2) Drop maximized -> normal WITHOUT activating, only if maximized.
         if wp.showCmd == SW_SHOWMAXIMIZED.0 as u32 {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -212,7 +245,10 @@ mod tests {
         let mut leases = HashMap::from([(1, 100), (2, 200)]);
         let to_verify = release_unwanted(&mut leases, vec![target(2)]);
         assert_eq!(leases, HashMap::from([(2, 200)]));
-        assert!(to_verify.is_empty(), "an already-leased pid is not re-checked");
+        assert!(
+            to_verify.is_empty(),
+            "an already-leased pid is not re-checked"
+        );
     }
 
     #[test]

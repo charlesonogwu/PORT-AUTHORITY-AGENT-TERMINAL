@@ -7,6 +7,7 @@
 // the one that gets terminated.
 
 use crate::commands::snapshot::fresh_snapshot;
+use crate::runtime::RuntimeState;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -30,7 +31,12 @@ fn default_browser() -> String {
 }
 
 fn normalized_path(value: &str) -> String {
-    value.replace('\\', "/").trim_end_matches('/').to_lowercase()
+    let normalized = value.replace('\\', "/").trim_end_matches('/').to_string();
+    if cfg!(target_os = "windows") {
+        normalized.to_lowercase()
+    } else {
+        normalized
+    }
 }
 
 /// Check `target` against one snapshot. On success returns the snapshot's own
@@ -41,7 +47,9 @@ pub fn verify_snapshot_target(snapshot: &Value, target: &LaneTarget) -> Result<S
         .lane_id
         .as_deref()
         .filter(|id| !id.trim().is_empty())
-        .ok_or_else(|| "refusing action: the selected session has no PortPilot lane id".to_string())?;
+        .ok_or_else(|| {
+            "refusing action: the selected session has no PortPilot lane id".to_string()
+        })?;
     if target.pid == 0 {
         return Err("refusing action: invalid pid 0".into());
     }
@@ -88,8 +96,8 @@ pub fn verify_snapshot_target(snapshot: &Value, target: &LaneTarget) -> Result<S
 
 /// Verify one target against a snapshot taken after this call began.
 /// Returns the snapshot's profile directory for it. Blocking.
-pub fn verify_live_target(target: &LaneTarget) -> Result<String, String> {
-    let snapshot = fresh_snapshot()?;
+pub fn verify_live_target(runtime: &RuntimeState, target: &LaneTarget) -> Result<String, String> {
+    let snapshot = fresh_snapshot(runtime)?;
     verify_snapshot_target(&snapshot, target)
 }
 
@@ -116,7 +124,9 @@ pub fn process_creation_time(pid: u32) -> Result<u64, String> {
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn creation_time_of(handle: windows::Win32::Foundation::HANDLE) -> windows::core::Result<u64> {
+unsafe fn creation_time_of(
+    handle: windows::Win32::Foundation::HANDLE,
+) -> windows::core::Result<u64> {
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::System::Threading::GetProcessTimes;
 
@@ -128,9 +138,104 @@ unsafe fn creation_time_of(handle: windows::Win32::Foundation::HANDLE) -> window
     Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn process_creation_time(_pid: u32) -> Result<u64, String> {
     Ok(0)
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_creation_time(pid: u32) -> Result<u64, String> {
+    use std::hash::{Hash, Hasher};
+    let start = crate::process_identity::read_process_start(pid)?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    start.hash(&mut hash);
+    Ok(hash.finish())
+}
+
+/// A window action lease is checked before the snapshot and again immediately
+/// before each native operation; the OS must still report the same process.
+pub struct ActionLease {
+    pid: u32,
+    created: u64,
+}
+impl ActionLease {
+    pub fn open(pid: u32, process_start: Option<&str>) -> Result<Self, String> {
+        if pid == 0 {
+            return Err("refusing action: invalid pid 0".into());
+        }
+        let created = process_creation_time(pid)?;
+        #[cfg(target_os = "macos")]
+        crate::process_identity::verify(pid, process_start.unwrap_or(""))?;
+        #[cfg(not(target_os = "macos"))]
+        let _ = process_start;
+        Ok(Self { pid, created })
+    }
+    pub fn verify(&self) -> Result<(), String> {
+        if process_creation_time(self.pid)? != self.created {
+            return Err("refusing action: PID was reused or browser restarted".into());
+        }
+        Ok(())
+    }
+}
+
+/// Mac has no Windows-style process handle. Pin its observed start identity,
+/// use only /bin/kill, and recheck before every signal, including escalation.
+#[cfg(target_os = "macos")]
+pub struct ProcessPin {
+    pid: u32,
+    start: String,
+}
+#[cfg(target_os = "macos")]
+impl ProcessPin {
+    pub fn open(pid: u32, expected: Option<&str>) -> Result<Self, String> {
+        let start = crate::process_identity::read_process_start(pid)?;
+        crate::process_identity::verify(pid, expected.unwrap_or(""))?;
+        Ok(Self { pid, start })
+    }
+    pub fn verify(&self) -> Result<(), String> {
+        crate::process_identity::verify(self.pid, &self.start)
+    }
+    pub fn terminate_and_wait(&self, timeout: std::time::Duration) -> Result<(), String> {
+        self.signal("-TERM")?;
+        let started = std::time::Instant::now();
+        loop {
+            match crate::process_identity::read_process_start(self.pid) {
+                Err(error) => {
+                    let still_exists = std::process::Command::new("/bin/kill")
+                        .args(["-0", &self.pid.to_string()])
+                        .status()
+                        .map_err(|e| format!("could not confirm browser exit: {e}"))?
+                        .success();
+                    if still_exists {
+                        return Err(error);
+                    }
+                    return Ok(());
+                }
+                Ok(start) if start != self.start => {
+                    return Err("browser PID changed while closing; refusing erase".into())
+                }
+                Ok(_) => {}
+            }
+            if started.elapsed() >= timeout {
+                return Err("browser did not exit before the deadline".into());
+            }
+            if started.elapsed() >= std::time::Duration::from_secs(2) {
+                self.signal("-KILL")?;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    fn signal(&self, signal: &str) -> Result<(), String> {
+        self.verify()?;
+        let output = std::process::Command::new("/bin/kill")
+            .args([signal, &self.pid.to_string()])
+            .output()
+            .map_err(|e| format!("could not signal browser: {e}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        Ok(())
+    }
 }
 
 /// An open handle to one exact process. Whatever happens to its pid later,
@@ -195,7 +300,10 @@ impl ProcessPin {
             if WaitForSingleObject(self.handle, millis) == WAIT_OBJECT_0 {
                 Ok(())
             } else {
-                Err(format!("pid {} did not exit within {} ms", self.pid, millis))
+                Err(format!(
+                    "pid {} did not exit within {} ms",
+                    self.pid, millis
+                ))
             }
         }
     }
@@ -278,11 +386,48 @@ mod tests {
 
     #[test]
     fn a_session_missing_its_port_or_profile_deserializes_and_is_refused_alone() {
-        let partial: LaneTarget = serde_json::from_value(json!({ "pid": 7, "laneId": "lane-2" })).unwrap();
+        let partial: LaneTarget =
+            serde_json::from_value(json!({ "pid": 7, "laneId": "lane-2" })).unwrap();
         assert_eq!(partial.browser, "chrome");
         assert!(verify_snapshot_target(&snapshot(), &partial).is_err());
         let kept = verified_targets(&snapshot(), vec![partial, target()]);
         assert_eq!(kept, vec![target()]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_pins_reject_missing_or_stale_start_identities() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(super::ProcessPin::open(pid, None).is_err());
+        assert!(super::ProcessPin::open(pid, Some("stale")).is_err());
+        let start = crate::process_identity::read_process_start(pid).unwrap();
+        let pin = super::ProcessPin::open(pid, Some(&start)).unwrap();
+        assert!(pin.verify().is_ok());
+        assert_ne!(super::process_creation_time(pid).unwrap(), 0);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(pin.verify().is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_pin_closes_only_its_owned_process_and_confirms_exit() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let start = crate::process_identity::read_process_start(pid).unwrap();
+        let pin = super::ProcessPin::open(pid, Some(&start)).unwrap();
+        let waiter = std::thread::spawn(move || child.wait().unwrap());
+        pin.terminate_and_wait(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(!waiter.join().unwrap().success());
+        assert!(pin.verify().is_err());
     }
 
     #[cfg(target_os = "windows")]
@@ -302,9 +447,12 @@ mod tests {
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .spawn()
             .unwrap();
-        let pin = super::ProcessPin::open(child.id()).unwrap().expect("child is running");
+        let pin = super::ProcessPin::open(child.id())
+            .unwrap()
+            .expect("child is running");
         assert!(!pin.has_exited());
-        pin.terminate_and_wait(std::time::Duration::from_secs(5)).unwrap();
+        pin.terminate_and_wait(std::time::Duration::from_secs(5))
+            .unwrap();
         assert!(pin.has_exited());
         let _ = child.wait();
     }

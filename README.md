@@ -217,8 +217,20 @@ How to use it:
      only); "visible" when a human must log in or solve a captcha; "headless"
      only if you know the target site allows it. Firefox supports visible and
      headless only.
-   - sessionId (optional): only when you need several separate browsers in
-     this same project at once.
+   - sessionId: on macOS, pass a stable, explicit identifier for each task and
+     reuse it as `--session` in CLI calls. Different tasks use different values;
+     more pages within a task use `page_newtab`. An explicitly configured
+     `PORTPILOT_TASK_ID` can supply the same identity to both CLI and MCP, but it
+     must be forwarded to both. Codex forwards its thread ID to shell commands,
+     **not** MCP servers, so PortPilot does not infer sessions from that variable.
+     Missing task identity on Mac fails before allocating a browser. Exact PPID
+     reconnects remain available; follow-up actions should use that same PPID.
+     Windows/Linux retain the optional session and implicit `default` behavior.
+
+   A lane returned by `list_lanes` can belong to an older task. Do not reopen
+   it just because it is the only result. Use an exact `laneId` when the user
+   deliberately wants that saved profile, or `find_saved_login` for a saved
+   website login. Existing profiles and saved logins are retained.
 2. Drive the page. Two options:
    - PortPilot's page_* tools work on EVERY backend: page_goto (navigate +
      wait), page_eval (run a JS expression, get JSON back), page_text,

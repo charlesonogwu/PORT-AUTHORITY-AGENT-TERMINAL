@@ -44,3 +44,22 @@ test("scanNative enriches a real macOS listener with its ps command line", {
     await once(child, "exit").catch(() => undefined);
   }
 });
+
+test("macOS ignores an executable named sonar injected into PATH", { skip: process.platform !== "darwin" }, async () => {
+  const { mkdtemp, writeFile, access, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawnSync } = await import("node:child_process");
+  const root = await mkdtemp(join(tmpdir(), "portpilot-sonar-"));
+  try {
+    const marker = join(root, "executed");
+    await writeFile(join(root, "sonar"), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed');\nconsole.log('sonar');\n`, { mode: 0o755 });
+    const scanner = new URL("../src/core/scanner.js", import.meta.url).href;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `import {hasSonar} from ${JSON.stringify(scanner)}; console.log(await hasSonar());`], {
+      env: { ...process.env, PATH: `${root}:${process.env.PATH ?? ""}` }, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "false");
+    await assert.rejects(() => access(marker));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

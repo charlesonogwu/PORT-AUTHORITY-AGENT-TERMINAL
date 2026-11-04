@@ -16,12 +16,15 @@
 //     The function itself stays sync because Command::output is sync; we
 //     just don't want callers to invoke it from the main UI thread.
 
+#[cfg(not(target_os = "macos"))]
 use serde_json::Value;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::OnceLock;
+#[cfg(not(target_os = "macos"))]
 use std::thread;
+#[cfg(not(target_os = "macos"))]
 use std::time::Duration;
 
 /// Windows-only flag: spawn without creating a console window. Without this,
@@ -63,6 +66,9 @@ fn configure_persistent_process(command: &mut Command) {
 /// flag. All subprocess spawns in the Tauri shell go through this helper to
 /// guarantee none of them pop a CMD window.
 pub fn quiet_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    #[cfg(not(target_os = "windows"))]
+    let cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
     {
@@ -74,6 +80,7 @@ pub fn quiet_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
 /// Locate the `paat` binary on PATH. Falls back to `port-authority` then
 /// `portpilot` (the other npm-installed aliases). Returns a clear error
 /// message if none are found so the dashboard UI can surface it.
+#[cfg(not(target_os = "macos"))]
 fn find_paat_binary() -> Result<String, String> {
     for name in &["paat", "port-authority", "portpilot"] {
         if let Ok(path) = which::which(name) {
@@ -87,6 +94,7 @@ fn find_paat_binary() -> Result<String, String> {
 
 /// Command that starts the dashboard's long-lived helper, `paat dashboard-serve`
 /// (see snapshot_worker.rs). Windowless, like every other spawn here.
+#[cfg(not(target_os = "macos"))]
 pub fn dashboard_helper_command() -> Result<Command, String> {
     let mut command = quiet_command(find_paat_binary()?);
     command.arg("dashboard-serve");
@@ -97,6 +105,7 @@ pub fn dashboard_helper_command() -> Result<Command, String> {
 /// Explorer/login autostart, outside disposable MCP process jobs; the
 /// supervisor inherits that durable lifetime boundary.
 #[allow(clippy::zombie_processes)]
+#[cfg(not(target_os = "macos"))]
 pub fn start_supervisor_background() -> Result<(), String> {
     let binary = find_paat_binary()?;
     let mut command = Command::new(&binary);
@@ -396,6 +405,7 @@ mod tests {
 ///    freezes the UI for the subprocess duration (~500ms-1s on Windows),
 ///    which Windows surfaces as "Not Responding" if the user is dragging
 ///    the window at that moment.
+#[cfg(not(target_os = "macos"))]
 pub fn run_cli_json(args: &[&str]) -> Result<Value, String> {
     let binary = find_paat_binary()?;
     let mut full_args: Vec<&str> = args.to_vec();
