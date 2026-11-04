@@ -77,7 +77,7 @@ function manifestKey(relativePath: string): string {
  */
 export function isSafeManifestKey(key: string): boolean {
   if (!key || key.length > 512) return false;
-  if (key.includes("\\") || key.includes("\0") || key.startsWith("/") || /^[a-zA-Z]:/.test(key)) return false;
+  if (key.includes("\\") || key.includes(":") || key.includes("\0") || key.startsWith("/")) return false;
   return key.split("/").every((part) => part !== "" && part !== "." && part !== "..");
 }
 
@@ -134,9 +134,29 @@ async function assertContained(realSkillDir: string, file: string): Promise<void
   }
 }
 
+/** Check the nearest existing ancestor before creating each missing directory. */
+async function ensureContainedDirectory(realSkillDir: string, directory: string): Promise<void> {
+  try {
+    const actual = await realpath(directory);
+    if (!isInside(realSkillDir, actual)) {
+      throw new Error(`refusing to write outside the skill folder: ${directory} resolves to ${actual}`);
+    }
+    return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  await ensureContainedDirectory(realSkillDir, dirname(directory));
+  // No recursive mkdir: a dangling link or a concurrently created directory
+  // must not redirect creation of further descendants before validation.
+  await mkdir(directory).catch((err: NodeJS.ErrnoException) => {
+    if (err.code !== "EEXIST") throw err;
+  });
+  await assertContained(realSkillDir, join(directory, "placeholder"));
+}
+
 /** Write via a temp file + rename so a reader never sees a half-written file. */
 async function writeAtomic(realSkillDir: string, target: string, content: Buffer | string): Promise<void> {
-  await mkdir(dirname(target), { recursive: true });
+  await ensureContainedDirectory(realSkillDir, dirname(target));
   await assertContained(realSkillDir, target);
   const temp = `${target}${TEMP_MARKER}${process.pid}-${randomBytes(4).toString("hex")}`;
   try {
@@ -267,6 +287,17 @@ export async function installAgentSkill(
   await mkdir(skillDir, { recursive: true });
   const realSkillDir = await realpath(skillDir);
 
+  // Filesystem aliases (notably NTFS 8.3 names) can name a shipped file
+  // without sharing its spelling. Never schedule those files for removal.
+  const bundledRealPaths = new Set<string>();
+  for (const file of [...bundle.keys(), SKILL_MANIFEST]) {
+    try {
+      bundledRealPaths.add((await realpath(join(skillDir, file))).toLowerCase());
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+
   const toWrite: string[] = [];
   for (const [file, content] of bundle) {
     const current = await readIfExists(join(skillDir, file));
@@ -279,7 +310,10 @@ export async function installAgentSkill(
   for (const file of Object.keys(previous?.files ?? {})) {
     if (bundledLower.has(file.toLowerCase())) continue;
     const info = await lstat(join(skillDir, file)).catch(() => null);
-    if (info?.isFile()) toRemove.push(file);
+    if (info?.isFile()) {
+      const actual = await realpath(join(skillDir, file)).catch(() => null);
+      if (actual && !bundledRealPaths.has(actual.toLowerCase())) toRemove.push(file);
+    }
   }
 
   const manifest: SkillManifest = {

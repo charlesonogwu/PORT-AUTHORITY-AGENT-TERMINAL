@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -224,6 +224,39 @@ test("manifest keys must stay inside the skill folder", () => {
     assert.equal(isSafeManifestKey(bad), false, bad);
   }
   for (const good of ["SKILL.md", "agents/openai.yaml", "a/b/c.txt"]) assert.equal(isSafeManifestKey(good), true, good);
+});
+
+for (const alias of ["SKILL.md::$DATA", "agents/openai.yaml::$DATA", "agents/OPENAI~1.YAM"]) {
+  test(`manifest alias ${alias} cannot remove a shipped file`, { skip: process.platform !== "win32" }, async (t) => {
+    await withTempDir(async (home) => {
+      const first = await installAgentSkill("codex", { homeDir: home });
+      const shipped = alias.startsWith("agents/") ? "agents/openai.yaml" : "SKILL.md";
+      const expected = await readFile(join(first.skillDir, shipped));
+      if (alias.includes("~") && !existsSync(join(first.skillDir, alias))) {
+        t.skip("volume does not generate 8.3 short names");
+        return;
+      }
+      if (alias.includes("~")) assert.equal(await realpath(join(first.skillDir, alias)), await realpath(join(first.skillDir, shipped)));
+      const manifest = JSON.parse(await readFile(join(first.skillDir, SKILL_MANIFEST), "utf8"));
+      manifest.files[alias] = "0".repeat(64);
+      await writeFile(join(first.skillDir, SKILL_MANIFEST), JSON.stringify(manifest));
+      await installAgentSkill("codex", { homeDir: home });
+      assert.deepEqual(await readFile(join(first.skillDir, shipped)), expected);
+    });
+  });
+}
+
+test("installer creates no directories through a junction outside the skill", async () => {
+  await withTempDir(async (home) => {
+    const v1 = await writeBundle(join(home, "v1"));
+    const first = await installAgentSkill("codex", { homeDir: home, sourceDir: v1 });
+    const outside = join(home, "outside");
+    await mkdir(outside);
+    await symlink(outside, join(first.skillDir, "agents"), process.platform === "win32" ? "junction" : "dir");
+    const v2 = await writeBundle(join(home, "v2"), { "agents/newdir/file.yaml": "new\n" });
+    await assert.rejects(installAgentSkill("codex", { homeDir: home, sourceDir: v2 }), /outside the skill folder/);
+    assert.deepEqual(await readdir(outside), [], "refusal must happen before creating outside/newdir");
+  });
 });
 
 test("an older managed copy without a manifest is upgraded without deleting anything", async () => {

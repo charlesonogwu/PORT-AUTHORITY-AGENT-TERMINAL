@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Safety
 
+- Skill upgrades reject NTFS stream paths and preserve shipped files addressed
+  through short-name aliases. Parent folders are checked before creation so a
+  junction cannot create directories outside the skill folder.
+
 - The skill uses one stable, task-specific sessionId (lowercase letters,
   digits and hyphens, at most 40 characters), so each task gets its own
   browser. It uses `page_newtab` for extra pages and passes `tab` to page
