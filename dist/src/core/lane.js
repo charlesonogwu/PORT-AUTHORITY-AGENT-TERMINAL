@@ -4,6 +4,7 @@
  * A "lane" is one agent's reserved working slot: an app port, a Chrome debug port,
  * a Chrome profile directory, and metadata identifying who owns it.
  */
+import { posix, win32 } from "node:path";
 /** Read a lane's browser defensively: lanes written before the field existed
  *  (or by older versions) are Chrome lanes. */
 export function laneBrowser(lane) {
@@ -20,6 +21,23 @@ export function laneBrowser(lane) {
  */
 export const DEFAULT_SESSION_ID = "default";
 export const REGISTRY_VERSION = 1;
+export class PortRangeError extends Error {
+    constructor(label, range) {
+        super(`Invalid ${label} port range ${String(range.start)}-${String(range.end)}. ` +
+            "Ports must be integers from 1 through 65535 and start must not exceed end.");
+        this.name = "PortRangeError";
+    }
+}
+export function validatePortRange(range, label = "network") {
+    if (!Number.isInteger(range.start) ||
+        !Number.isInteger(range.end) ||
+        range.start < 1 ||
+        range.end > 65_535 ||
+        range.start > range.end) {
+        throw new PortRangeError(label, range);
+    }
+    return range;
+}
 export const DEFAULT_CHROME_DEBUG_RANGE = { start: 9322, end: 9399 };
 export const DEFAULT_APP_PORT_RANGE = { start: 3000, end: 3099 };
 /**
@@ -170,6 +188,18 @@ export function normalizeCwd(cwd) {
             p = p.replace(/\/+$/, "");
     }
     return p;
+}
+/** Stable comparison key for lane identity. Windows paths are resolved,
+ * separator-normalized, and case-folded because NTFS paths are normally
+ * case-insensitive. The stored `cwd` remains human-readable via normalizeCwd. */
+export function cwdIdentity(cwd, platform = process.platform) {
+    const trimmed = cwd.trim();
+    if (!trimmed)
+        return trimmed;
+    if (platform === "win32") {
+        return win32.resolve(trimmed.replace(/\//g, "\\")).replace(/\\+$/, "").toLowerCase();
+    }
+    return posix.resolve(trimmed.replace(/\\/g, "/")).replace(/\/+$/, "") || "/";
 }
 export function isStale(lane, now = Date.now()) {
     if (lane.status === "released")

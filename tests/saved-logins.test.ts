@@ -133,3 +133,10 @@ test("an in-progress Erase cannot be mistaken for a completed deletion", async (
   await assert.rejects(forgetProfile({profileDir:a.chromeProfileDir, laneId:a.id}), /progress|pending/i);
   assert.equal((await listLanes())[0]?.savedLogins?.length, 1);
 }));
+
+test("saved-login lookup treats Windows folder names case-insensitively", { skip: process.platform !== "win32" }, async () => withTempHome(async home => {
+  const lane = await seed(home, "lane_case", join(home, "Workspace", "Shop"));
+  await rememberSavedLogin(lane.id, { website: "example.com", confirmed: true });
+  const found = await findSavedLogins({ cwd: lane.cwd.toUpperCase().split("\\").join("/"), website: "example.com" });
+  assert.equal(found.reconnect?.laneId, lane.id);
+}));

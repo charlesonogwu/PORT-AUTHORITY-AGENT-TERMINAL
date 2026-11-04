@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { totalmem } from "node:os";
-import { DEFAULT_APP_PORT_RANGE, DEFAULT_CHROME_DEBUG_RANGE } from "./lane.js";
+import { DEFAULT_APP_PORT_RANGE, DEFAULT_CHROME_DEBUG_RANGE, validatePortRange, } from "./lane.js";
 import { atomicWriteJson } from "./lockfile.js";
 import { portpilotHome } from "./paths.js";
 export const CONFIG_VERSION = 1;
@@ -13,6 +13,13 @@ export const DEFAULT_CONFIG = {
 export function configPath() {
     return join(portpilotHome(), "config.json");
 }
+function validateConfig(cfg) {
+    if (cfg.chromeDebugRange)
+        validatePortRange(cfg.chromeDebugRange, "browser debug");
+    if (cfg.appPortRange)
+        validatePortRange(cfg.appPortRange, "app");
+    return cfg;
+}
 export async function loadConfig() {
     try {
         const raw = await readFile(configPath(), "utf8");
@@ -20,7 +27,7 @@ export async function loadConfig() {
         if (!parsed || parsed.version !== CONFIG_VERSION) {
             return { ...DEFAULT_CONFIG };
         }
-        return { ...DEFAULT_CONFIG, ...parsed, version: CONFIG_VERSION };
+        return validateConfig({ ...DEFAULT_CONFIG, ...parsed, version: CONFIG_VERSION });
     }
     catch (err) {
         if (err.code === "ENOENT")
@@ -29,7 +36,7 @@ export async function loadConfig() {
     }
 }
 export async function saveConfig(cfg) {
-    await atomicWriteJson(configPath(), { ...cfg, version: CONFIG_VERSION });
+    await atomicWriteJson(configPath(), validateConfig({ ...cfg, version: CONFIG_VERSION }));
     // touch a noop just to keep API symmetric with future writes
     void writeFile;
 }

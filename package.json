@@ -55,6 +55,7 @@
     "gui/src-tauri/src",
     "scripts/postinstall.cjs",
     "scripts/build-dashboard-tauri.cjs",
+    "scripts/npm-invocation.cjs",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

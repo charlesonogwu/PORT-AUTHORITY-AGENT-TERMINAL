@@ -1,7 +1,13 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { totalmem } from "node:os";
-import { BrowserKind, DEFAULT_APP_PORT_RANGE, DEFAULT_CHROME_DEBUG_RANGE, PortRange } from "./lane.js";
+import {
+  BrowserKind,
+  DEFAULT_APP_PORT_RANGE,
+  DEFAULT_CHROME_DEBUG_RANGE,
+  PortRange,
+  validatePortRange,
+} from "./lane.js";
 import { atomicWriteJson } from "./lockfile.js";
 import { portpilotHome } from "./paths.js";
 import type { ChromeLaunchMode } from "./chrome.js";
@@ -64,6 +70,12 @@ export function configPath(): string {
   return join(portpilotHome(), "config.json");
 }
 
+function validateConfig(cfg: PortpilotConfig): PortpilotConfig {
+  if (cfg.chromeDebugRange) validatePortRange(cfg.chromeDebugRange, "browser debug");
+  if (cfg.appPortRange) validatePortRange(cfg.appPortRange, "app");
+  return cfg;
+}
+
 export async function loadConfig(): Promise<PortpilotConfig> {
   try {
     const raw = await readFile(configPath(), "utf8");
@@ -71,7 +83,7 @@ export async function loadConfig(): Promise<PortpilotConfig> {
     if (!parsed || parsed.version !== CONFIG_VERSION) {
       return { ...DEFAULT_CONFIG };
     }
-    return { ...DEFAULT_CONFIG, ...parsed, version: CONFIG_VERSION };
+    return validateConfig({ ...DEFAULT_CONFIG, ...parsed, version: CONFIG_VERSION });
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_CONFIG };
     throw err;
@@ -79,7 +91,7 @@ export async function loadConfig(): Promise<PortpilotConfig> {
 }
 
 export async function saveConfig(cfg: PortpilotConfig): Promise<void> {
-  await atomicWriteJson(configPath(), { ...cfg, version: CONFIG_VERSION });
+  await atomicWriteJson(configPath(), validateConfig({ ...cfg, version: CONFIG_VERSION }));
   // touch a noop just to keep API symmetric with future writes
   void writeFile;
 }

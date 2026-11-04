@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isStale, nowIso, ownerSlug, projectSlug, normalizeCwd } from "../src/core/lane.js";
+import {
+  cwdIdentity,
+  isStale,
+  normalizeCwd,
+  nowIso,
+  ownerSlug,
+  projectSlug,
+  validatePortRange,
+} from "../src/core/lane.js";
 
 test("projectSlug derives a slug from the last path segment", () => {
   assert.equal(projectSlug("C:\\Users\\dev\\Downloads\\vend-site"), "vend-site");
@@ -20,6 +28,29 @@ test("normalizeCwd unifies separators and case-corrects drive letters", () => {
   } else {
     assert.equal(normalizeCwd("/home/dev//proj/"), "/home/dev/proj");
   }
+});
+
+test("cwdIdentity is case-insensitive and resolves dot segments on Windows", () => {
+  assert.equal(
+    cwdIdentity("C:\\Work\\ProjectAlpha\\.\\src\\..", "win32"),
+    cwdIdentity("c:/work/projectalpha", "win32"),
+  );
+});
+
+test("cwdIdentity remains case-sensitive on POSIX", () => {
+  assert.notEqual(cwdIdentity("/Work/Project", "linux"), cwdIdentity("/work/project", "linux"));
+});
+
+test("validatePortRange refuses invalid network port ranges", () => {
+  for (const range of [
+    { start: 0, end: 10 },
+    { start: 20, end: 10 },
+    { start: 10.5, end: 20 },
+    { start: 65_535, end: 65_536 },
+  ]) {
+    assert.throws(() => validatePortRange(range), /port range/i);
+  }
+  assert.deepEqual(validatePortRange({ start: 1, end: 65_535 }), { start: 1, end: 65_535 });
 });
 
 test("isStale returns true once lastSeen is older than the stale window", () => {
