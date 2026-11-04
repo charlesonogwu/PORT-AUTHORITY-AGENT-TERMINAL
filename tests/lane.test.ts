@@ -37,6 +37,12 @@ test("cwdIdentity is case-insensitive and resolves dot segments on Windows", () 
   );
 });
 
+test("cwdIdentity treats Windows long-path spellings as the same folder", () => {
+  assert.equal(cwdIdentity(String.raw`\\?\C:\Work\Shop`, "win32"), cwdIdentity(String.raw`c:\work\shop`, "win32"));
+  assert.equal(cwdIdentity(String.raw`\\?\UNC\srv\share\Shop`, "win32"), cwdIdentity(String.raw`\\SRV\share\shop`, "win32"));
+  assert.equal(cwdIdentity("//?/C:/Work/Shop/", "win32"), cwdIdentity(String.raw`C:\Work\Shop`, "win32"));
+});
+
 test("cwdIdentity remains case-sensitive on POSIX", () => {
   assert.notEqual(cwdIdentity("/Work/Project", "linux"), cwdIdentity("/work/project", "linux"));
 });

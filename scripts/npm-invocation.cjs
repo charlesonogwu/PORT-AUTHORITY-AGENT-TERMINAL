@@ -2,11 +2,18 @@
 "use strict";
 
 const { existsSync } = require("node:fs");
-const { dirname, join, resolve } = require("node:path");
+const { basename, dirname, join, resolve } = require("node:path");
+
+/** npm sets npm_execpath to npm-cli.js; pnpm/yarn and .cmd shims set other
+ *  files that `node <file>` would either run as the wrong tool or fail on. */
+function npmExecPath(env) {
+  const value = env.npm_execpath;
+  return typeof value === "string" && basename(value).toLowerCase() === "npm-cli.js" ? value : undefined;
+}
 
 function npmCliCandidates(execPath, env) {
   return [
-    env.npm_execpath,
+    npmExecPath(env),
     join(dirname(execPath), "node_modules", "npm", "bin", "npm-cli.js"),
     join(dirname(execPath), "..", "node_modules", "npm", "bin", "npm-cli.js"),
     env.APPDATA && join(env.APPDATA, "npm", "node_modules", "npm", "bin", "npm-cli.js"),

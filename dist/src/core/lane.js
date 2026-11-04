@@ -189,15 +189,26 @@ export function normalizeCwd(cwd) {
     }
     return p;
 }
+/** `\\?\C:\x` → `C:\x` and `\\?\UNC\srv\share` → `\\srv\share`: the same folder. */
+function stripWin32LongPathPrefix(path) {
+    if (/^\\\\\?\\UNC\\/i.test(path))
+        return `\\\\${path.slice(8)}`;
+    if (/^\\\\\?\\[a-zA-Z]:/.test(path))
+        return path.slice(4);
+    return path;
+}
 /** Stable comparison key for lane identity. Windows paths are resolved,
- * separator-normalized, and case-folded because NTFS paths are normally
- * case-insensitive. The stored `cwd` remains human-readable via normalizeCwd. */
+ * separator-normalized, stripped of the `\\?\` long-path prefix, and
+ * case-folded because NTFS paths are normally case-insensitive. The stored
+ * `cwd` remains human-readable via normalizeCwd. Junctions and symlinks are
+ * not resolved: a link and its target are still different lanes. */
 export function cwdIdentity(cwd, platform = process.platform) {
     const trimmed = cwd.trim();
     if (!trimmed)
         return trimmed;
     if (platform === "win32") {
-        return win32.resolve(trimmed.replace(/\//g, "\\")).replace(/\\+$/, "").toLowerCase();
+        const native = stripWin32LongPathPrefix(trimmed.replace(/\//g, "\\"));
+        return win32.resolve(native).replace(/\\+$/, "").toLowerCase();
     }
     return posix.resolve(trimmed.replace(/\\/g, "/")).replace(/\/+$/, "") || "/";
 }

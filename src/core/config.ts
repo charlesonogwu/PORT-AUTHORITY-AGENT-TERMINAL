@@ -76,6 +76,37 @@ function validateConfig(cfg: PortpilotConfig): PortpilotConfig {
   return cfg;
 }
 
+const warnedConfigProblems = new Set<string>();
+
+/**
+ * A hand-edited config.json with an impossible port range must not stop
+ * every allocation, launch and dashboard refresh (or `paat config`, the tool
+ * that would repair it). Saving stays strict; loading falls back to the
+ * default range and says so on stderr, once per process.
+ */
+function withUsableRanges(cfg: PortpilotConfig): PortpilotConfig {
+  const fields = [
+    ["chromeDebugRange", "browser debug"],
+    ["appPortRange", "app"],
+  ] as const;
+  let usable = cfg;
+  for (const [field, label] of fields) {
+    const range = usable[field];
+    if (!range) continue;
+    try {
+      validatePortRange(range, label);
+    } catch (error) {
+      const message = `[portpilot] ${(error as Error).message} Using the default ${label} range; fix ${field} in ${configPath()}.`;
+      if (!warnedConfigProblems.has(message)) {
+        warnedConfigProblems.add(message);
+        process.stderr.write(`${message}\n`);
+      }
+      usable = { ...usable, [field]: DEFAULT_CONFIG[field] };
+    }
+  }
+  return usable;
+}
+
 export async function loadConfig(): Promise<PortpilotConfig> {
   try {
     const raw = await readFile(configPath(), "utf8");
@@ -83,7 +114,7 @@ export async function loadConfig(): Promise<PortpilotConfig> {
     if (!parsed || parsed.version !== CONFIG_VERSION) {
       return { ...DEFAULT_CONFIG };
     }
-    return validateConfig({ ...DEFAULT_CONFIG, ...parsed, version: CONFIG_VERSION });
+    return withUsableRanges({ ...DEFAULT_CONFIG, ...parsed, version: CONFIG_VERSION });
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_CONFIG };
     throw err;

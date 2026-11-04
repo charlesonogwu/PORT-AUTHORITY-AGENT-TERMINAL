@@ -137,7 +137,9 @@ export declare function laneSessionId(lane: {
 }): string;
 export declare function normalizeCwd(cwd: string): string;
 /** Stable comparison key for lane identity. Windows paths are resolved,
- * separator-normalized, and case-folded because NTFS paths are normally
- * case-insensitive. The stored `cwd` remains human-readable via normalizeCwd. */
+ * separator-normalized, stripped of the `\\?\` long-path prefix, and
+ * case-folded because NTFS paths are normally case-insensitive. The stored
+ * `cwd` remains human-readable via normalizeCwd. Junctions and symlinks are
+ * not resolved: a link and its target are still different lanes. */
 export declare function cwdIdentity(cwd: string, platform?: NodeJS.Platform): string;
 export declare function isStale(lane: Lane, now?: number): boolean;
