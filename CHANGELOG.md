@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The dashboard window now has a restrictive Content Security Policy: it
   can load only its own bundled files and talk only to the dashboard app
   itself. It previously had none.
+- Cleared every known vulnerability in PortPilot's runtime dependencies
+  (9 advisories, including a critical one in `proxy-addr` and high ones in
+  `@modelcontextprotocol/sdk`, `zod`, `hono`, `ip-address`, `fast-uri` and
+  `body-parser`). Fresh npm installs were already resolving the fixed
+  versions; the minimum `@modelcontextprotocol/sdk` (^1.32.2) and `zod`
+  (^4.6.7) are now raised so no install can pick a vulnerable one, and the
+  repository lockfile (used by CI and source builds) is updated.
+- Updated the dashboard's build tooling lockfile, clearing 19 advisories
+  (1 critical, 14 high). Still open: `sharp`, a development-only icon tool
+  that needs a major upgrade, and low/moderate advisories inside the
+  `shadcn` scaffolding CLI's dependencies. Neither is part of the npm
+  package or the built dashboard.
 
 ## [0.4.6] — 2026-11-03
 
