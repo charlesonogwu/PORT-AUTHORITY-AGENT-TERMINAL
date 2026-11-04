@@ -12,6 +12,7 @@
 // thread — same pattern as commands/snapshot.rs.
 
 use crate::cli::{quiet_command, run_cli_json};
+use crate::target::{verify_live_target, LaneTarget};
 use serde_json::Value;
 use std::{thread, time::Duration};
 
@@ -25,7 +26,11 @@ fn kill_pid(pid: u32) {
     };
 }
 
-fn erase_blocking(pid: u32, profile_dir: String, lane_id: Option<String>) -> Result<Value, String> {
+fn erase_blocking(target: LaneTarget) -> Result<Value, String> {
+    verify_live_target(&target)?;
+    let pid = target.pid;
+    let profile_dir = target.profile_dir;
+    let lane_id = target.lane_id;
     // 1. Close Chrome so it releases the profile's file handles.
     kill_pid(pid);
 
@@ -61,11 +66,9 @@ fn erase_blocking(pid: u32, profile_dir: String, lane_id: Option<String>) -> Res
 
 #[tauri::command]
 pub async fn erase_chrome(
-    pid: u32,
-    profile_dir: String,
-    lane_id: Option<String>,
+    target: LaneTarget,
 ) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || erase_blocking(pid, profile_dir, lane_id))
+    tauri::async_runtime::spawn_blocking(move || erase_blocking(target))
         .await
         .map_err(|e| format!("erase worker join failed: {}", e))?
 }

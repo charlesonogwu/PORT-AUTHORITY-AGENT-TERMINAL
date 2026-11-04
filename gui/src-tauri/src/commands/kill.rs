@@ -8,10 +8,19 @@
 // PID has already exited the OS-level kill is a no-op and we return ok.
 
 use crate::cli::quiet_command;
+use crate::target::{verify_live_target, LaneTarget};
 use serde_json::{json, Value};
 
 #[tauri::command]
-pub fn kill_chrome(pid: u32) -> Result<Value, String> {
+pub async fn kill_chrome(target: LaneTarget) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || kill_verified(target))
+        .await
+        .map_err(|e| format!("kill worker join failed: {}", e))?
+}
+
+fn kill_verified(target: LaneTarget) -> Result<Value, String> {
+    verify_live_target(&target)?;
+    let pid = target.pid;
     // quiet_command() suppresses the brief CMD-window flash that
     // std::process::Command::new("taskkill.exe") would otherwise pop on
     // Windows. Same fix applied across cli.rs and focus.rs in 0.2.3.

@@ -20,6 +20,7 @@
 //   analog is a documented follow-up.
 
 use crate::cli::quiet_command;
+use crate::target::{verify_live_target, LaneTarget};
 use serde_json::{json, Value};
 
 /// The small amount of window metadata needed to decide whether a top-level
@@ -106,12 +107,18 @@ mod tests {
 /* -------------------------------------------------------------------------- */
 
 #[tauri::command]
-pub fn focus_chrome(pid: u32) -> Result<Value, String> {
-    let result = run_focus(pid);
-    Ok(match result {
-        Ok(()) => json!({ "ok": true, "pid": pid }),
-        Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
+pub async fn focus_chrome(target: LaneTarget) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        verify_live_target(&target)?;
+        let pid = target.pid;
+        let result = run_focus(pid);
+        Ok(match result {
+            Ok(()) => json!({ "ok": true, "pid": pid }),
+            Err(e) => json!({ "ok": false, "pid": pid, "error": e }),
+        })
     })
+    .await
+    .map_err(|e| format!("focus worker join failed: {}", e))?
 }
 
 /* -------------------------------------------------------------------------- */
@@ -119,20 +126,28 @@ pub fn focus_chrome(pid: u32) -> Result<Value, String> {
 /* -------------------------------------------------------------------------- */
 
 #[tauri::command]
-pub fn hide_chrome(pid: u32) -> Result<Value, String> {
-    #[cfg(target_os = "windows")]
-    {
-        Ok(windows_hide(pid))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Best-effort on macOS/Linux; no placement captured (UI falls back).
-        let result = unix_hide(pid);
-        Ok(match result {
-            Ok(()) => json!({ "ok": true, "pid": pid, "placement": Value::Null }),
-            Err(e) => json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": e }),
-        })
-    }
+pub async fn hide_chrome(target: LaneTarget) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        verify_live_target(&target)?;
+        let pid = target.pid;
+        #[cfg(target_os = "windows")]
+        {
+            Ok(windows_hide(pid))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Best-effort on macOS/Linux; no placement captured (UI falls back).
+            let result = unix_hide(pid);
+            Ok(match result {
+                Ok(()) => json!({ "ok": true, "pid": pid, "placement": Value::Null }),
+                Err(e) => {
+                    json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": e })
+                }
+            })
+        }
+    })
+    .await
+    .map_err(|e| format!("hide worker join failed: {}", e))?
 }
 
 /* -------------------------------------------------------------------------- */
@@ -153,7 +168,18 @@ pub struct WinPlacement {
 }
 
 #[tauri::command]
-pub fn unhide_chrome(pid: u32, placement: WinPlacement) -> Result<Value, String> {
+pub async fn unhide_chrome(
+    target: LaneTarget,
+    placement: WinPlacement,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || unhide_verified(target, placement))
+        .await
+        .map_err(|e| format!("unhide worker join failed: {}", e))?
+}
+
+fn unhide_verified(target: LaneTarget, placement: WinPlacement) -> Result<Value, String> {
+    verify_live_target(&target)?;
+    let pid = target.pid;
     // Sanity-guard the saved rect: if it is degenerate or itself off-screen
     // (lost/garbled state, monitor unplugged), never restore the window
     // invisibly — fall back to a sensible on-screen box.

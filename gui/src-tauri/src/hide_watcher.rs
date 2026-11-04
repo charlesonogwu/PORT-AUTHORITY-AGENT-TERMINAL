@@ -18,33 +18,57 @@
 // z-order while still maximized first, drop to normal without activating, then
 // re-assert the off-screen position.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::State;
 
+use crate::target::{process_creation_time, verify_live_targets, LaneTarget};
+
 /// Shared set of pids whose windows must be kept off-screen. Managed as Tauri
 /// state and read by the watcher thread.
-pub type HiddenPids = Arc<Mutex<HashSet<u32>>>;
+pub type HiddenPids = Arc<Mutex<HashMap<u32, u64>>>;
 
 const POLL_MS: u64 = 150;
 
 /// Replace the watcher's hidden-pid set. Called by the frontend whenever the
 /// hidden lanes (or their live pids) change.
 #[tauri::command]
-pub fn set_hidden_pids(pids: Vec<u32>, state: State<'_, HiddenPids>) -> Result<(), String> {
-    let mut s = state.lock().map_err(|e| e.to_string())?;
-    *s = pids.into_iter().collect();
+pub async fn set_hidden_targets(
+    targets: Vec<LaneTarget>,
+    state: State<'_, HiddenPids>,
+) -> Result<(), String> {
+    // Drop the previous leases before doing any blocking verification. If the
+    // CLI is unavailable or a target is stale, fail open (show windows) rather
+    // than continuing to park a PID that may have been reused.
+    {
+        let mut current = state.lock().map_err(|e| e.to_string())?;
+        current.clear();
+    }
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let verified = tauri::async_runtime::spawn_blocking(move || {
+        verify_live_targets(&targets)?;
+        targets
+            .into_iter()
+            .map(|target| process_creation_time(target.pid).map(|created| (target.pid, created)))
+            .collect::<Result<HashMap<_, _>, _>>()
+    })
+    .await
+    .map_err(|e| format!("hidden-target worker join failed: {}", e))??;
+    let mut current = state.lock().map_err(|e| e.to_string())?;
+    *current = verified;
     Ok(())
 }
 
 /// Spawn the background watcher. Cheap no-op loop while nothing is hidden.
 pub fn spawn(state: HiddenPids) {
     std::thread::spawn(move || loop {
-        let pids: HashSet<u32> = match state.lock() {
+        let pids: HashMap<u32, u64> = match state.lock() {
             Ok(g) => g.clone(),
-            Err(_) => HashSet::new(),
+            Err(_) => HashMap::new(),
         };
         if !pids.is_empty() {
             #[cfg(target_os = "windows")]
@@ -56,7 +80,7 @@ pub fn spawn(state: HiddenPids) {
 
 #[cfg(target_os = "windows")]
 mod win {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -84,14 +108,17 @@ mod win {
     }
 
     /// Move every on-screen top-level window owned by a hidden pid off-screen.
-    pub fn park_on_screen(pids: &HashSet<u32>) {
+    pub fn park_on_screen(pids: &HashMap<u32, u64>) {
         unsafe {
             let mut ctx = Collected { windows: Vec::new() };
             if EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize)).is_err() {
                 return;
             }
             for (hwnd, pid) in ctx.windows {
-                if !pids.contains(&pid) {
+                let Some(expected_creation) = pids.get(&pid) else {
+                    continue;
+                };
+                if super::process_creation_time(pid).ok().as_ref() != Some(expected_creation) {
                     continue;
                 }
                 let mut r = RECT::default();

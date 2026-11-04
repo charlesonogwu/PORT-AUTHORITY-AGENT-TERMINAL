@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Dashboard actions (Show, Hide, Unhide, Kill, Erase) re-check their target
+  against a fresh snapshot (lane, process ID, browser, debug port and
+  profile) before acting. Before, Kill and Erase trusted a process ID from
+  the last refresh, so if that browser had closed and Windows reused the
+  number for another program, the dashboard could close the wrong program
+  or erase the wrong profile.
+- A failed dashboard refresh no longer shows an empty "no browsers running"
+  view. The dashboard keeps the last good view and says the refresh failed.
+
+### Security
+
+- The dashboard window now has a restrictive Content Security Policy: it
+  can load only its own bundled files and talk only to the dashboard app
+  itself. It previously had none.
+
 ## [0.4.6] — 2026-11-03
 
 ### Fixed
