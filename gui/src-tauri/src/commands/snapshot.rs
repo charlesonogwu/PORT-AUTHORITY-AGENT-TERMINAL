@@ -3,8 +3,8 @@
 // Express `/api/snapshot` endpoint returned.
 //
 // Each refresh is one request to the long-lived `paat dashboard-serve`
-// helper (snapshot_worker.rs), avoiding a fresh Node process for each call.
-// Native port/process scanners can still run as child processes. Previously
+// helper (snapshot_worker.rs), which starts no new processes (apart from the
+// optional `sonar` port scanner, when it is installed). Previously
 // every refresh ran `paat dashboard-snapshot --json` and `paat supervisor
 // status --json` as fresh processes; that path remains as the fallback when
 // the helper can't be used (for example an older `paat` on PATH).
@@ -22,24 +22,16 @@
 //    tested on the Node side,
 //  - keeping a single source of truth means the dashboard + MCP server see
 //    identical results,
-//  - the helper amortizes Node startup across refreshes.
+//  - I/O bound work makes the subprocess overhead negligible.
 //
-// If the CLI can't be found (npm install missing or broken PATH), we return
-// the bare DashboardSnapshot skeleton the UI knows how to render — empty
-// arrays + zeroed summary + a warning string so the dashboard surfaces the
-// install issue instead of going blank.
+// If the CLI cannot be reached, report an error and keep the last verified UI snapshot.
 
 use crate::cli::supervisor_startup_error;
-#[cfg(target_os = "windows")]
-use crate::cli::{dashboard_helper_command, run_cli_json};
-#[cfg(not(target_os = "windows"))]
 use crate::runtime::RuntimeState;
 use crate::snapshot_worker::{
     split_snapshot_reply, Coalescer, WorkerSlot, IDLE_LIMIT, REQUEST_TIMEOUT, RETRY_BACKOFF,
 };
 use serde_json::{json, Value};
-#[cfg(not(target_os = "windows"))]
-use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -76,25 +68,12 @@ fn start_idle_reaper() {
     });
 }
 
-fn one_shot_parts(
-    #[cfg(not(target_os = "windows"))] runtime: &RuntimeState,
-    reason: String,
-) -> SnapshotParts {
+fn one_shot_parts(runtime: &RuntimeState, reason: String) -> SnapshotParts {
     eprintln!("paat-dashboard: dashboard helper unavailable ({reason}); using one-shot CLI calls");
-    #[cfg(target_os = "windows")]
-    {
-        (
-            run_cli_json(&["dashboard-snapshot"]),
-            run_cli_json(&["supervisor", "status"]),
-        )
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        (
-            runtime.run_json(&["dashboard-snapshot".into()]),
-            runtime.run_json(&["supervisor".into(), "status".into()]),
-        )
-    }
+    (
+        runtime.run_json(&["dashboard-snapshot".into()]),
+        runtime.run_json(&["supervisor".into(), "status".into()]),
+    )
 }
 
 /// Use the helper's reply when it has both parts; otherwise run `fallback`
@@ -112,173 +91,27 @@ fn parts_or_fallback(
 
 /// From the helper when possible, else from the original one-shot CLI calls
 /// so the dashboard keeps working. Blocking: runs on a spawn_blocking thread.
-fn fetch_snapshot_parts(
-    #[cfg(not(target_os = "windows"))] runtime: &RuntimeState,
-) -> SnapshotParts {
+fn fetch_snapshot_parts(runtime: &RuntimeState) -> SnapshotParts {
     let requested_at = Instant::now();
     start_idle_reaper();
     let mut guard = refresher();
     let Refresher { helper, latest } = &mut *guard;
     latest.run(requested_at, || {
-        #[cfg(target_os = "windows")]
-        {
-            let reply = helper.request("snapshot", REQUEST_TIMEOUT, dashboard_helper_command);
-            parts_or_fallback(reply, one_shot_parts)
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let reply = helper.request("snapshot", REQUEST_TIMEOUT, || {
-                runtime.dashboard_helper_command()
-            });
-            parts_or_fallback(reply, |reason| one_shot_parts(runtime, reason))
-        }
+        let reply = helper.request("snapshot", REQUEST_TIMEOUT, || {
+            runtime.dashboard_helper_command()
+        });
+        parts_or_fallback(reply, |reason| one_shot_parts(runtime, reason))
     })
 }
 
-#[cfg(not(target_os = "windows"))]
-fn append_verified_firefox(snapshot: &mut Value, lane: &Value, checked: &Value) -> bool {
-    if lane.get("browser").and_then(Value::as_str) != Some("firefox")
-        || lane.get("status").and_then(Value::as_str) == Some("released")
-        || checked.pointer("/verdict/kind").and_then(Value::as_str) != Some("safe-attach")
-    {
-        return false;
-    }
-    let lane_id = match lane.get("id").and_then(Value::as_str) {
-        Some(value) => value,
-        None => return false,
-    };
-    if checked.pointer("/lane/id").and_then(Value::as_str) != Some(lane_id) {
-        return false;
-    }
-    let observation = match checked.pointer("/verdict/observation") {
-        Some(value) => value,
-        None => return false,
-    };
-    let command_line = match observation.get("commandLine").and_then(Value::as_str) {
-        Some(value) if value.split_whitespace().any(|part| part == "-no-remote") => value,
-        _ => return false,
-    };
-    let pid = match observation.get("pid").and_then(Value::as_u64) {
-        Some(value) => value,
-        None => return false,
-    };
-    let port = match lane.get("chromeDebugPort").and_then(Value::as_u64) {
-        Some(value) => value,
-        None => return false,
-    };
-    let profile = match lane.get("chromeProfileDir").and_then(Value::as_str) {
-        Some(value) if command_line.contains(value) => value,
-        _ => return false,
-    };
-    let sessions = match snapshot
-        .get_mut("liveSessions")
-        .and_then(Value::as_array_mut)
-    {
-        Some(value) => value,
-        None => return false,
-    };
-    if sessions.iter().any(|session| {
-        session.get("laneId").and_then(Value::as_str) == Some(lane_id)
-            || session.get("pid").and_then(Value::as_u64) == Some(pid)
-    }) {
-        return false;
-    }
-    let owner = lane.get("owner").and_then(Value::as_str).unwrap_or("agent");
-    let project = lane
-        .get("project")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let mut session = json!({
-        "key": format!("{pid}:{port}:{profile}"),
-        "agent": owner,
-        "agentConfidence": "registered",
-        "project": project,
-        "projectConfidence": "registered",
-        "cwdConfidence": "registered",
-        "pid": pid,
-        "chromeDebugPort": port,
-        "debugMode": "port",
-        "chromeProfileDir": profile,
-        "browser": "firefox",
-        "hasSavedData": false,
-        "tabs": [],
-        "primaryTabs": [],
-        "registeredBy": "portpilot",
-        "laneId": lane_id,
-        "cdpError": "Firefox lane: BiDi debug port (not Chrome CDP) — tab list unavailable; drive it with the page tools"
-    });
-    for field in ["cwd", "task", "appPort"] {
-        if let Some(value) = lane.get(field) {
-            session[field] = value.clone();
-        }
-    }
-    sessions.push(session);
-    true
-}
-
-#[cfg(not(target_os = "windows"))]
-fn refresh_summary(snapshot: &mut Value) {
-    let (count, agent_count) = {
-        let sessions = match snapshot.get("liveSessions").and_then(Value::as_array) {
-            Some(value) => value,
-            None => return,
-        };
-        let agents: HashSet<&str> = sessions
-            .iter()
-            .filter_map(|session| session.get("agent").and_then(Value::as_str))
-            .collect();
-        (sessions.len() as u64, agents.len())
-    };
-    if let Some(summary) = snapshot.get_mut("summary") {
-        summary["liveSessions"] = json!(count);
-        summary["distinctAgents"] = json!(agent_count);
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn enrich_release_a_firefox(runtime: &RuntimeState, snapshot: &mut Value) {
-    if runtime.portpilot_version() != Some("0.4.0") {
-        return;
-    }
-    let listed = match runtime.run_json(&["list".into()]) {
-        Ok(value) => value,
-        Err(_) => return,
-    };
-    let lanes = match listed.get("lanes").and_then(Value::as_array) {
-        Some(value) => value,
-        None => return,
-    };
-    for lane in lanes {
-        if lane.get("browser").and_then(Value::as_str) != Some("firefox")
-            || lane.get("status").and_then(Value::as_str) == Some("released")
-        {
-            continue;
-        }
-        let (owner, cwd, session) = match (
-            lane.get("owner").and_then(Value::as_str),
-            lane.get("cwd").and_then(Value::as_str),
-            lane.get("sessionId").and_then(Value::as_str),
-        ) {
-            (Some(owner), Some(cwd), Some(session)) => (owner, cwd, session),
-            _ => continue,
-        };
-        let args = vec![
-            "check".into(),
-            "--owner".into(),
-            owner.into(),
-            "--cwd".into(),
-            cwd.into(),
-            "--session".into(),
-            session.into(),
-            "--browser".into(),
-            "firefox".into(),
-            "--json".into(),
-        ];
-        if let Ok(checked) = runtime.run_json(&args) {
-            append_verified_firefox(snapshot, lane, &checked);
-        }
-    }
-    refresh_summary(snapshot);
+/// A snapshot computed after this call began, from the same long-lived
+/// helper as the refresh loop (else the one-shot CLI), so checking an action's
+/// target never starts an extra program while the helper is healthy.
+/// Blocking: call it from a spawn_blocking thread.
+pub(crate) fn fresh_snapshot(runtime: &RuntimeState) -> Result<Value, String> {
+    let mut snapshot = fetch_snapshot_parts(runtime).0?;
+    crate::process_identity::enrich_snapshot(&mut snapshot);
+    Ok(snapshot)
 }
 
 /// 0.2.3 fix: async + spawn_blocking. Previously this was a sync
@@ -291,98 +124,74 @@ fn enrich_release_a_firefox(runtime: &RuntimeState, snapshot: &mut Value) {
 /// the UI thread free to pump WM_* messages even while the snapshot is
 /// being computed.
 #[tauri::command]
-pub async fn get_snapshot(
-    _runtime: State<'_, crate::runtime::RuntimeState>,
+pub async fn get_snapshot(runtime: State<'_, RuntimeState>) -> Result<Value, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (snapshot, supervisor) = fetch_snapshot_parts(&runtime);
+        let snapshot = snapshot.map(|mut value| {
+            crate::process_identity::enrich_snapshot(&mut value);
+            value
+        });
+        (snapshot, supervisor)
+    })
+    .await
+    .map_err(|e| format!("snapshot worker join failed: {}", e))
+    .and_then(|(res, supervisor_status)| merge_snapshot(res, supervisor_status))
+}
+
+/// Merge the supervisor's state into the snapshot as warnings. A failed
+/// snapshot stays an error: disguising it as an empty dashboard told the
+/// user no browsers were running. The UI keeps its last verified snapshot
+/// and shows the error instead.
+fn merge_snapshot(
+    res: Result<Value, String>,
+    supervisor_status: Result<Value, String>,
 ) -> Result<Value, String> {
-    #[cfg(not(target_os = "windows"))]
-    let runtime = _runtime.inner().clone();
-    #[cfg(not(target_os = "windows"))]
-    let snapshot_runtime = runtime.clone();
-    #[cfg(not(target_os = "windows"))]
-    let fetch = move || fetch_snapshot_parts(&snapshot_runtime);
-    #[cfg(target_os = "windows")]
-    let fetch = fetch_snapshot_parts;
-    tauri::async_runtime::spawn_blocking(fetch)
-        .await
-        .map_err(|e| format!("snapshot worker join failed: {}", e))
-        .map(|(res, supervisor_status)| match res {
-            Ok(mut v) => {
-                #[cfg(not(target_os = "windows"))]
-                { enrich_release_a_firefox(&runtime, &mut v);
-                  crate::process_identity::enrich_snapshot(&mut v); }
-                let mut add_warning = |warning: String| {
-                    if let Some(object) = v.as_object_mut() {
-                        let warnings = object.entry("warnings").or_insert_with(|| json!([]));
-                        if let Some(array) = warnings.as_array_mut() {
-                            array.push(json!(warning));
-                        }
-                    }
-                };
-                if let Some(error) = supervisor_startup_error() {
-                    add_warning(format!("Persistent browser supervisor unavailable: {}", error));
-                }
-                let running = supervisor_status
-                    .as_ref()
-                    .ok()
-                    .and_then(|status| status.get("running"))
-                    .and_then(Value::as_bool)
-                    == Some(true);
-                if !running {
-                    add_warning("Persistent browser supervisor is not responding; new browser launches are disabled until PortPilot is restarted.".into());
-                }
-                v
+    let mut v = res.map_err(|e| format!("paat CLI unavailable: {}", e))?;
+    let mut add_warning = |warning: String| {
+        if let Some(object) = v.as_object_mut() {
+            let warnings = object.entry("warnings").or_insert_with(|| json!([]));
+            if let Some(array) = warnings.as_array_mut() {
+                array.push(json!(warning));
             }
-            Err(e) => json!({
-                "ok": false,
-                "generatedAt": "",
-                "scanSource": "empty",
-                "scanErrors": [e.clone()],
-                "home": "",
-                "registryPath": "",
-                "config": {},
-                "summary": { "liveSessions": 0, "distinctAgents": 0, "conflicts": 0 },
-                "liveSessions": [],
-                "registryHealth": { "portpilot": { "exists": false, "lockHealthy": false } },
-                "conflicts": [],
-                "warnings": [format!("paat CLI unavailable: {}", e)]
-            }),
-        })
+        }
+    };
+    if let Some(error) = supervisor_startup_error() {
+        add_warning(format!(
+            "Persistent browser supervisor unavailable: {}",
+            error
+        ));
+    }
+    let running = supervisor_status
+        .as_ref()
+        .ok()
+        .and_then(|status| status.get("running"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if !running {
+        add_warning("Persistent browser supervisor is not responding; new browser launches are disabled until PortPilot is restarted.".into());
+    }
+    Ok(v)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn release_a_firefox_adapter_requires_verified_exact_lane() {
-        let lane = json!({
-            "id": "lane_ff", "owner": "agent", "project": "demo",
-            "cwd": "/tmp/demo", "sessionId": "ff", "appPort": 3001,
-            "chromeDebugPort": 9323, "chromeProfileDir": "/tmp/pp/profiles/ff",
-            "browser": "firefox", "status": "active"
-        });
-        let checked = json!({
-            "verdict": { "kind": "safe-attach", "observation": {
-                "pid": 123, "commandLine": "firefox -profile /tmp/pp/profiles/ff -no-remote --remote-debugging-port 9323"
-            }},
-            "lane": { "id": "lane_ff" }
-        });
-        let mut snapshot = json!({
-            "summary": { "liveSessions": 0, "distinctAgents": 0, "conflicts": 0 },
-            "liveSessions": []
-        });
-        assert!(append_verified_firefox(&mut snapshot, &lane, &checked));
-        refresh_summary(&mut snapshot);
-        assert_eq!(snapshot.pointer("/summary/liveSessions"), Some(&json!(1)));
-        assert_eq!(
-            snapshot.pointer("/liveSessions/0/browser"),
-            Some(&json!("firefox"))
-        );
+    fn a_failed_snapshot_is_reported_not_disguised_as_an_empty_dashboard() {
+        let result = merge_snapshot(Err("helper down".into()), Ok(json!({ "running": true })));
+        assert_eq!(result.unwrap_err(), "paat CLI unavailable: helper down");
+    }
 
-        let mut wrong = checked.clone();
-        wrong["lane"]["id"] = json!("foreign");
-        assert!(!append_verified_firefox(&mut snapshot, &lane, &wrong));
+    #[test]
+    fn a_stopped_supervisor_becomes_a_snapshot_warning() {
+        let merged =
+            merge_snapshot(Ok(json!({ "ok": true })), Ok(json!({ "running": false }))).unwrap();
+        let warnings = merged["warnings"].as_array().expect("warnings array");
+        assert!(warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("not responding")));
     }
 
     fn fallback_marker(reason: String) -> SnapshotParts {

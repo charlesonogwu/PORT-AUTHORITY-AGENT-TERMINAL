@@ -37,15 +37,15 @@ test("task identity uses the complete host ID and preserves deliberate sessions"
   assert.equal(taskSessionId("same"), taskSessionId(" same "));
   assert.ok(taskSessionId("same").length < 40);
   assert.equal(taskSessionFromEnvironment({ PORTPILOT_TASK_ID: "task", CODEX_THREAD_ID: "other" }), taskSessionId("task"));
-  assert.equal(taskSessionFromEnvironment({ T3CODE_THREAD_ID: "thread" }), taskSessionId("thread"));
-  assert.equal(taskSessionFromEnvironment({ CLAUDE_CODE_SESSION_ID: "claude" }), taskSessionId("claude"));
-  assert.equal(taskSessionFromEnvironment({ CODEX_THREAD_ID: "thread" }), taskSessionId("thread"));
-  assert.equal(taskSessionFromEnvironment({ CODEX_SESSION_ID: "session" }), taskSessionId("session"));
+  assert.equal(taskSessionFromEnvironment({ T3CODE_THREAD_ID: "thread" }), undefined);
+  assert.equal(taskSessionFromEnvironment({ CLAUDE_CODE_SESSION_ID: "claude" }), undefined);
+  assert.equal(taskSessionFromEnvironment({ CODEX_THREAD_ID: "thread" }), undefined);
+  assert.equal(taskSessionFromEnvironment({ CODEX_SESSION_ID: "session" }), undefined);
   assert.equal(taskSessionFromEnvironment({}), undefined);
   assert.equal(resolveTaskSession("codex", undefined, "task-scope"), "task-scope");
   assert.equal(resolveTaskSession("codex", "default", "task-scope"), "task-scope");
   assert.equal(resolveTaskSession("codex", "My Explicit Task", "task-scope"), "my-explicit-task");
-  assert.equal(resolveTaskSession("codex-legacy-task", undefined, "task-scope"), "legacy-task");
+  assert.equal(resolveTaskSession("codex-legacy-task", undefined, "task-scope"), "task-scope");
   assert.throws(() => resolveTaskSession("codex", undefined, undefined), /Task identity required/);
 });
 
@@ -57,7 +57,7 @@ test("different MCP tasks isolate lanes; repeated calls and selectors stay insid
     const b = await connection("task-b");
     const resumed = await connection("task-a");
     try {
-      assert.equal((await a.call("check_lane", { owner: "codex", cwd })).ok, false, "must not select an older default lane");
+      assert.equal((await a.call("check_lane", { owner: "codex", cwd, sessionId: taskSessionId("task-a") })).ok, false, "must not select an older default lane");
       assert.equal((await a.call("list_lanes", { owner: "codex", cwd })).reconnect, null, "one unrelated lane is not a reconnect recommendation");
       const first = await a.call("reserve_lane", { owner: "codex", cwd });
       const second = await b.call("reserve_lane", { owner: "codex", cwd });
@@ -68,9 +68,9 @@ test("different MCP tasks isolate lanes; repeated calls and selectors stay insid
       assert.notEqual(first.lane.appPort, second.lane.appPort);
       assert.equal((await a.call("reserve_lane", { owner: "codex", cwd, sessionId: "default" })).lane.id, first.lane.id);
       assert.equal((await resumed.call("reserve_lane", { owner: "codex", cwd })).lane.id, first.lane.id);
-      assert.equal((await a.call("check_lane", { owner: "codex", cwd })).lane.id, first.lane.id);
-      assert.equal((await b.call("check_lane", { owner: "codex", cwd })).lane.id, second.lane.id);
-      await a.call("release_lane", { owner: "codex", cwd });
+      assert.equal((await a.call("check_lane", { owner: "codex", cwd, sessionId: taskSessionId("task-a") })).lane.id, first.lane.id);
+      assert.equal((await b.call("check_lane", { owner: "codex", cwd, sessionId: taskSessionId("task-b") })).lane.id, second.lane.id);
+      await a.call("release_lane", { owner: "codex", cwd, sessionId: taskSessionId("task-a") });
       const lanes = await listLanes();
       assert.equal(lanes.find(l => l.id === first.lane.id)!.status, "released");
       assert.notEqual(lanes.find(l => l.id === second.lane.id)!.status, "released");
@@ -111,8 +111,8 @@ test("CLI calls inherit task isolation across processes and keep their own selec
     assert.notEqual(a.lane.id, b.lane.id);
     assert.notEqual(a.lane.chromeProfileDir, b.lane.chromeProfileDir);
     assert.equal(run("task-a", "reserve").lane.id, a.lane.id);
-    assert.equal(run("task-a", "check").lane.id, a.lane.id);
-    assert.equal(run("task-b", "check").lane.id, b.lane.id);
+    assert.equal(run("task-a", "check", ["--session", taskSessionId("task-a")]).lane.id, a.lane.id);
+    assert.equal(run("task-b", "check", ["--session", taskSessionId("task-b")]).lane.id, b.lane.id);
   });
 });
 
@@ -127,4 +127,66 @@ test("Windows retains main's omitted-session allocation and tuple selection", as
       assert.equal((await b.call("check_lane", args)).lane.id, first.lane.id);
     } finally { await a.close(); await b.close(); }
   });
+});
+
+test("agent-name suffixes cannot turn two Mac tasks into the same session", () => {
+  for (const owner of ["claude-code", "Claude Code", "codex-cli", "gpt-5"]) {
+    assert.equal(resolveTaskSession(owner, undefined, "task-a"), "task-a");
+    assert.equal(resolveTaskSession(owner, undefined, "task-b"), "task-b");
+    assert.throws(() => resolveTaskSession(owner, undefined, undefined), /Task identity required/);
+  }
+});
+
+test("derived sessions cannot silently redirect saved-profile follow-up actions", async () => {
+  await withTempHome(async (home) => {
+    const cwd = join(home, "project");
+    const saved = await allocateLane({ owner: "codex", cwd, sessionId: "saved", observations: [] });
+    const task = await connection("task-a");
+    try {
+      await task.call("reserve_lane", { owner: "codex", cwd });
+      assert.equal((await task.call("check_lane", { laneId: saved.lane.id })).lane.id, saved.lane.id);
+      for (const name of ["check_lane", "page_tabs", "close_browser"]) {
+        const result = await task.call(name, { owner: "codex", cwd });
+        assert.equal(result.ok, false);
+        assert.match(result.error, /ambiguous|multiple/i);
+      }
+      assert.equal((await task.call("check_lane", { owner: "codex", cwd, sessionId: "saved" })).lane.id, saved.lane.id);
+    } finally { await task.close(); }
+  });
+});
+
+test("Mac CLI and MCP use the same explicit session without relying on shell-only Codex IDs", { skip: process.platform !== "darwin" }, async () => {
+  await withTempHome(async (home) => {
+    const cwd = join(home, "project");
+    const cli = join(process.cwd(), "dist/src/cli/index.js");
+    const run = (extra: string[]) => spawnSync(process.execPath, [cli, "reserve", "--owner", "codex-cli", "--cwd", cwd, "--json", ...extra], {
+      env: { ...process.env, PORTPILOT_HOME: home, PORTPILOT_TASK_ID: "", CODEX_THREAD_ID: "shell-only" }, encoding: "utf8",
+    });
+    const missing = run([]);
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stdout + missing.stderr, /Task identity required/);
+    const task = await connection();
+    try {
+      assert.match(await task.error("reserve_lane", { owner: "codex-cli", cwd }), /Task identity required/);
+      const explicit = run(["--session", "actual-task"]);
+      assert.equal(explicit.status, 0, explicit.stdout + explicit.stderr);
+      const fromMcp = await task.call("reserve_lane", { owner: "codex-cli", cwd, sessionId: "actual-task" });
+      assert.equal(fromMcp.lane.id, JSON.parse(explicit.stdout).lane.id);
+    } finally { await task.close(); }
+  });
+});
+
+test("Windows guidance retains optional sessions, memory warning, and exact reconnect advice", async () => {
+  const server = buildMcpServer({ platform: "win32", environment: {} });
+  const client = new Client({ name: "guidance", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(b); await client.connect(a);
+  try {
+    assert.doesNotMatch(client.getInstructions() ?? "", /unique|per task|thread ID/);
+    const tools = (await client.listTools()).tools;
+    const open = tools.find(t => t.name === "open")!;
+    const properties = open.inputSchema.properties as Record<string, { description?: string }>;
+    assert.match(properties.sessionId!.description!, /Optional parallel-session|0.5-1.5 GB/);
+    assert.match(tools.find(t => t.name === "list_lanes")!.description!, /single match includes an exact PPID reconnect/i);
+  } finally { await client.close(); await server.close(); }
 });

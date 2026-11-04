@@ -43,23 +43,23 @@ test("macOS Show and Hide use exact-PID application APIs without Accessibility o
 
 test("native window actions remain lane- and process-identity-validated", () => {
   assert.match(app, /if \(!res\.ok\) \{[\s\S]*?hiddenApi\.markHidden/);
-  assert.equal(
-    [...focusCommands.matchAll(/process_identity::verify\(pid, &process_start\)/g)].length,
-    3,
-  );
+  assert.match(focusCommands, /ActionLease::open/);
+  assert.match(focusCommands, /verify_live_target/);
+  assert.match(focusCommands, /lease.verify\(\)/);
+
 });
 
 test("Show requests the exact displayed Chrome tab but always runs native recovery after validation", () => {
   assert.match(app, /tabId=\{s\.primaryTabs\[0\]\?\.id\}/);
-  assert.match(client, /tab: tabId && debugPort \? \{ debugPort, browser, tabId \} : null/);
+  assert.match(client, /tabId: tabId \?\? null/);
   assert.match(focusCommands, /checked_cdp_activation/);
   assert.match(focusCommands, /PUT \/json\/activate\/\{target_id\}/);
   assert.match(focusCommands, /requested_port != Some\(lane_port\)/);
   assert.match(focusCommands, /requested_browser != lane_browser/);
   assert.match(focusCommands, /run_with_advisory_tab_activation/);
   assert.match(focusCommands, /Exact tab unavailable; browser window was still restored/);
-  assert.match(focusCommands, /\|\| native_focus\(pid\)/);
-  assert.match(focusCommands, /\|\| native_unhide\(pid, placement\)/);
+  assert.match(focusCommands, /lease.verify\(\)\?;[\s\S]*native_focus\(pid\)/);
+  assert.match(focusCommands, /lease.verify\(\)\?;[\s\S]*native_unhide\(pid, placement\)/);
   assert.match(client, /warning\?: string/);
   assert.match(app, /shown ⚠/);
   assert.doesNotMatch(focusCommands, /Command::new\([^)]*(curl|osascript)/);
@@ -72,8 +72,8 @@ test("unused Accessibility settings fallback is not exposed over IPC", () => {
 });
 
 test("Kill and Erase remain lane-validated but independent of Accessibility", () => {
-  assert.match(killCommands, /revalidate_lane_action/);
-  assert.match(eraseCommands, /revalidate_lane_action/);
+  assert.match(killCommands, /verify_live_target/);
+  assert.match(eraseCommands, /verify_live_target/);
   assert.doesNotMatch(killCommands, /accessibility/i);
   assert.doesNotMatch(eraseCommands, /accessibility/i);
 });
@@ -124,4 +124,15 @@ test("an explicit prototype PORTPILOT_HOME must be an existing canonical directo
     prototypeRuntimeConfig,
     /canonicalDirectory\(options\["portpilot-home"\], "--portpilot-home"\)/,
   );
+});
+
+
+test("Mac packaging keeps its own app name and identity without changing Windows storage", () => {
+  const shared = JSON.parse(readFileSync(join(repoRoot, "gui/src-tauri/tauri.conf.json"), "utf8"));
+  const mac = JSON.parse(readFileSync(join(repoRoot, "gui/src-tauri/tauri.macos.conf.json"), "utf8"));
+  assert.equal(shared.identifier, "dev.charlesonogwu.paat-dashboard");
+  assert.equal(mac.identifier, "com.charlesonogwu.portpilot");
+  assert.equal(mac.productName, "PortPilot");
+  assert.equal(mac.version, "0.5.0");
+  assert.equal(mac.app.windows[0].title, "PortPilot");
 });

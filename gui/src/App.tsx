@@ -26,6 +26,7 @@ import { listen } from "@tauri-apps/api/event"
 import type { DashboardSnapshot, LiveSession } from "@/types"
 import {
   eraseChrome,
+  errorMessage,
   focusChrome,
   getRuntimeStatus,
   getConfig,
@@ -33,7 +34,7 @@ import {
   hideChrome,
   killChrome,
   setDefaultBrowser,
-  setHiddenProcesses,
+  setHiddenTargets,
   unhideChrome,
   type DefaultBrowser,
   type RuntimeStatus,
@@ -211,7 +212,7 @@ function useHideEnforcement(
     const api = apiRef.current
     const live = snap?.liveSessions ?? []
     const liveKeys = new Set<string>()
-    const hiddenProcesses: Array<{ pid: number; processStart: string }> = []
+    const hiddenProcesses: LiveSession[] = []
     for (const s of live) {
       const key = stableKeyOf(s)
       liveKeys.add(key)
@@ -219,15 +220,15 @@ function useHideEnforcement(
       if (!entry) continue
       // A replacement PID is not sent to the watcher until hideChrome has
       // freshly revalidated it and patchEntry records that exact PID.
-      if (entry.lastPid === s.pid && s.processStart) {
-        hiddenProcesses.push({ pid: s.pid, processStart: s.processStart })
+      if (entry.lastPid === s.pid) {
+        hiddenProcesses.push(s)
       }
       // Chrome restarted for a hidden lane (new pid -> new on-screen window):
       // capture the fresh window's placement so a later Unhide restores right.
       // (The watcher already parks it via the pushed pid set below.)
       if (entry.lastPid !== s.pid && seenPidForKey.current.get(key) !== s.pid) {
         seenPidForKey.current.set(key, s.pid)
-        void hideChrome(s.laneId, s.pid, s.processStart ?? "")
+        void hideChrome(s)
           .then((res) => {
             if (res.ok) {
               apiRef.current.patchEntry(key, {
@@ -244,7 +245,7 @@ function useHideEnforcement(
     }
 
     // Keep the native watcher's pid set in sync (empty array -> watcher idles).
-    void setHiddenProcesses(hiddenProcesses).catch(() => {})
+    void setHiddenTargets(hiddenProcesses).catch(() => {})
   }, [snap, hiddenApi.map])
 }
 
@@ -298,7 +299,7 @@ function useSnapshot(intervalMs = POLL_MS) {
         setError(null)
       } catch (err) {
         if (cancelled) return
-        setError((err as Error).message)
+        setError(errorMessage(err))
       }
     }
 
@@ -732,11 +733,7 @@ function SessionRow({
                 been restored. */}
             {!hiddenApi.isHidden(s) && (
               <FocusButton
-                laneId={s.laneId}
-                pid={s.pid}
-                processStart={s.processStart ?? ""}
-                debugPort={s.chromeDebugPort}
-                browser={s.browser ?? "chrome"}
+                s={s}
                 tabId={s.primaryTabs[0]?.id}
                 tabTitle={s.primaryTabs[0]?.title}
                 enabled={registeredAction}
@@ -749,7 +746,7 @@ function SessionRow({
               enabled={registeredAction}
               disabledReason={actionReason}
             />
-            <KillButton laneId={s.laneId} pid={s.pid} processStart={s.processStart ?? ""} enabled={registeredAction} onKilled={onKilled} />
+            <KillButton s={s} enabled={registeredAction} onKilled={onKilled} />
             <EraseButton s={s} enabled={registeredAction} onErased={onKilled} />
           </div>
         </TableCell>
@@ -972,21 +969,13 @@ function SourcePill({ session }: { session: LiveSession }) {
  * through the taskbar.
  */
 function FocusButton({
-  laneId,
-  pid,
-  processStart,
-  debugPort,
-  browser,
+  s,
   tabId,
   tabTitle,
   enabled,
   disabledReason,
 }: {
-  laneId?: string
-  pid: number
-  processStart: string
-  debugPort: number
-  browser: "chrome" | "firefox" | "edge"
+  s: LiveSession
   tabId?: string
   tabTitle?: string
   enabled: boolean
@@ -1021,14 +1010,7 @@ function FocusButton({
     setError(null)
     setWarning(null)
     try {
-      const data = await focusChrome(
-        laneId,
-        pid,
-        processStart,
-        debugPort,
-        browser,
-        tabId,
-      )
+      const data = await focusChrome(s, tabId)
       if (!data.ok) {
         setError(data.error ?? "focus failed")
       } else {
@@ -1036,11 +1018,11 @@ function FocusButton({
         setShownAt(Date.now())
       }
     } catch (err) {
-      setError((err as Error).message)
+      setError(errorMessage(err))
     } finally {
       setBusy(false)
     }
-  }, [busy, laneId, pid, processStart, debugPort, browser, tabId])
+  }, [busy, s, tabId])
 
   if (error) {
     return (
@@ -1069,7 +1051,7 @@ function FocusButton({
         enabled
           ? tabTitle
             ? `Show the exact displayed tab: ${tabTitle}`
-            : `Bring verified browser pid ${pid} to the foreground`
+            : `Bring verified browser pid ${s.pid} to the foreground`
           : disabledReason
       }
     >
@@ -1133,19 +1115,11 @@ function HideAllButton({
           if (allHidden) {
             const entry = hiddenApi.getEntry(s)
             hiddenApi.clearHidden(s)
-            const res = await unhideChrome(
-              s.laneId,
-              s.pid,
-              s.processStart ?? "",
-              entry?.placement,
-              s.chromeDebugPort,
-              s.browser ?? "chrome",
-              s.primaryTabs[0]?.id,
-            )
+            const res = await unhideChrome(s, entry?.placement, s.primaryTabs[0]?.id)
             if (res.ok) ok++
             else hiddenApi.markHidden(s, entry?.placement)
           } else {
-            const res = await hideChrome(s.laneId, s.pid, s.processStart ?? "")
+            const res = await hideChrome(s)
             if (res.ok) {
               hiddenApi.markHidden(s, res.placement)
               ok++
@@ -1251,7 +1225,7 @@ function KillAllButton({
     const responses = await Promise.all(
       sessions.map(async (s) => {
         try {
-          const data = await killChrome(s.laneId, s.pid, s.processStart ?? "")
+          const data = await killChrome(s)
           return data.ok
         } catch {
           return false
@@ -1343,15 +1317,7 @@ function HideToggleButton({
         // Clear the persistent flag FIRST, so a concurrent poll tick can't
         // re-park the window we are about to bring back.
         hiddenApi.clearHidden(s)
-        const res = await unhideChrome(
-          s.laneId,
-          s.pid,
-          s.processStart ?? "",
-          entry?.placement,
-          s.chromeDebugPort,
-          s.browser ?? "chrome",
-          s.primaryTabs[0]?.id,
-        )
+        const res = await unhideChrome(s, entry?.placement, s.primaryTabs[0]?.id)
         if (!res.ok) {
           hiddenApi.markHidden(s, entry?.placement)
           setError(res.error ?? "unhide failed")
@@ -1359,12 +1325,12 @@ function HideToggleButton({
           setWarning(res.warning ?? null)
         }
       } else {
-        const res = await hideChrome(s.laneId, s.pid, s.processStart ?? "")
+        const res = await hideChrome(s)
         if (!res.ok) setError(res.error ?? "hide failed")
         else hiddenApi.markHidden(s, res.placement)
       }
     } catch (err) {
-      setError((err as Error).message)
+      setError(errorMessage(err))
     } finally {
       setBusy(false)
     }
@@ -1412,7 +1378,7 @@ function HideToggleButton({
   )
 }
 
-function KillButton({ laneId, pid, processStart, enabled, onKilled }: { laneId?: string; pid: number; processStart: string; enabled: boolean; onKilled: () => void }) {
+function KillButton({ s, enabled, onKilled }: { s: LiveSession; enabled: boolean; onKilled: () => void }) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1437,7 +1403,7 @@ function KillButton({ laneId, pid, processStart, enabled, onKilled }: { laneId?:
     setBusy(true)
     setError(null)
     try {
-      const data = await killChrome(laneId, pid, processStart)
+      const data = await killChrome(s)
       if (!data.ok) {
         setError(data.error ?? "unknown error")
         setBusy(false)
@@ -1446,11 +1412,11 @@ function KillButton({ laneId, pid, processStart, enabled, onKilled }: { laneId?:
       }
       onKilled()
     } catch (err) {
-      setError((err as Error).message)
+      setError(errorMessage(err))
       setBusy(false)
       setConfirming(false)
     }
-  }, [busy, confirming, laneId, pid, processStart, onKilled, reset])
+  }, [busy, confirming, s, onKilled, reset])
 
   if (error) {
     return (
@@ -1467,7 +1433,7 @@ function KillButton({ laneId, pid, processStart, enabled, onKilled }: { laneId?:
       disabled={busy || !enabled}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={enabled ? `Terminate verified browser process pid ${pid}. Keeps profile cookies/logins and remembered website associations.` : "Kill is disabled for inferred or external processes."}
+      title={enabled ? `Terminate verified browser process ${s.pid}. Keeps profile cookies/logins and remembered website associations.` : "Kill is disabled for inferred or external processes."}
     >
       {busy ? (
         "killing…"
@@ -1513,7 +1479,7 @@ function EraseButton({ s, enabled, onErased }: { s: LiveSession; enabled: boolea
     setBusy(true)
     setError(null)
     try {
-      const data = await eraseChrome(s.pid, s.processStart ?? "", s.chromeProfileDir, s.laneId)
+      const data = await eraseChrome(s)
       if (!data.ok) {
         setError(data.error ?? "unknown error")
         setBusy(false)
@@ -1522,7 +1488,7 @@ function EraseButton({ s, enabled, onErased }: { s: LiveSession; enabled: boolea
       }
       onErased()
     } catch (err) {
-      setError((err as Error).message)
+      setError(errorMessage(err))
       setBusy(false)
       setConfirming(false)
     }
@@ -1624,6 +1590,15 @@ export function App() {
         )}
         {snap && (
           <>
+            {error && (
+              <Alert variant="destructive" className="mb-6">
+                <AlertTriangle className="size-4" />
+                <AlertTitle>Refresh failed. Showing the last good view</AlertTitle>
+                <AlertDescription className="mt-1 font-mono text-[11px]">
+                  {error}
+                </AlertDescription>
+              </Alert>
+            )}
             {(snap.warnings?.length ?? 0) > 0 && (
               <Alert variant="destructive" className="mb-6">
                 <AlertTriangle className="size-4" />

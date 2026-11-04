@@ -5,10 +5,11 @@ import { adoptProfileLane, allocateLane, checkLane, findFreePort } from "../core
 import { AmbiguousLaneError, filterLanes, listLanes, markStaleLanes, rememberLaneProfile, removeLane, resolveLaneSelector, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
 import { hasSonar, scanPorts } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
-import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
+import { assertModeSupported, browserLabel, describePortHolder, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
+import type { ChromeAttachVerdict } from "../core/chrome.js";
 import { loadConfig } from "../core/config.js";
 import { portpilotHome, profilesDir } from "../core/paths.js";
-import { BrowserKind, Lane, isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
+import { BrowserKind, Lane, isStale, laneBrowser, normalizeCwd, nowIso, sessionSlug } from "../core/lane.js";
 import { PageControlError, PageController, openPageController } from "../core/pagecontrol.js";
 import { createSupervisorClient } from "../supervisor/client.js";
 import { launchPersistentBrowser } from "../supervisor/routing.js";
@@ -30,7 +31,7 @@ export function buildMcpServer(options: { taskId?: string; environment?: NodeJS.
     isolateTasks ? resolveTaskSession(owner, session, taskSession) : session;
   const server = new McpServer(
     { name: "portpilot", version: "0.1.0" },
-    { capabilities: { tools: {} }, instructions: "Coordinate dev server ports, Chrome debug ports, and Chrome profiles between local AI coding agents. Use one unique, stable sessionId per task (prefer the host thread ID) and reuse it only within that task. Different tasks must have different sessionIds. Reopen a saved profile only by its exact laneId when that profile is deliberately requested." },
+    { capabilities: { tools: {} }, instructions: isolateTasks ? "Coordinate dev server ports, Chrome debug ports, and Chrome profiles between local AI coding agents. Pass one explicit, stable sessionId per task on every call and the same --session in the CLI. Codex does not forward its shell thread ID to MCP; do not assume automatic host identity. Reopen saved profiles by exact laneId. Each browser uses about 0.5-1.5 GB RAM; use page_newtab for additional pages." : "Coordinate dev server ports, Chrome debug ports, and Chrome profiles between local AI coding agents." },
   );
 
   const portRangeShape = {
@@ -53,6 +54,12 @@ export function buildMcpServer(options: { taskId?: string; environment?: NodeJS.
       }
       if (!args.owner || !args.cwd) {
         return { error: "provide laneId, or both owner and cwd" };
+      }
+      const explicitSession = sessionSlug(args.sessionId) !== "default";
+      if (isolateTasks && !explicitSession) {
+        // Do not silently switch away from an exact saved-login reconnect.
+        // More than one profile requires its PPID or an explicit session.
+        await resolveLaneSelector({ owner: args.owner, cwd: args.cwd, includeReleased });
       }
       const lane = await resolveLaneSelector({
         owner: args.owner,
@@ -107,7 +114,7 @@ export function buildMcpServer(options: { taskId?: string; environment?: NodeJS.
             'Pass ONLY the LLM provider name: "claude", "codex", "gemini", "cursor", "windsurf", "copilot", "chatgpt", "openhands", "aider", "goose", or "opencode". DO NOT add prefixes, suffixes, batch numbers, or per-task identifiers — for example "codex-test-alpha", "agent-random-1", and "batch2-agent-3" are all WRONG. If you need to distinguish multiple parallel sessions of the same agent, put that distinction in the `sessionId` field, not here. Server normalizes anyway: any custom suffix is stripped from this field and auto-promoted to sessionId.',
           ),
         task: z.string().optional().describe("Short description of what you're doing."),
-        sessionId: z.string().optional().describe("Stable identifier for THIS task. Use a different identifier for a different task; never copy a session from an unrelated lane. On macOS, omitted or default uses a stable host task ID when available; otherwise a task-specific sessionId is required. Repeated calls within one task reuse its browser. Use page_newtab for additional pages in the same task, or an exact laneId to deliberately reopen a saved profile."),
+        sessionId: z.string().optional().describe(isolateTasks ? "Stable task-specific sessionId. Reuse the same value for this task in MCP and CLI (--session); different tasks must have different values. If omitted, only an explicitly configured PORTPILOT_TASK_ID shared by both entry points supplies identity. Codex does not forward shell thread IDs to MCP servers. Each extra browser costs about 0.5-1.5 GB RAM; use page_newtab for more pages." : "Optional parallel-session id — ONLY when you truly need a second independent browser in the same project (e.g. two different logins). Every extra sessionId launches a WHOLE separate browser (~0.5-1.5 GB RAM). If you just need more pages, reuse your existing lane and open tabs with page_newtab instead (~100-200 MB per tab)."),
         mode: z
           .enum(["visible", "background", "headless"])
           .optional()
@@ -153,7 +160,7 @@ export function buildMcpServer(options: { taskId?: string; environment?: NodeJS.
       if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
         return jsonResult({
           ok: false,
-          error: `unsafe to launch ${label} on lane ${lane.id}: ${result.verdict.kind}`,
+          error: `unsafe to launch ${label} on lane ${lane.id}: ${result.verdict.kind}${holderSuffix(result.verdict)}`,
           verdict: result.verdict,
           lane,
         });
@@ -252,7 +259,7 @@ export function buildMcpServer(options: { taskId?: string; environment?: NodeJS.
           .string()
           .optional()
           .describe(
-            "Stable identifier for this task. Different tasks receive different ports and profiles. On macOS, omitted or default uses a stable host task ID when available; otherwise a task-specific sessionId is required. Reuse it only within the same task; use page_newtab for more pages in that task.",
+            isolateTasks ? "Stable task-specific sessionId. Reuse the same value for this task in MCP and CLI (--session); different tasks must have different values. If omitted, only an explicitly configured PORTPILOT_TASK_ID shared by both entry points supplies identity. Codex does not forward shell thread IDs to MCP servers. Each extra browser costs about 0.5-1.5 GB RAM; use page_newtab for more pages." : "Optional parallel session id. Different sessions for the same (owner, cwd) get different ports and profile dirs, so one agent can run multiple concurrent browser instances. Omit for the implicit 'default' session. RAM note: each extra session is a whole separate browser (~0.5-1.5 GB); if you only need more pages, use page_newtab on your existing lane instead.",
           ),
         task: z.string().optional().describe("Short description of the task this lane is for."),
         appPortRange: z.object(portRangeShape).optional(),
@@ -287,7 +294,7 @@ export function buildMcpServer(options: { taskId?: string; environment?: NodeJS.
     "list_lanes",
     {
       title: "List lanes",
-      description: "List browser lanes by workspace and purpose. Results can belong to other tasks: do not reconnect merely because one lane exists. New tasks use their own task session. Reconnect an exact PPID only for this task or an explicitly requested saved profile; use find_saved_login for a saved website login. Purpose metadata is not proof of authentication.",
+      description: isolateTasks ? "List browser lanes by workspace and purpose. Results can belong to other tasks: do not reconnect merely because one lane exists. New tasks use their own task session. Reconnect an exact PPID only for this task or an explicitly requested saved profile; use find_saved_login for a saved website login. Purpose metadata is not proof of authentication." : "Find saved browser profiles by workspace and intended purpose before creating another lane. A single match includes an exact PPID reconnect command; multiple matches are returned without guessing. Purpose metadata describes intent and is not proof that a website is currently authenticated.",
       inputSchema: {
         owner: z.string().optional(),
         cwd: z.string().optional(),
@@ -504,7 +511,7 @@ export function buildMcpServer(options: { taskId?: string; environment?: NodeJS.
       const lane = selected.lane;
       const result = await checkLane(lane);
       if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
-        return jsonResult({ ok: false, error: `unsafe to launch Chrome: ${result.verdict.kind}`, verdict: result.verdict });
+        return jsonResult({ ok: false, error: `unsafe to launch Chrome: ${result.verdict.kind}${holderSuffix(result.verdict)}`, verdict: result.verdict });
       }
       if (result.verdict.kind === "safe-attach") {
         const attached = await launchPersistentBrowser(lane, {});
@@ -568,7 +575,7 @@ export function buildMcpServer(options: { taskId?: string; environment?: NodeJS.
       const label = browserLabel(browser);
       const result = await checkLane(lane);
       if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
-        return jsonResult({ ok: false, error: `unsafe to launch ${label}: ${result.verdict.kind}`, verdict: result.verdict });
+        return jsonResult({ ok: false, error: `unsafe to launch ${label}: ${result.verdict.kind}${holderSuffix(result.verdict)}`, verdict: result.verdict });
       }
       if (result.verdict.kind === "safe-attach") {
         const attached = await launchPersistentBrowser(lane, {});
@@ -878,6 +885,12 @@ function jsonResult(payload: unknown) {
     content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
     structuredContent: payload as Record<string, unknown>,
   };
+}
+
+/** "; debug port 9322 is in use by another browser (...)" for refusal messages, or "". */
+function holderSuffix(verdict: ChromeAttachVerdict): string {
+  const holder = describePortHolder(verdict);
+  return holder ? `; ${holder}` : "";
 }
 
 /**

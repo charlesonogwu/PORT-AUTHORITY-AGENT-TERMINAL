@@ -15,6 +15,17 @@ export function supervisorEndpoint(home = portpilotHome()) {
     }
     return join(resolved, "supervisor.sock");
 }
+/**
+ * The supervisor answered and refused the request, as opposed to being
+ * unreachable. Callers must not tell the user to restart anything for these:
+ * the supervisor is up and the message says why it said no.
+ */
+export class SupervisorReplyError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = "SupervisorReplyError";
+    }
+}
 export function supervisorRequestTimeout(method, override) {
     return override ?? (method === "launch" ? 40_000 : method === "close" ? 10_000 : 3_000);
 }
@@ -74,7 +85,7 @@ export function createSupervisorClient(options = {}) {
                     if (response.id !== id)
                         return finish(new Error("PortPilot supervisor response id mismatch"));
                     if (!response.ok)
-                        return finish(new Error(response.error));
+                        return finish(new SupervisorReplyError(response.error));
                     finish(undefined, response.result);
                 }
                 catch (error) {

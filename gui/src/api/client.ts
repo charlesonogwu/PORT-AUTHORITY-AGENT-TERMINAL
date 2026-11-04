@@ -7,7 +7,25 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { DashboardSnapshot } from "../types";
+import type { DashboardSnapshot, LiveSession } from "../types";
+
+export interface LaneTarget {
+  pid: number;
+  laneId?: string;
+  browser: "chrome" | "edge" | "firefox";
+  chromeDebugPort: number;
+  profileDir: string;
+}
+
+export function laneTarget(session: LiveSession): LaneTarget {
+  return {
+    pid: session.pid,
+    laneId: session.laneId,
+    browser: session.browser ?? "chrome",
+    chromeDebugPort: session.chromeDebugPort,
+    profileDir: session.chromeProfileDir,
+  };
+}
 
 export interface KillResult {
   ok: boolean;
@@ -65,7 +83,7 @@ export async function getSnapshot(): Promise<DashboardSnapshot> {
 
 export interface RuntimeStatus {
   ok: boolean;
-  provider: "installed" | "unavailable";
+  provider: "installed" | "unavailable" | "cli";
   error?: string;
   handshake?: {
     portpilotVersion: string;
@@ -79,97 +97,32 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   return await invoke<RuntimeStatus>("get_runtime_status");
 }
 
-/** Activate the displayed lane tab, then bring its verified browser PID forward. */
-export async function focusChrome(
-  laneId: string | undefined,
-  pid: number,
-  processStart = "",
-  debugPort?: number,
-  browser = "chrome",
-  tabId?: string,
-): Promise<FocusResult> {
-  return await invoke<FocusResult>("focus_chrome", {
-    laneId: laneId ?? "",
-    pid,
-    processStart,
-    tab: tabId && debugPort ? { debugPort, browser, tabId } : null,
-  });
+/** Send only the displayed lane identity, optional exact tab, and Mac start hint. */
+function actionArgs(session: LiveSession) {
+  return { target: laneTarget(session), processStart: session.processStart ?? null };
+}
+export async function focusChrome(session: LiveSession, tabId?: string): Promise<FocusResult> {
+  return invoke("focus_chrome", { ...actionArgs(session), tabId: tabId ?? null });
+}
+export async function hideChrome(session: LiveSession): Promise<HideResult> {
+  return invoke("hide_chrome", actionArgs(session));
+}
+export async function unhideChrome(session: LiveSession, placement?: WindowPlacement | null, tabId?: string): Promise<UnhideResult> {
+  return invoke("unhide_chrome", { ...actionArgs(session), placement: placement ?? { showCmd: 1, left: 80, top: 80, right: 1360, bottom: 1080 }, tabId: tabId ?? null });
+}
+export async function setHiddenTargets(sessions: LiveSession[]): Promise<void> {
+  await invoke("set_hidden_targets", { targets: sessions.map(laneTarget) });
+}
+export async function killChrome(session: LiveSession): Promise<KillResult> {
+  return invoke("kill_chrome", actionArgs(session));
+}
+export interface EraseResult { ok: boolean; removedProfile?: boolean; removedLane?: boolean; error?: string; }
+export async function eraseChrome(session: LiveSession): Promise<EraseResult> {
+  return invoke("erase_chrome", actionArgs(session));
 }
 
-/**
- * Persistently hide a browser with the platform's native implementation.
- * Returns any captured placement plus the platform's restore mode so a later
- * `unhideChrome` can safely reverse the same operation.
- */
-export async function hideChrome(laneId: string | undefined, pid: number, processStart = ""): Promise<HideResult> {
-  return await invoke<HideResult>("hide_chrome", { laneId: laneId ?? "", pid, processStart });
-}
-
-/** A sensible on-screen box used when no saved placement is available. */
-const FALLBACK_PLACEMENT: WindowsWindowPlacement = {
-  showCmd: 1,
-  left: 80,
-  top: 80,
-  right: 80 + 1280,
-  bottom: 80 + 1000,
-};
-
-/**
- * Bring a previously-hidden browser back on-screen, restoring the saved native
- * placement when available. Windows uses a fallback on-screen box when no
- * saved placement is known; macOS returns its explicit restore mode from Hide.
- */
-export async function unhideChrome(
-  laneId: string | undefined,
-  pid: number,
-  processStart: string,
-  placement?: WindowPlacement | null,
-  debugPort?: number,
-  browser = "chrome",
-  tabId?: string,
-): Promise<UnhideResult> {
-  return await invoke<UnhideResult>("unhide_chrome", {
-    laneId: laneId ?? "",
-    pid,
-    processStart,
-    placement: placement ?? FALLBACK_PLACEMENT,
-    tab: tabId && debugPort ? { debugPort, browser, tabId } : null,
-  });
-}
-
-/**
- * Tell the native hide watcher which exact browser processes must remain
- * hidden. The frontend recomputes this set whenever a hidden lane restarts.
- */
-export async function setHiddenProcesses(targets: Array<{ pid: number; processStart: string }>): Promise<void> {
-  await invoke("set_hidden_processes", { targets });
-}
-
-/** Terminate a Chrome process by PID (only allowed if it has our user-data-dir). */
-export async function killChrome(laneId: string | undefined, pid: number, processStart = ""): Promise<KillResult> {
-  return await invoke<KillResult>("kill_chrome", { laneId: laneId ?? "", pid, processStart });
-}
-
-export interface EraseResult {
-  ok: boolean;
-  removedProfile?: boolean;
-  removedLane?: boolean;
-  error?: string;
-}
-
-/**
- * Erase a lane's saved browser data: closes the Chrome pid, then deletes its
- * profile directory (logins, cookies, history) and drops the lane. Unlike
- * `killChrome`, this does NOT preserve the login — the next open is a fresh,
- * logged-out browser. Irreversible; the UI must confirm before calling it.
- */
-export async function eraseChrome(
-  pid: number,
-  processStart: string,
-  profileDir: string,
-  laneId?: string,
-): Promise<EraseResult> {
-  return await invoke<EraseResult>("erase_chrome", { pid, processStart, profileDir, laneId });
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export type DefaultBrowser = "chrome" | "edge" | "firefox"

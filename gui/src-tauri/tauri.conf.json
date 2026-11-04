@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "PortPilot",
-  "version": "0.5.0",
-  "identifier": "com.charlesonogwu.portpilot",
+  "productName": "Port Authority Agent Terminal",
+  "version": "0.2.0",
+  "identifier": "dev.charlesonogwu.paat-dashboard",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,8 +12,7 @@
   "app": {
     "windows": [
       {
-        "label": "main",
-        "title": "PortPilot",
+        "title": "Port Authority Agent Terminal",
         "width": 1200,
         "height": 800,
         "minWidth": 800,
@@ -24,7 +23,9 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "dangerousDisableAssetCspModification": ["style-src"]
     }
   },
   "bundle": {

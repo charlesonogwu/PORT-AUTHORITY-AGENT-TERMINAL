@@ -1,11 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { evaluateBrowserAttach } from "../core/browsers.js";
 import type { Lane } from "../core/lane.js";
+import { confirmObservations, type PortTruthDependencies } from "../core/port-truth.js";
 import { scanNative, type ScanResult } from "../core/scanner.js";
 
 export interface CloseBrowserDependencies {
   scan?: () => Promise<ScanResult>;
   terminate?: (pid: number) => Promise<void>;
+  /** Kernel checks over the scan. On for the real scan; an injected scan is trusted unless this is given. */
+  portTruth?: PortTruthDependencies;
 }
 
 async function terminateTree(pid: number): Promise<void> {
@@ -31,7 +34,15 @@ async function terminateTree(pid: number): Promise<void> {
 
 /** Explicitly close one lane browser after a fresh browser/port/profile check. */
 export async function closeBrowserForLane(lane: Lane, deps: CloseBrowserDependencies = {}): Promise<boolean> {
-  const scanNow = deps.scan ?? (async () => ({ observations: await scanNative(), source: "native" as const, errors: [] }));
+  // The listener table can omit the lane's browser; confirm its port with the
+  // kernel so a live browser is never reported as already closed.
+  const live = deps.portTruth ?? (deps.scan ? undefined : {});
+  const scanTable = deps.scan ?? (async (): Promise<ScanResult> => ({ observations: await scanNative(), source: "native", errors: [] }));
+  const scanNow = async (): Promise<ScanResult> => {
+    const scan = await scanTable();
+    if (!live) return scan;
+    return { ...scan, observations: await confirmObservations([lane.chromeDebugPort], scan.observations, live) };
+  };
   const scan = await scanNow();
   const verdict = evaluateBrowserAttach(lane, scan.observations);
   if (verdict.kind === "safe-free") return false;

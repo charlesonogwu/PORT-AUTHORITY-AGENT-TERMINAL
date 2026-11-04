@@ -9,11 +9,11 @@ separate from this app.
 The prototype uses a configured Node executable and PortPilot npm runtime from a
 verified absolute path. It does not search or execute an arbitrary `PATH` entry.
 The configured runtime version must match the version expected by the app.
-Use a build of this branch at version 0.4.5 or newer for `dashboard-serve`,
-`runtime-handshake`, and the native action checks; the public 0.4.5 CLI does not
-yet include the native handshake/action extensions. Install the locally packed
-CLI with `npm install --ignore-scripts` and `PAAT_SKIP_POSTINSTALL=1` to preserve
-MCP settings, shortcuts, and autostart. The legacy 0.4.0 bridge remains supported. A
+Use a build of this branch at version 0.4.7 or newer for `dashboard-serve`
+and `runtime-handshake`; the public package does not yet include this native
+handshake. Install the locally packed CLI with `npm install --ignore-scripts`
+and `PAAT_SKIP_POSTINSTALL=1` to preserve MCP settings, shortcuts, and autostart.
+The old 0.4.0 compatibility bridge has been removed. A
 public build should instead bundle a version-matched arm64 runtime sidecar so an
 end user does not need Node or npm.
 
@@ -48,7 +48,7 @@ by the macOS 15.5 SDK and were physically validated against two independent
 Chrome processes on Sequoia 15.5. They do not require Accessibility permission
 or a System Settings approval. A nonzero OSStatus fails closed. Before every
 action, PortPilot still revalidates the registered lane, process identifier,
-process start time, browser profile, and command line. An unknown, replaced, or
+process start time, browser profile, and debugging port against a fresh snapshot. An unknown, replaced, or
 mismatched process is refused before the macOS process API is called.
 
 Hiding is application-scoped, so normal windows, popup windows, and full-screen

@@ -55,6 +55,7 @@ pub struct RuntimeState {
 }
 
 impl RuntimeState {
+    #[cfg(target_os = "macos")]
     pub fn load(config_path: &Path) -> Self {
         match Self::try_load(config_path) {
             Ok(provider) => Self {
@@ -107,6 +108,7 @@ impl RuntimeState {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub fn run_json(&self, args: &[String]) -> Result<Value, String> {
         self.provider
             .as_ref()
@@ -119,7 +121,7 @@ impl RuntimeState {
     }
 
     /// Start the helper through the same verified runtime as one-shot calls.
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     pub fn dashboard_helper_command(&self) -> Result<Command, String> {
         self.provider
             .as_ref()
@@ -132,7 +134,7 @@ impl RuntimeState {
     }
 
     /// The native app owns the supervisor lifetime; never start it under an MCP worker.
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     pub fn start_supervisor_background(&self) -> Result<(), String> {
         let provider = self.provider.as_ref().ok_or_else(|| {
             self.error
@@ -166,13 +168,6 @@ impl RuntimeState {
         Err(format!(
             "verified PortPilot supervisor (pid {pid}) did not become ready within 10 seconds"
         ))
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    pub fn portpilot_version(&self) -> Option<&str> {
-        self.provider
-            .as_ref()
-            .map(|provider| provider.handshake().portpilot_version.as_str())
     }
 }
 
@@ -273,49 +268,6 @@ pub fn validate_handshake(
     Ok(())
 }
 
-fn validate_release_a_action(
-    lane_id: &str,
-    requested_pid: u64,
-    lane: &Value,
-    checked: &Value,
-) -> Result<Value, String> {
-    if lane.get("status").and_then(Value::as_str) == Some("released") {
-        return Err("refused dashboard action: lane is released".into());
-    }
-    if checked
-        .get("lane")
-        .and_then(|value| value.get("id"))
-        .and_then(Value::as_str)
-        != Some(lane_id)
-    {
-        return Err("refused dashboard action: checked lane identity changed".into());
-    }
-    let verdict = checked
-        .get("verdict")
-        .ok_or_else(|| "refused dashboard action: check verdict is missing".to_string())?;
-    if verdict.get("kind").and_then(Value::as_str) != Some("safe-attach") {
-        return Err("refused dashboard action: browser is not a verified safe attachment".into());
-    }
-    let observation = verdict
-        .get("observation")
-        .ok_or_else(|| "refused dashboard action: process observation is missing".to_string())?;
-    if observation.get("pid").and_then(Value::as_u64) != Some(requested_pid) {
-        return Err("refused dashboard action: observed PID changed".into());
-    }
-    let command_line = observation
-        .get("commandLine")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "refused dashboard action: process command line is missing".to_string())?;
-    if lane.get("browser").and_then(Value::as_str) == Some("firefox")
-        && !command_line
-            .split_whitespace()
-            .any(|part| part == "-no-remote")
-    {
-        return Err("refused dashboard action: Firefox is missing -no-remote".into());
-    }
-    Ok(serde_json::json!({ "ok": true, "pid": requested_pid, "lane": lane }))
-}
-
 fn canonical_file(path: &Path, label: &str) -> Result<PathBuf, String> {
     let canonical =
         fs::canonicalize(path).map_err(|e| format!("runtime {label} is unavailable: {e}"))?;
@@ -390,13 +342,7 @@ impl InstalledRuntimeProvider {
             },
             portpilot_home,
         };
-        let value = match provider.run_direct(&["runtime-handshake".into(), "--json".into()]) {
-            Ok(value) => value,
-            Err(_) if config.expected_portpilot_version == "0.4.0" => {
-                provider.probe_release_a_runtime(&package_path)?
-            }
-            Err(error) => return Err(error),
-        };
+        let value = provider.run_direct(&["runtime-handshake".into(), "--json".into()])?;
         let handshake: RuntimeHandshake = serde_json::from_value(value)
             .map_err(|e| format!("invalid PortPilot runtime handshake: {e}"))?;
         validate_handshake(&handshake, &config.expected_portpilot_version)?;
@@ -406,6 +352,13 @@ impl InstalledRuntimeProvider {
 
     fn command(&self) -> Command {
         let mut command = quiet_command(&self.node_executable);
+        command.env_clear();
+        for key in ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+        command.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
         command.arg(&self.cli_entry);
         if let Some(home) = &self.portpilot_home {
             command.env("PORTPILOT_HOME", home);
@@ -430,76 +383,6 @@ impl InstalledRuntimeProvider {
         serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("invalid JSON from the verified PortPilot runtime: {e}"))
     }
-
-    /// PortPilot 0.4.0 shipped before the dedicated handshake subcommand.
-    /// This exact-version bridge executes a constant script through the
-    /// already verified absolute Node binary and reads only the already
-    /// verified package.json. No shell, PATH lookup, install, or mutation.
-    fn probe_release_a_runtime(&self, package_path: &Path) -> Result<Value, String> {
-        const PROBE: &str = r#"const fs=require('node:fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(JSON.stringify({ok:true,identity:'portpilot-runtime',portpilotVersion:p.version,protocolVersion:1,registrySchemaVersion:1,platform:process.platform,architecture:process.arch}));"#;
-        let output = quiet_command(&self.node_executable)
-            .args(["-e", PROBE])
-            .arg(package_path)
-            .output()
-            .map_err(|e| format!("failed to probe the verified PortPilot 0.4.0 runtime: {e}"))?;
-        if !output.status.success() {
-            return Err("verified PortPilot 0.4.0 compatibility probe failed".into());
-        }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|e| format!("invalid PortPilot 0.4.0 compatibility response: {e}"))
-    }
-
-    /// Release A can already produce a fresh, profile-verified `check`
-    /// verdict, but it predates the lane-id dashboard action wrapper. Adapt
-    /// that exact output here so the prototype can stay pinned to the public
-    /// 0.4.0 package without weakening the native action gate.
-    fn dashboard_action_check_release_a(&self, args: &[String]) -> Result<Value, String> {
-        fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-            args.windows(2)
-                .find(|pair| pair[0] == flag)
-                .map(|pair| pair[1].as_str())
-        }
-
-        let lane_id = value_after(args, "--lane")
-            .ok_or_else(|| "dashboard action requires --lane".to_string())?;
-        let requested_pid = value_after(args, "--pid")
-            .ok_or_else(|| "dashboard action requires --pid".to_string())?
-            .parse::<u64>()
-            .map_err(|_| "dashboard action PID is invalid".to_string())?;
-
-        let listed = self.run_direct(&["list".into(), "--json".into()])?;
-        let lane = listed
-            .get("lanes")
-            .and_then(Value::as_array)
-            .and_then(|lanes| {
-                lanes
-                    .iter()
-                    .find(|lane| lane.get("id").and_then(Value::as_str) == Some(lane_id))
-            })
-            .cloned()
-            .ok_or_else(|| "refused dashboard action: lane no longer exists".to_string())?;
-        let owner = lane
-            .get("owner")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "refused dashboard action: lane owner is missing".to_string())?;
-        let cwd = lane
-            .get("cwd")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "refused dashboard action: lane cwd is missing".to_string())?;
-        let mut check_args = vec![
-            "check".into(),
-            "--owner".into(),
-            owner.into(),
-            "--cwd".into(),
-            cwd.into(),
-        ];
-        if let Some(session) = lane.get("sessionId").and_then(Value::as_str) {
-            check_args.extend(["--session".into(), session.into()]);
-        }
-        check_args.push("--json".into());
-        let checked = self.run_direct(&check_args)?;
-        validate_release_a_action(lane_id, requested_pid, &lane, &checked)
-    }
 }
 
 impl RuntimeProvider for InstalledRuntimeProvider {
@@ -522,11 +405,6 @@ impl RuntimeProvider for InstalledRuntimeProvider {
     }
 
     fn run_json(&self, args: &[String]) -> Result<Value, String> {
-        if self.handshake.portpilot_version == "0.4.0"
-            && args.first().map(String::as_str) == Some("dashboard-action-check")
-        {
-            return self.dashboard_action_check_release_a(args);
-        }
         let mut full_args = args.to_vec();
         if !full_args.iter().any(|arg| arg == "--json") {
             full_args.push("--json".into());
@@ -543,7 +421,7 @@ mod tests {
         RuntimeHandshake {
             ok: true,
             identity: "portpilot-runtime".into(),
-            portpilot_version: "0.4.0".into(),
+            portpilot_version: "0.4.7".into(),
             protocol_version: 1,
             registry_schema_version: 1,
             platform: expected_node_platform().into(),
@@ -562,6 +440,11 @@ mod tests {
         };
         let command = provider.dashboard_helper_command().unwrap();
         assert_eq!(command.get_program(), "/verified/node");
+        assert!(command.get_envs().any(|(key, value)| key == "PATH"
+            && value == Some(std::ffi::OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin"))));
+        assert!(!command.get_envs().any(|(key, _)| key == "NODE_OPTIONS"
+            || key == "NODE_PATH"
+            || key == "DYLD_INSERT_LIBRARIES"));
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             vec!["/verified/package/dist/cli.js", "dashboard-serve"]
@@ -595,30 +478,50 @@ mod tests {
     }
 
     #[test]
-    fn release_a_action_bridge_requires_exact_pid_and_firefox_no_remote() {
-        let chrome_lane =
-            serde_json::json!({ "id": "lane-1", "status": "active", "browser": "chrome" });
-        let chrome_check = serde_json::json!({
-            "lane": { "id": "lane-1" },
-            "verdict": { "kind": "safe-attach", "observation": { "pid": 42, "commandLine": "Google Chrome --user-data-dir=/tmp/safe" } }
-        });
-        assert!(validate_release_a_action("lane-1", 42, &chrome_lane, &chrome_check).is_ok());
-        assert!(validate_release_a_action("lane-1", 43, &chrome_lane, &chrome_check).is_err());
+    #[ignore = "child process inherits hostile Node settings to test environment isolation"]
+    fn environment_probe_worker() {
+        let provider = InstalledRuntimeProvider {
+            node_executable: PathBuf::from("/usr/bin/env"),
+            cli_entry: PathBuf::from("/usr/bin/env"),
+            portpilot_home: None,
+            handshake: compatible(),
+        };
+        let output = provider.command().output().unwrap();
+        assert!(output.status.success());
+        let environment = String::from_utf8(output.stdout).unwrap();
+        for key in ["NODE_OPTIONS=", "NODE_PATH=", "PORTPILOT_INJECTED_SETTING="] {
+            assert!(!environment.lines().any(|line| line.starts_with(key)));
+        }
+        assert!(environment
+            .lines()
+            .any(|line| line == "PATH=/usr/bin:/bin:/usr/sbin:/sbin"));
+    }
 
-        let firefox_lane =
-            serde_json::json!({ "id": "lane-2", "status": "active", "browser": "firefox" });
-        let without_no_remote = serde_json::json!({
-            "lane": { "id": "lane-2" },
-            "verdict": { "kind": "safe-attach", "observation": { "pid": 44, "commandLine": "firefox -profile /tmp/safe" } }
-        });
+    #[test]
+    fn verified_runtime_drops_node_injection_and_unlisted_environment_settings() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::tests::environment_probe_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("NODE_OPTIONS", "--require=/untrusted/injection.js")
+            .env("NODE_PATH", "/untrusted/modules")
+            .env("PORTPILOT_INJECTED_SETTING", "untrusted")
+            .output()
+            .unwrap();
         assert!(
-            validate_release_a_action("lane-2", 44, &firefox_lane, &without_no_remote).is_err()
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
     #[test]
     fn accepts_a_compatible_runtime_handshake() {
-        assert!(validate_handshake(&compatible(), "0.4.0").is_ok());
+        assert!(validate_handshake(&compatible(), "0.4.7").is_ok());
     }
 
     #[test]
@@ -644,7 +547,7 @@ mod tests {
         for (label, mutate) in mutations {
             let mut handshake = compatible();
             mutate(&mut handshake);
-            assert!(validate_handshake(&handshake, "0.4.0").is_err(), "{label}");
+            assert!(validate_handshake(&handshake, "0.4.7").is_err(), "{label}");
         }
     }
 
@@ -654,7 +557,7 @@ mod tests {
             node_executable: "node".into(),
             package_root: "package".into(),
             cli_entry: "dist/src/cli/index.js".into(),
-            expected_portpilot_version: "0.4.0".into(),
+            expected_portpilot_version: "0.4.7".into(),
             portpilot_home: None,
         };
         assert!(validate_absolute_paths(&config).is_err());

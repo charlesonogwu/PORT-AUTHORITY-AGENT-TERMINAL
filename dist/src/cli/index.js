@@ -20,7 +20,6 @@ import { formatLanesTable, formatReserveBlock } from "./format.js";
 import { HELP } from "./help.js";
 import { resolveTaskSession, taskSessionFromEnvironment } from "../core/task-session.js";
 import { runtimeHandshake } from "../core/runtime-handshake.js";
-import { evaluateLaneAction } from "../core/action-safety.js";
 import { launchPersistentBrowser } from "../supervisor/routing.js";
 import { rememberSavedLogin, findSavedLogins } from "../core/saved-logins.js";
 function fail(ctx, message, code = 1) {
@@ -44,7 +43,7 @@ function requireOwnerCwd(ctx) {
 }
 function cliSession(owner, requested) {
     const taskSession = process.platform === "darwin" ? taskSessionFromEnvironment(process.env) : undefined;
-    return taskSession ? resolveTaskSession(owner, requested, taskSession) : requested;
+    return process.platform === "darwin" ? resolveTaskSession(owner, requested, taskSession) : requested;
 }
 async function selectedLane(ctx, includeReleased = false) {
     const laneId = flagString(ctx.args, "lane-id");
@@ -56,7 +55,11 @@ async function selectedLane(ctx, includeReleased = false) {
             return lane;
         }
         const { owner, cwd } = requireOwnerCwd(ctx);
-        const sessionId = cliSession(owner, flagString(ctx.args, "session"));
+        const requestedSession = flagString(ctx.args, "session");
+        if (process.platform === "darwin" && !requestedSession) {
+            await resolveLaneSelector({ owner, cwd, includeReleased });
+        }
+        const sessionId = cliSession(owner, requestedSession);
         const lane = await resolveLaneSelector({ owner, cwd, ...(sessionId ? { sessionId } : {}), includeReleased });
         if (!lane)
             fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}`, 2);
@@ -197,27 +200,6 @@ async function cmdStatus(ctx) {
         for (const w of warnings)
             ctx.stdout.write(`  - ${w.laneId}: ${w.message}\n`);
     }
-}
-async function cmdDashboardActionCheck(ctx) {
-    const laneId = flagString(ctx.args, "lane");
-    const pidRaw = flagString(ctx.args, "pid");
-    if (!laneId)
-        fail(ctx, "missing required --lane", 1);
-    const pid = Number(pidRaw);
-    if (!Number.isInteger(pid) || pid <= 0)
-        fail(ctx, "--pid must be a positive integer", 1);
-    const lane = (await listLanes()).find((candidate) => candidate.id === laneId);
-    if (!lane)
-        fail(ctx, `lane ${laneId} not found`, 2);
-    const scan = await scanPorts();
-    const validated = evaluateLaneAction(lane, pid, scan.observations);
-    emit(ctx, {
-        ok: true,
-        lane: validated.lane,
-        pid: validated.pid,
-        observation: validated.observation,
-        scanSource: scan.source,
-    });
 }
 async function cmdReserve(ctx) {
     const { owner, cwd } = requireOwnerCwd(ctx);
@@ -1208,8 +1190,6 @@ async function dispatch(args) {
     switch (args.command) {
         case "runtime-handshake":
             return emit(ctx, await runtimeHandshake());
-        case "dashboard-action-check":
-            return cmdDashboardActionCheck(ctx);
         case "list":
             return cmdList(ctx);
         case "status":

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, writeFile, readdir, symlink } from "node:fs/promises";
+import { mkdir, writeFile, readdir, symlink, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { withTempHome } from "./helpers.js";
 import {
@@ -204,5 +204,19 @@ test("forgetProfile refuses a path outside the profiles root (and keeps the lane
     await writeFile(join(home, "lanes.json"), JSON.stringify({ version: 1, lanes: [l] }), "utf8");
     await assert.rejects(forgetProfile({ profileDir: join(home, "lanes.json"), laneId: "L10" }));
     assert.equal((await listLanes()).length, 1); // lane untouched because the delete was refused
+  });
+});
+
+
+test("Erase refuses a symlinked profiles root and preserves the outside data", { skip: process.platform === "win32" }, async () => {
+  await withTempHome(async (home) => {
+    const outside = join(home, "outside");
+    const profile = join(outside, "victim");
+    await mkdir(profile, { recursive: true });
+    await writeFile(join(profile, "keep.txt"), "untouched");
+    await symlink(outside, profilesDir(), "dir");
+    await assert.rejects(() => assertSafeProfileDeletion(join(profilesDir(), "victim")), /symbolic-link profiles root/);
+    await assert.rejects(() => forgetProfile({ profileDir: join(profilesDir(), "victim") }), /symbolic-link profiles root/);
+    assert.equal(await readFile(join(profile, "keep.txt"), "utf8"), "untouched");
   });
 });

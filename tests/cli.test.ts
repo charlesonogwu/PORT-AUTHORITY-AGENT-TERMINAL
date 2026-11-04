@@ -15,7 +15,7 @@ interface RunResult {
 
 function runCli(args: string[], home: string): RunResult {
   const res = spawnSync(process.execPath, [CLI, ...args], {
-    env: { ...process.env, PORTPILOT_HOME: home, PORTPILOT_TASK_ID: "", T3CODE_THREAD_ID: "", CODEX_THREAD_ID: "", CODEX_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" },
+    env: { ...process.env, PORTPILOT_HOME: home, PORTPILOT_TASK_ID: "cli-tests", T3CODE_THREAD_ID: "", CODEX_THREAD_ID: "", CODEX_SESSION_ID: "", CLAUDE_CODE_SESSION_ID: "" },
     encoding: "utf8",
   });
   return { stdout: res.stdout ?? "", stderr: res.stderr ?? "", code: res.status };
@@ -55,18 +55,6 @@ test("portpilot runtime-handshake reports a machine-readable compatible identity
   });
 });
 
-test("dashboard-action-check refuses an unknown lane instead of trusting a PID", async () => {
-  await withHome(async (home) => {
-    const res = runCli([
-      "dashboard-action-check",
-      "--lane", "missing-lane",
-      "--pid", "4242",
-      "--json",
-    ], home);
-    assert.notEqual(res.code, 0);
-    assert.match(JSON.parse(res.stdout).error, /lane.*not found/i);
-  });
-});
 
 test("portpilot list on empty registry", async () => {
   await withHome(async (home) => {

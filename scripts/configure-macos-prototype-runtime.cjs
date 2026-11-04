@@ -47,8 +47,8 @@ function buildConfig(options) {
   }
   const version = String(packageJson.version);
   const parts = /^([0-9]+)\.([0-9]+)\.([0-9]+)$/.exec(version);
-  if (version !== "0.4.0" && (!parts || (Number(parts[1]) === 0 && (Number(parts[2]) < 4 || (Number(parts[2]) === 4 && Number(parts[3]) < 5))))) {
-    throw new Error(`the prototype requires the legacy 0.4.0 runtime or a compatible 0.4.5+ build, found ${version}`);
+  if (!parts || (Number(parts[1]) === 0 && (Number(parts[2]) < 4 || (Number(parts[2]) === 4 && Number(parts[3]) < 7)))) {
+    throw new Error(`the prototype requires a compatible 0.4.7+ build, found ${version}`);
   }
   const cliEntry = canonicalFile(
     path.join(packageRoot, "dist", "src", "cli", "index.js"),

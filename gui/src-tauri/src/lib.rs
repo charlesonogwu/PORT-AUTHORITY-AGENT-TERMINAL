@@ -14,8 +14,13 @@ mod lifecycle;
 mod macos_application;
 mod paths;
 mod process_identity;
+#[cfg(target_os = "macos")]
+mod runtime;
+#[cfg(not(target_os = "macos"))]
+#[path = "runtime_cli.rs"]
 mod runtime;
 mod snapshot_worker;
+mod target;
 
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
@@ -63,7 +68,7 @@ pub fn run() {
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let runtime = runtime::RuntimeState::load(&paths::runtime_provider_config_path());
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     let startup_runtime = runtime.clone();
 
     let app = tauri::Builder::default()
@@ -96,9 +101,9 @@ pub fn run() {
             }
             // Browser lifetime belongs to this independently launched native
             // app, never to a disposable MCP stdio worker.
-            #[cfg(target_os = "windows")]
+            #[cfg(not(target_os = "macos"))]
             cli::record_supervisor_startup(cli::start_supervisor_background());
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "macos")]
             cli::record_supervisor_startup(startup_runtime.start_supervisor_background());
             Ok(())
         })
@@ -135,7 +140,7 @@ pub fn run() {
             commands::focus::focus_chrome,
             commands::focus::hide_chrome,
             commands::focus::unhide_chrome,
-            hide_watcher::set_hidden_processes,
+            hide_watcher::set_hidden_targets,
             runtime::get_runtime_status,
         ])
         .build(tauri::generate_context!())

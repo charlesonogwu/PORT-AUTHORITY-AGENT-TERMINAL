@@ -22,9 +22,8 @@
 
 #[cfg(not(target_os = "macos"))]
 use crate::cli::quiet_command;
-use crate::commands::action_safety::revalidate_lane_action;
 use crate::runtime::RuntimeState;
-use serde::Deserialize;
+use crate::target::{verify_live_target, ActionLease, LaneTarget};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::io::{ErrorKind, Read, Write};
@@ -35,29 +34,20 @@ use tauri::State;
 const CDP_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(2);
 const TAB_ACTIVATION_WARNING_LIMIT: usize = 240;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CdpActivationRequest {
-    debug_port: u16,
-    browser: String,
-    tab_id: String,
-}
-
 async fn validated_lane_action(
     runtime: State<'_, RuntimeState>,
-    lane_id: String,
-    pid: u32,
-    process_start: String,
-) -> Result<Value, String> {
+    target: LaneTarget,
+    process_start: Option<String>,
+) -> Result<ActionLease, String> {
     let runtime = runtime.inner().clone();
-    match tauri::async_runtime::spawn_blocking(move || {
-        revalidate_lane_action(&runtime, &lane_id, pid, &process_start)
+    tauri::async_runtime::spawn_blocking(move || {
+        let lease = ActionLease::open(target.pid, process_start.as_deref())?;
+        verify_live_target(&runtime, &target)?;
+        lease.verify()?;
+        Ok(lease)
     })
     .await
-    {
-        Ok(result) => result,
-        Err(error) => Err(format!("lane validation worker failed: {error}")),
-    }
+    .map_err(|error| format!("lane validation worker failed: {error}"))?
 }
 
 fn validate_cdp_target_id(target_id: &str) -> Result<(), String> {
@@ -549,32 +539,31 @@ mod tests {
 
 #[tauri::command]
 pub async fn focus_chrome(
-    lane_id: String,
-    pid: u32,
-    process_start: String,
-    tab: Option<CdpActivationRequest>,
+    target: LaneTarget,
+    process_start: Option<String>,
+    tab_id: Option<String>,
     runtime: State<'_, RuntimeState>,
 ) -> Result<Value, String> {
-    let validation = match validated_lane_action(runtime, lane_id, pid, process_start.clone()).await
-    {
-        Ok(validation) => validation,
-        Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
-    };
-    if let Err(error) = crate::process_identity::verify(pid, &process_start) {
-        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
-    }
+    let pid = target.pid;
+    let lease = validated_lane_action(runtime, target.clone(), process_start).await?;
+    lease.verify()?;
     let activation = match checked_cdp_activation(
-        &validation,
-        tab.as_ref().map(|tab| tab.debug_port),
-        tab.as_ref().map(|tab| tab.browser.as_str()),
-        tab.as_ref().map(|tab| tab.tab_id.as_str()),
+        &json!({ "lane": { "chromeDebugPort": target.chrome_debug_port, "browser": target.browser } }),
+        Some(target.chrome_debug_port),
+        Some(target.browser.as_str()),
+        tab_id.as_deref(),
     ) {
         Ok(activation) => activation,
         Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
     };
-    let (result, warning) =
-        run_with_advisory_tab_activation(|| activate_exact_tab(activation), || native_focus(pid))
-            .await;
+    let (result, warning) = run_with_advisory_tab_activation(
+        || activate_exact_tab(activation),
+        || async {
+            lease.verify()?;
+            native_focus(pid).await
+        },
+    )
+    .await;
     Ok(action_result_json(pid, result, warning))
 }
 
@@ -584,17 +573,13 @@ pub async fn focus_chrome(
 
 #[tauri::command]
 pub async fn hide_chrome(
-    lane_id: String,
-    pid: u32,
-    process_start: String,
+    target: LaneTarget,
+    process_start: Option<String>,
     runtime: State<'_, RuntimeState>,
 ) -> Result<Value, String> {
-    if let Err(error) = validated_lane_action(runtime, lane_id, pid, process_start.clone()).await {
-        return Ok(json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": error }));
-    }
-    if let Err(error) = crate::process_identity::verify(pid, &process_start) {
-        return Ok(json!({ "ok": false, "pid": pid, "placement": Value::Null, "error": error }));
-    }
+    let pid = target.pid;
+    let lease = validated_lane_action(runtime, target.clone(), process_start).await?;
+    lease.verify()?;
     #[cfg(target_os = "windows")]
     {
         Ok(windows_hide(pid))
@@ -692,33 +677,30 @@ async fn native_unhide(pid: u32, placement: Value) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn unhide_chrome(
-    lane_id: String,
-    pid: u32,
-    process_start: String,
+    target: LaneTarget,
+    process_start: Option<String>,
     placement: Value,
-    tab: Option<CdpActivationRequest>,
+    tab_id: Option<String>,
     runtime: State<'_, RuntimeState>,
 ) -> Result<Value, String> {
-    let validation = match validated_lane_action(runtime, lane_id, pid, process_start.clone()).await
-    {
-        Ok(validation) => validation,
-        Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
-    };
-    if let Err(error) = crate::process_identity::verify(pid, &process_start) {
-        return Ok(json!({ "ok": false, "pid": pid, "error": error }));
-    }
+    let pid = target.pid;
+    let lease = validated_lane_action(runtime, target.clone(), process_start).await?;
+    lease.verify()?;
     let activation = match checked_cdp_activation(
-        &validation,
-        tab.as_ref().map(|tab| tab.debug_port),
-        tab.as_ref().map(|tab| tab.browser.as_str()),
-        tab.as_ref().map(|tab| tab.tab_id.as_str()),
+        &json!({ "lane": { "chromeDebugPort": target.chrome_debug_port, "browser": target.browser } }),
+        Some(target.chrome_debug_port),
+        Some(target.browser.as_str()),
+        tab_id.as_deref(),
     ) {
         Ok(activation) => activation,
         Err(error) => return Ok(json!({ "ok": false, "pid": pid, "error": error })),
     };
     let (result, warning) = run_with_advisory_tab_activation(
         || activate_exact_tab(activation),
-        || native_unhide(pid, placement),
+        || async {
+            lease.verify()?;
+            native_unhide(pid, placement).await
+        },
     )
     .await;
     Ok(action_result_json(pid, result, warning))

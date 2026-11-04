@@ -25,7 +25,6 @@ anyhow = "1"
 [target.'cfg(windows)'.dependencies]
 # Preserve main's Windows release inspection support.
 tauri = { version = "2", features = ["devtools"] }
-which = "8"
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Security",
@@ -37,3 +36,7 @@ windows = { version = "0.58", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
+
+# The legacy CLI launcher is used on Windows and Linux, never on Mac.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+which = "8"

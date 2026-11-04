@@ -1,3 +1,4 @@
+import { describePortHolder } from "../core/browsers.js";
 import type { ChromeAttachVerdict, LaunchResult } from "../core/chrome.js";
 import type { Lane } from "../core/lane.js";
 import { laneBrowser, nowIso } from "../core/lane.js";
@@ -131,7 +132,10 @@ export function createBrowserOwner(deps: BrowserOwnerDependencies): SupervisorHa
             }));
             return { laneId: lane.id, ...(pid !== undefined ? { pid } : {}), reused: true };
           }
-          if (verdict.kind !== "safe-free") throw new Error(`unsafe to launch lane ${lane.id}: ${verdict.kind}`);
+          if (verdict.kind !== "safe-free") {
+            const holder = describePortHolder(verdict);
+            throw new Error(`unsafe to launch lane ${lane.id}: ${verdict.kind}${holder ? `; ${holder}` : ""}`);
+          }
 
           await deps.persist(withIdentity(lane, {
             supervisorId: deps.supervisorId,

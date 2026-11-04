@@ -1,96 +1,81 @@
-#[cfg(not(target_os = "macos"))]
-use crate::cli::quiet_command;
-use crate::commands::action_safety::revalidate_lane_action;
+// kill_chrome — the dashboard "Kill" button: close one PortPilot browser.
+//
+// The pid comes from the last refresh, so it is never trusted on its own:
+//   1. Windows: pin the exact process with a handle first.
+//   2. Re-check the full lane target (lane, pid, browser, port, profile)
+//      against a snapshot taken after the click.
+//   3. Terminate through the pinned handle, so a pid Windows reused for
+//      another program after the check can never be the one closed.
+// Mac pins the process start time and rechecks before /bin/kill TERM/KILL.
+// Linux retains the shared one-shot termination path.
+
 use crate::runtime::RuntimeState;
+use crate::target::{verify_live_target, LaneTarget};
 use serde_json::{json, Value};
-#[cfg(target_os = "macos")]
-use std::{
-    thread,
-    time::{Duration, Instant},
-};
 use tauri::State;
-
-#[cfg(target_os = "macos")]
-fn process_exists(pid: u32) -> bool {
-    std::process::Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-pub(crate) fn terminate_lane_process(
-    runtime: &RuntimeState,
-    lane_id: &str,
-    pid: u32,
-    process_start: &str,
-) -> Result<Value, String> {
-    let validated = revalidate_lane_action(runtime, lane_id, pid, process_start)?;
-
-    #[cfg(target_os = "windows")]
-    {
-        let output = quiet_command("taskkill.exe")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output()
-            .map_err(|e| format!("failed to terminate verified browser: {e}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let term = std::process::Command::new("/bin/kill")
-            .args(["-TERM", &pid.to_string()])
-            .output()
-            .map_err(|e| format!("failed to gracefully terminate verified browser: {e}"))?;
-        if !term.status.success() {
-            return Err(String::from_utf8_lossy(&term.stderr).trim().to_string());
-        }
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while process_exists(pid) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(100));
-        }
-        if process_exists(pid) {
-            crate::process_identity::verify(pid, process_start)?;
-            let forced = std::process::Command::new("/bin/kill")
-                .args(["-KILL", &pid.to_string()])
-                .output()
-                .map_err(|e| format!("failed to force-terminate verified browser: {e}"))?;
-            if !forced.status.success() {
-                return Err(String::from_utf8_lossy(&forced.stderr).trim().to_string());
-            }
-        }
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        let output = quiet_command("kill")
-            .args(["-9", &pid.to_string()])
-            .output()
-            .map_err(|e| format!("failed to terminate verified browser: {e}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-    }
-
-    Ok(validated)
-}
 
 #[tauri::command]
 pub async fn kill_chrome(
-    lane_id: String,
-    pid: u32,
-    process_start: String,
+    target: LaneTarget,
+    process_start: Option<String>,
     runtime: State<'_, RuntimeState>,
 ) -> Result<Value, String> {
     let runtime = runtime.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        match terminate_lane_process(&runtime, &lane_id, pid, &process_start) {
-            Ok(_) => json!({ "ok": true, "pid": pid }),
-            Err(error) => json!({ "ok": false, "pid": pid, "error": error }),
-        }
-    })
-    .await
-    .map_err(|e| format!("kill worker failed: {e}"))
+    tauri::async_runtime::spawn_blocking(move || kill_verified(&runtime, target, process_start))
+        .await
+        .map_err(|e| format!("kill worker join failed: {}", e))?
+}
+
+#[cfg(target_os = "windows")]
+fn kill_verified(
+    runtime: &RuntimeState,
+    target: LaneTarget,
+    _process_start: Option<String>,
+) -> Result<Value, String> {
+    use crate::target::ProcessPin;
+    use std::time::Duration;
+
+    let pid = target.pid;
+    let Some(pin) = ProcessPin::open(pid)? else {
+        return Ok(json!({ "ok": true, "pid": pid, "alreadyExited": true }));
+    };
+    verify_live_target(runtime, &target)?;
+    match pin.terminate_and_wait(Duration::from_secs(5)) {
+        Ok(()) => Ok(json!({ "ok": true, "pid": pin.pid() })),
+        Err(error) => Ok(json!({ "ok": false, "pid": pin.pid(), "error": error })),
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn kill_verified(
+    runtime: &RuntimeState,
+    target: LaneTarget,
+    _process_start: Option<String>,
+) -> Result<Value, String> {
+    use crate::cli::quiet_command;
+
+    verify_live_target(runtime, &target)?;
+    let pid = target.pid;
+    let output = quiet_command("kill")
+        .args(["-9", &pid.to_string()])
+        .output()
+        .map_err(|e| format!("failed to spawn kill command: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Ok(json!({ "ok": false, "pid": pid, "error": stderr.trim().to_string() }));
+    }
+    Ok(json!({ "ok": true, "pid": pid }))
+}
+
+#[cfg(target_os = "macos")]
+fn kill_verified(
+    runtime: &RuntimeState,
+    target: LaneTarget,
+    process_start: Option<String>,
+) -> Result<Value, String> {
+    let pin = crate::target::ProcessPin::open(target.pid, process_start.as_deref())?;
+    verify_live_target(runtime, &target)?;
+    pin.verify()?;
+    pin.terminate_and_wait(std::time::Duration::from_secs(5))?;
+    Ok(json!({ "ok": true, "pid": target.pid }))
 }

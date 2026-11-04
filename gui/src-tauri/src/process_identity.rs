@@ -1,4 +1,3 @@
-#[cfg(not(target_os = "windows"))]
 use serde_json::Value;
 #[cfg(target_os = "macos")]
 use std::collections::{HashMap, HashSet};
@@ -61,7 +60,7 @@ fn read_process_memory() -> HashMap<u32, ProcessMemory> {
 }
 
 #[cfg(target_os = "macos")]
-fn read_process_start(pid: u32) -> Result<String, String> {
+pub fn read_process_start(pid: u32) -> Result<String, String> {
     let output = std::process::Command::new("/bin/ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .output()
@@ -87,11 +86,6 @@ pub fn verify(pid: u32, expected: &str) -> Result<(), String> {
     if current != expected {
         return Err("refused dashboard action: PID was reused or the browser restarted".into());
     }
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn verify(_pid: u32, _expected: &str) -> Result<(), String> {
     Ok(())
 }
 
@@ -124,7 +118,7 @@ pub fn enrich_snapshot(snapshot: &mut Value) {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "macos"))]
 pub fn enrich_snapshot(_snapshot: &mut Value) {}
 
 #[cfg(all(test, not(target_os = "windows")))]

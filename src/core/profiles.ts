@@ -207,7 +207,7 @@ export function assertWithinProfilesRoot(target: string): void {
     throw new Error(`refusing to delete the profiles root itself: ${t}`);
   }
   const rootWithSep = root.endsWith(sep) ? root : root + sep;
-  if (!t.toLowerCase().startsWith(rootWithSep.toLowerCase())) {
+  if (!(process.platform === "win32" ? t.toLowerCase().startsWith(rootWithSep.toLowerCase()) : t.startsWith(rootWithSep))) {
     throw new Error(`refusing to delete a path outside ${root}: ${t}`);
   }
 }
@@ -217,6 +217,10 @@ export function assertWithinProfilesRoot(target: string): void {
  * PortPilot profiles root. */
 export async function assertSafeProfileDeletion(target: string): Promise<void> {
   assertWithinProfilesRoot(target);
+  const rootMetadata = await lstat(profilesDir());
+  if (rootMetadata.isSymbolicLink()) {
+    throw new Error(`refusing to delete through a symbolic-link profiles root: ${profilesDir()}`);
+  }
   const metadata = await lstat(target);
   if (metadata.isSymbolicLink()) {
     throw new Error(`refusing to delete a symbolic-link profile: ${target}`);
@@ -226,7 +230,7 @@ export async function assertSafeProfileDeletion(target: string): Promise<void> {
     realpath(target),
   ]);
   const rootWithSep = canonicalRoot.endsWith(sep) ? canonicalRoot : canonicalRoot + sep;
-  if (!canonicalTarget.toLowerCase().startsWith(rootWithSep.toLowerCase())) {
+  if (!(process.platform === "win32" ? canonicalTarget.toLowerCase().startsWith(rootWithSep.toLowerCase()) : canonicalTarget.startsWith(rootWithSep))) {
     throw new Error(`refusing to delete a profile that resolves outside ${canonicalRoot}`);
   }
 }
