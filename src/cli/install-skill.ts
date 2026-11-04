@@ -1,9 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { renameWithRetry } from "../core/lockfile.js";
+import { portpilotHome } from "../core/paths.js";
 
 export type AgentSkillClient = "codex" | "claude";
 
@@ -22,11 +24,16 @@ const KEEP_BACKUPS = 3;
 /** OS clutter that neither makes a folder "someone else's" nor counts as a change. */
 const IGNORED_NAMES = new Set([".ds_store", "thumbs.db", "desktop.ini"]);
 
+/** Leftovers of an interrupted write; never a sign the folder belongs to someone else. */
+const TEMP_MARKER = ".portpilot-tmp-";
+
 export interface InstallAgentSkillOptions {
   homeDir?: string;
   codexHome?: string;
   claudeConfigDir?: string;
   sourceDir?: string;
+  /** Where backups go. Defaults to <PortPilot home>/skill-backups/<client>, outside every skills folder. */
+  backupRoot?: string;
   /** Skip clients whose app folder (~/.codex, ~/.claude) doesn't exist yet. Used by postinstall. */
   onlyExistingApps?: boolean;
 }
@@ -54,12 +61,24 @@ function sha256(content: Buffer): string {
 
 function isIgnored(relativePath: string): boolean {
   const name = relativePath.split(/[\\/]/).pop() ?? relativePath;
-  return IGNORED_NAMES.has(name.toLowerCase());
+  return IGNORED_NAMES.has(name.toLowerCase()) || name.includes(TEMP_MARKER);
 }
 
 /** Manifest keys always use "/" so a manifest written on one OS reads the same on another. */
 function manifestKey(relativePath: string): string {
   return relativePath.split(sep).join("/");
+}
+
+/**
+ * A manifest key may only name a file inside the skill folder, written the
+ * way PortPilot writes keys. A corrupt or planted manifest must never make an
+ * upgrade replace or delete anything else, so absolute paths, drive letters,
+ * backslashes and "." or ".." segments are rejected.
+ */
+export function isSafeManifestKey(key: string): boolean {
+  if (!key || key.length > 512) return false;
+  if (key.includes("\\") || key.includes("\0") || key.startsWith("/") || /^[a-zA-Z]:/.test(key)) return false;
+  return key.split("/").every((part) => part !== "" && part !== "." && part !== "..");
 }
 
 async function readIfExists(path: string): Promise<Buffer | null> {
@@ -82,17 +101,6 @@ async function listFiles(root: string, current = root): Promise<string[]> {
   return files.sort();
 }
 
-/**
- * A manifest key may only name a file inside the skill folder. A corrupt or
- * planted manifest must never make an upgrade replace or delete anything
- * else, so absolute paths, drive letters and ".." segments are rejected.
- */
-export function isSafeManifestKey(key: string): boolean {
-  if (!key || key.length > 512) return false;
-  if (/^[\\/]/.test(key) || /^[a-zA-Z]:/.test(key) || key.includes("\0")) return false;
-  return key.split(/[\\/]/).every((part) => part !== "" && part !== "." && part !== "..");
-}
-
 async function readManifest(skillDir: string): Promise<SkillManifest | null> {
   const raw = await readIfExists(join(skillDir, SKILL_MANIFEST));
   if (raw === null || raw.length > 1024 * 1024) return null;
@@ -109,29 +117,46 @@ async function readManifest(skillDir: string): Promise<SkillManifest | null> {
   }
 }
 
-/** Write via a temp file + rename so a reader never sees a half-written file. */
-async function writeAtomic(target: string, content: Buffer | string): Promise<void> {
-  await mkdir(dirname(target), { recursive: true });
-  const temp = `${target}.portpilot-tmp-${process.pid}`;
-  await writeFile(temp, content);
-  try {
-    await rename(temp, target);
-  } catch (err) {
-    await rm(temp, { force: true });
-    throw err;
+function isInside(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel === "" || (!rel.startsWith("..") && !rel.includes(`..${sep}`) && !/^[a-zA-Z]:/.test(rel) && !rel.startsWith(sep));
+}
+
+/**
+ * The real folder `file` will live in must be the skill folder or inside it:
+ * a link at or below the portpilot folder must never redirect a write or a
+ * delete somewhere else.
+ */
+async function assertContained(realSkillDir: string, file: string): Promise<void> {
+  const realParent = await realpath(dirname(file));
+  if (!isInside(realSkillDir, realParent)) {
+    throw new Error(`refusing to write outside the skill folder: ${file} resolves to ${realParent}`);
   }
 }
 
-async function pruneBackups(skillsRoot: string): Promise<void> {
+/** Write via a temp file + rename so a reader never sees a half-written file. */
+async function writeAtomic(realSkillDir: string, target: string, content: Buffer | string): Promise<void> {
+  await mkdir(dirname(target), { recursive: true });
+  await assertContained(realSkillDir, target);
+  const temp = `${target}${TEMP_MARKER}${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(temp, content);
+    await renameWithRetry(temp, target);
+  } finally {
+    await rm(temp, { force: true });
+  }
+}
+
+async function pruneBackups(backupRoot: string): Promise<void> {
   let entries: string[];
   try {
-    entries = await readdir(skillsRoot);
+    entries = await readdir(backupRoot);
   } catch {
     return;
   }
-  const backups = entries.filter((name) => name.startsWith("portpilot.backup-")).sort();
+  const backups = entries.sort();
   for (const old of backups.slice(0, Math.max(0, backups.length - KEEP_BACKUPS))) {
-    await rm(join(skillsRoot, old), { recursive: true, force: true });
+    await rm(join(backupRoot, old), { recursive: true, force: true });
   }
 }
 
@@ -168,6 +193,17 @@ export function appDirFor(
 
 export function skillDirFor(client: AgentSkillClient, opts: InstallAgentSkillOptions = {}, env: NodeJS.ProcessEnv = process.env): string {
   return join(appDirFor(client, opts, env), "skills", "portpilot");
+}
+
+/**
+ * Backups live outside every skills folder: Codex and Claude Code load each
+ * `skills/<name>/SKILL.md`, so a backup kept next to the skill would load as a
+ * second, stale copy of it.
+ */
+export function backupRootFor(client: AgentSkillClient, opts: InstallAgentSkillOptions = {}): string {
+  if (opts.backupRoot) return opts.backupRoot;
+  const base = opts.homeDir ? join(opts.homeDir, ".portpilot") : portpilotHome();
+  return join(base, "skill-backups", client);
 }
 
 type Ownership =
@@ -225,18 +261,23 @@ export async function installAgentSkill(
   for (const file of await listFiles(sourceDir)) {
     if (!isIgnored(file) && file !== SKILL_MANIFEST) bundle.set(file, await readFile(join(sourceDir, file)));
   }
+  const bundledLower = new Set([...bundle.keys()].map((file) => file.toLowerCase()));
   const previous = ownership.kind === "managed" ? ownership.manifest : null;
+
+  await mkdir(skillDir, { recursive: true });
+  const realSkillDir = await realpath(skillDir);
 
   const toWrite: string[] = [];
   for (const [file, content] of bundle) {
     const current = await readIfExists(join(skillDir, file));
     if (current === null || !current.equals(content)) toWrite.push(file);
   }
-  // Only plain files PortPilot itself recorded can be removed. A copy without
-  // a manifest (older installer, or installed by hand) loses nothing on upgrade.
+  // Only plain files PortPilot itself recorded can be removed, never one that
+  // (ignoring case, as Windows and macOS do) is a file it still ships. A copy
+  // without a manifest (older installer, or installed by hand) loses nothing.
   const toRemove: string[] = [];
   for (const file of Object.keys(previous?.files ?? {})) {
-    if (bundle.has(file)) continue;
+    if (bundledLower.has(file.toLowerCase())) continue;
     const info = await lstat(join(skillDir, file)).catch(() => null);
     if (info?.isFile()) toRemove.push(file);
   }
@@ -248,7 +289,7 @@ export async function installAgentSkill(
 
   if (toWrite.length === 0 && toRemove.length === 0) {
     if (JSON.stringify(previous) !== JSON.stringify(manifest)) {
-      await writeAtomic(join(skillDir, SKILL_MANIFEST), JSON.stringify(manifest, null, 2) + "\n");
+      await writeAtomic(realSkillDir, join(skillDir, SKILL_MANIFEST), JSON.stringify(manifest, null, 2) + "\n");
     }
     return { client, skillDir, backupPath: null, action: "already-installed" };
   }
@@ -256,20 +297,29 @@ export async function installAgentSkill(
   // Back up every existing file about to be replaced or removed whose content
   // isn't exactly what PortPilot installed (a user edit, or unknown history).
   let backupPath: string | null = null;
-  for (const file of [...toWrite, ...toRemove]) {
+  const backupRoot = backupRootFor(client, opts);
+  for (const file of [...toRemove, ...toWrite]) {
     const current = await readIfExists(join(skillDir, file));
     if (current === null) continue;
     if (previous?.files[file] === sha256(current)) continue;
-    backupPath ??= join(dirname(skillDir), `portpilot.backup-${timestamp()}`);
+    backupPath ??= join(backupRoot, timestamp());
     const target = join(backupPath, file);
     await mkdir(dirname(target), { recursive: true });
     await copyFile(join(skillDir, file), target);
   }
 
-  for (const file of toWrite) await writeAtomic(join(skillDir, file), bundle.get(file)!);
-  for (const file of toRemove) await unlink(join(skillDir, file));
-  await writeAtomic(join(skillDir, SKILL_MANIFEST), JSON.stringify(manifest, null, 2) + "\n");
-  if (backupPath) await pruneBackups(dirname(skillDir));
+  // Removals first, so a case-only rename on a case-insensitive disk ends with
+  // the new file in place.
+  for (const file of toRemove) {
+    const path = join(skillDir, file);
+    if (!isInside(realSkillDir, await realpath(dirname(path)).catch(() => ""))) continue; // behind a link: never delete
+    await unlink(path).catch((err: NodeJS.ErrnoException) => {
+      if (err.code !== "ENOENT") throw err; // another installer got there first
+    });
+  }
+  for (const file of toWrite) await writeAtomic(realSkillDir, join(skillDir, file), bundle.get(file)!);
+  await writeAtomic(realSkillDir, join(skillDir, SKILL_MANIFEST), JSON.stringify(manifest, null, 2) + "\n");
+  if (backupPath) await pruneBackups(backupRoot);
 
   return {
     client,
@@ -277,4 +327,9 @@ export async function installAgentSkill(
     backupPath,
     action: ownership.kind === "absent" ? "installed" : "updated",
   };
+}
+
+/** Exposed for tests: the containment rule used before every write and delete. */
+export function isInsideFolder(root: string, path: string): boolean {
+  return isInside(resolve(root), resolve(path));
 }

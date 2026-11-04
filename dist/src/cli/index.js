@@ -1142,7 +1142,9 @@ async function cmdInstallSkill(ctx) {
             const result = await installAgentSkill(client, { onlyExistingApps });
             results.push({
                 client,
-                ok: result.action !== "conflict",
+                // Under --only-existing (npm postinstall) a folder PortPilot leaves
+                // alone is a deliberate outcome, not a failure to re-run.
+                ok: result.action !== "conflict" || onlyExistingApps,
                 skillDir: result.skillDir,
                 backupPath: result.backupPath,
                 action: result.action,
@@ -1169,6 +1171,10 @@ async function cmdInstallSkill(ctx) {
             ctx.stdout.write(`- ${result.client}: skipped (${result.reason})\n`);
             continue;
         }
+        if (result.action === "conflict") {
+            ctx.stdout.write(`- ${result.client}: left unchanged (${result.reason})\n`);
+            continue;
+        }
         const label = result.action === "installed"
             ? "installed"
             : result.action === "updated"
@@ -1179,7 +1185,9 @@ async function cmdInstallSkill(ctx) {
         if (result.backupPath)
             ctx.stdout.write(`  backup: ${result.backupPath}\n`);
     }
-    const installedFor = results.filter((result) => result.ok && result.action !== "skipped").map((result) => result.client);
+    const installedFor = results
+        .filter((result) => result.ok && result.action !== "skipped" && result.action !== "conflict")
+        .map((result) => result.client);
     if (allOk) {
         if (installedFor.length > 0) {
             const names = installedFor.map((client) => (client === "codex" ? "Codex" : "Claude Code")).join(" and ");

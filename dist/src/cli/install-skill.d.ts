@@ -11,6 +11,8 @@ export interface InstallAgentSkillOptions {
     codexHome?: string;
     claudeConfigDir?: string;
     sourceDir?: string;
+    /** Where backups go. Defaults to <PortPilot home>/skill-backups/<client>, outside every skills folder. */
+    backupRoot?: string;
     /** Skip clients whose app folder (~/.codex, ~/.claude) doesn't exist yet. Used by postinstall. */
     onlyExistingApps?: boolean;
 }
@@ -22,13 +24,22 @@ export interface InstallAgentSkillResult {
     reason?: string;
 }
 /**
- * A manifest key may only name a file inside the skill folder. A corrupt or
- * planted manifest must never make an upgrade replace or delete anything
- * else, so absolute paths, drive letters and ".." segments are rejected.
+ * A manifest key may only name a file inside the skill folder, written the
+ * way PortPilot writes keys. A corrupt or planted manifest must never make an
+ * upgrade replace or delete anything else, so absolute paths, drive letters,
+ * backslashes and "." or ".." segments are rejected.
  */
 export declare function isSafeManifestKey(key: string): boolean;
 export declare function portpilotSkillSourceDir(): string;
 /** The app folder a client keeps its skills in. A blank env var counts as unset. */
 export declare function appDirFor(client: AgentSkillClient, opts?: InstallAgentSkillOptions, env?: NodeJS.ProcessEnv): string;
 export declare function skillDirFor(client: AgentSkillClient, opts?: InstallAgentSkillOptions, env?: NodeJS.ProcessEnv): string;
+/**
+ * Backups live outside every skills folder: Codex and Claude Code load each
+ * `skills/<name>/SKILL.md`, so a backup kept next to the skill would load as a
+ * second, stale copy of it.
+ */
+export declare function backupRootFor(client: AgentSkillClient, opts?: InstallAgentSkillOptions): string;
 export declare function installAgentSkill(client: AgentSkillClient, opts?: InstallAgentSkillOptions): Promise<InstallAgentSkillResult>;
+/** Exposed for tests: the containment rule used before every write and delete. */
+export declare function isInsideFolder(root: string, path: string): boolean;

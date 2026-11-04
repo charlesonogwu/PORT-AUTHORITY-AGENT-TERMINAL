@@ -170,10 +170,12 @@ paat install-skill all
 ```
 
 PortPilot updates only copies it installed. An upgrade replaces only the files
-PortPilot put there, backs up any of them you edited, and keeps files you added
-yourself. A `portpilot` folder PortPilot didn't create, a folder whose
-`SKILL.md` you renamed to switch the skill off, or a linked folder is left
-unchanged.
+PortPilot put there, backs up any of them you edited (to
+`~/.portpilot/skill-backups/`, outside the skills folders so a backup never
+loads as a second copy of the skill), and keeps files you added yourself. A
+`portpilot` folder PortPilot didn't create, or one whose `SKILL.md` you renamed
+to switch the skill off, is left unchanged, and PortPilot never writes or
+deletes through a link at or inside the `portpilot` folder.
 
 The npm installer adds the skill only for apps that are already installed
 (their `~/.codex` or `~/.claude` folder exists), never under `sudo`, and not

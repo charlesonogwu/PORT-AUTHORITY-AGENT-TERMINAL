@@ -11,7 +11,9 @@ import {
   MANAGED_SKILL_MARKER,
   SKILL_MANIFEST,
   appDirFor,
+  backupRootFor,
   installAgentSkill,
+  isInsideFolder,
   isSafeManifestKey,
   portpilotSkillSourceDir,
 } from "../src/cli/install-skill.js";
@@ -218,7 +220,7 @@ test("a corrupt or planted manifest can't make an upgrade delete anything outsid
 });
 
 test("manifest keys must stay inside the skill folder", () => {
-  for (const bad of ["../x", "a/../../x", "/etc/passwd", "C:\\Windows\\x", "\\\\srv\\share\\x", "", "a//b", "./x"]) {
+  for (const bad of ["../x", "a/../../x", "/etc/passwd", "C:\\Windows\\x", "\\\\srv\\share\\x", "agents\\openai.yaml", "", "a//b", "./x"]) {
     assert.equal(isSafeManifestKey(bad), false, bad);
   }
   for (const good of ["SKILL.md", "agents/openai.yaml", "a/b/c.txt"]) assert.equal(isSafeManifestKey(good), true, good);
@@ -242,18 +244,77 @@ test("an older managed copy without a manifest is upgraded without deleting anyt
   });
 });
 
-test("old backups are pruned to the newest three", async () => {
+test("backups are kept outside every skills folder and pruned to the newest three", async () => {
   await withTempDir(async (home) => {
     const skills = join(home, ".codex", "skills");
     await installAgentSkill("codex", { homeDir: home });
     for (let i = 0; i < 4; i++) {
       await writeFile(join(skills, "portpilot", "SKILL.md"), `${MANAGED_SKILL_MARKER}\nedit ${i}\n`, "utf8");
       await new Promise((resolve) => setTimeout(resolve, 5));
-      await installAgentSkill("codex", { homeDir: home });
+      const result = await installAgentSkill("codex", { homeDir: home });
+      assert.ok(result.backupPath?.startsWith(backupRootFor("codex", { homeDir: home })));
     }
-    const backups = (await readdir(skills)).filter((name) => name.startsWith("portpilot.backup-"));
-    assert.equal(backups.length, 3);
+    // Codex and Claude Code load every skills/<name>/SKILL.md; a backup there would load as a stale duplicate.
+    assert.deepEqual(await readdir(skills), ["portpilot"]);
+    assert.equal((await readdir(backupRootFor("codex", { homeDir: home }))).length, 3);
   });
+});
+
+test("a leftover temp file from an interrupted install doesn't block the next one", async () => {
+  await withTempDir(async (home) => {
+    const skillDir = join(home, ".claude", "skills", "portpilot");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(join(skillDir, "SKILL.md.portpilot-tmp-4242-deadbeef"), "partial", "utf8");
+    assert.equal((await installAgentSkill("claude", { homeDir: home })).action, "installed");
+    assert.equal((await installAgentSkill("claude", { homeDir: home })).action, "already-installed");
+  });
+});
+
+test("look-alike manifest keys never delete a file PortPilot still ships", async () => {
+  await withTempDir(async (home) => {
+    const first = await installAgentSkill("codex", { homeDir: home });
+    const manifest = JSON.parse(await readFile(join(first.skillDir, SKILL_MANIFEST), "utf8")) as { files: Record<string, string> };
+    manifest.files["skill.md"] = "0".repeat(64);
+    manifest.files["agents\\openai.yaml"] = "0".repeat(64);
+    await writeFile(join(first.skillDir, SKILL_MANIFEST), JSON.stringify(manifest), "utf8");
+    await writeFile(join(first.skillDir, "SKILL.md"), `${MANAGED_SKILL_MARKER}\nolder text\n`, "utf8");
+
+    await installAgentSkill("codex", { homeDir: home });
+
+    assert.match(await readFile(join(first.skillDir, "SKILL.md"), "utf8"), /name: portpilot/);
+    assert.ok(existsSync(join(first.skillDir, "agents", "openai.yaml")));
+  });
+});
+
+test("a link inside the skill folder can't redirect a write or a delete outside it", async (t) => {
+  await withTempDir(async (home) => {
+    const first = await installAgentSkill("codex", { homeDir: home });
+    const outside = join(home, "elsewhere");
+    await mkdir(outside);
+    await writeFile(join(outside, "x.txt"), "keep\n", "utf8");
+    await rm(join(first.skillDir, "agents"), { recursive: true });
+    try {
+      await symlink(outside, join(first.skillDir, "agents"), process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      t.skip("cannot create a directory link here");
+      return;
+    }
+    const manifest = JSON.parse(await readFile(join(first.skillDir, SKILL_MANIFEST), "utf8")) as { files: Record<string, string> };
+    manifest.files["agents/x.txt"] = "0".repeat(64);
+    await writeFile(join(first.skillDir, SKILL_MANIFEST), JSON.stringify(manifest), "utf8");
+
+    await assert.rejects(installAgentSkill("codex", { homeDir: home }), /outside the skill folder/);
+    assert.equal(await readFile(join(outside, "x.txt"), "utf8"), "keep\n");
+    assert.ok(!existsSync(join(outside, "openai.yaml")), "nothing was written through the link");
+  });
+});
+
+test("isInsideFolder only accepts the folder itself and paths below it", () => {
+  const root = join(tmpdir(), "skill-root");
+  assert.equal(isInsideFolder(root, root), true);
+  assert.equal(isInsideFolder(root, join(root, "agents", "a.yaml")), true);
+  assert.equal(isInsideFolder(root, join(root, "..", "other")), false);
+  assert.equal(isInsideFolder(root, join(tmpdir(), "skill-root-2")), false);
 });
 
 test("onlyExistingApps skips an app that isn't installed and creates nothing", async () => {
@@ -310,6 +371,22 @@ test("install-skill --only-existing leaves missing app folders alone", async () 
   });
 });
 
+test("install-skill --only-existing reports a folder it leaves alone without failing", async () => {
+  await withTempDir(async (dir) => {
+    const claudeHome = join(dir, "claude");
+    await mkdir(join(claudeHome, "skills", "portpilot"), { recursive: true });
+    await writeFile(join(claudeHome, "skills", "portpilot", "SKILL.md"), "my own skill\n", "utf8");
+    const cli = join(process.cwd(), "dist", "src", "cli", "index.js");
+    const result = spawnSync(process.execPath, [cli, "install-skill", "claude", "--only-existing"], {
+      encoding: "utf8",
+      env: { ...process.env, CLAUDE_CONFIG_DIR: claudeHome },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /left unchanged/);
+    assert.equal(await readFile(join(claudeHome, "skills", "portpilot", "SKILL.md"), "utf8"), "my own skill\n");
+  });
+});
+
 test("postinstall skips the skill when asked, under sudo, and for dependency installs", async () => {
   const previous = { ...process.env };
   process.env.PAAT_POSTINSTALL_NO_RUN = "1";
@@ -325,12 +402,15 @@ test("postinstall skips the skill when asked, under sudo, and for dependency ins
 
     await withTempDir(async (project) => {
       await writeFile(join(project, "package.json"), JSON.stringify({ name: "some-app" }), "utf8");
-      for (const key of ["PAAT_SKIP_POSTINSTALL", "CI", "PAAT_PREPARE_RUNNING", "npm_config_global"]) delete process.env[key];
+      for (const key of ["PAAT_SKIP_POSTINSTALL", "CI", "PAAT_PREPARE_RUNNING", "npm_config_global", "npm_config_location"]) delete process.env[key];
       process.env.INIT_CWD = project;
       assert.equal(postinstall.shouldSkip(), "transitive install");
       process.env.npm_config_global = "true";
       assert.equal(postinstall.shouldSkip(), null, "a global install runs");
       delete process.env.npm_config_global;
+      process.env.npm_config_location = "global";
+      assert.equal(postinstall.shouldSkip(), null, "npm i --location=global runs too");
+      delete process.env.npm_config_location;
       process.env.INIT_CWD = process.cwd();
       assert.equal(postinstall.shouldSkip(), null, "installing inside the PortPilot checkout runs");
     });

@@ -48,7 +48,9 @@ function shouldSkip() {
   if (process.env.PAAT_SKIP_POSTINSTALL === "1") return "PAAT_SKIP_POSTINSTALL=1";
   if (process.env.CI === "true") return "running in CI";
   if (process.env.PAAT_PREPARE_RUNNING === "1") return "nested prepare-time install";
-  const isGlobal = process.env.npm_config_global === "true";
+  // `npm i -g` sets npm_config_global; `--location=global` (and
+  // `location=global` in .npmrc) sets only npm_config_location.
+  const isGlobal = process.env.npm_config_global === "true" || process.env.npm_config_location === "global";
   const ourName = "port-authority-agent-terminal-mcp";
   // npm runs lifecycle scripts from this package's own folder, so process.cwd()
   // always looks like "ourselves". INIT_CWD is where the user actually ran npm.
@@ -201,7 +203,10 @@ function run(cliJs, args) {
 
 function main() {
   const skip = shouldSkip();
-  if (skip) return; // silent skip
+  if (skip) {
+    log(`Skipping setup (${skip}). Run \`paat install-mcp\`, \`paat install-skill all\` or \`paat shortcut install\` yourself if you need them.`);
+    return;
+  }
 
   const pkgRoot = packageRoot();
   const cliJs = findCli();

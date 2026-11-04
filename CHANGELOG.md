@@ -32,11 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `page_goto`, closes with `close_browser` before `release_lane`, and
   never uses personal/default browser profiles.
 - The installer only replaces or removes files it recorded installing
-  (`.portpilot-skill.json`), backs up any of them you edited, keeps files you
-  added, writes each file atomically, and keeps the newest three backups. It
-  never writes through a linked folder, and leaves alone a `portpilot` folder
-  it didn't create (including one whose `SKILL.md` was renamed to switch it
-  off).
+  (`.portpilot-skill.json`), backs up any of them you edited to
+  `~/.portpilot/skill-backups/` (never next to the skill, where it would load
+  as a stale duplicate), keeps files you added, writes each file atomically,
+  and keeps the newest three backups. It never writes or deletes through a link
+  at or inside the `portpilot` folder, and leaves alone a `portpilot` folder it
+  didn't create (including one whose `SKILL.md` was renamed to switch it off).
+  An interrupted install leaves nothing that blocks the next one.
+- `npm i --location=global` now counts as a global install, and a skipped
+  postinstall says why instead of exiting silently.
 
 ## [0.4.7] — 2026-11-03
 
