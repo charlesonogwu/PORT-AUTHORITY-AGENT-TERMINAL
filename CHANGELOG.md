@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows folder names are now compared case-insensitively for lane
+  identity, so `C:\Users\me\Shop` and `c:\users\me\shop` (or a path with
+  `.\` segments) reconnect to the same lane and the same saved logins
+  instead of creating a duplicate lane and browser profile.
+- Port ranges are validated (integers 1-65535, start <= end) in the config
+  file, on the CLI and in the allocator, instead of being accepted and then
+  failing or iterating impossible ports.
+- Many agents waiting on the lane registry no longer retry in lockstep: the
+  lock retry is jittered, and registry updates wait up to 30 s before giving
+  up.
+- Building the dashboard from source on Windows no longer fails when
+  `gui/node_modules` is missing: current Node refuses to spawn `npm.cmd`
+  without a shell, so the build runs npm's JavaScript CLI through Node.
+
 ### Security
 
 - Cleared every known vulnerability in PortPilot's runtime dependencies

@@ -1,6 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
 import { relative, isAbsolute, resolve } from "node:path";
-import { Lane, normalizeCwd, nowIso } from "./lane.js";
+import { Lane, cwdIdentity, nowIso } from "./lane.js";
 import { profilesDir } from "./paths.js";
 import { listLanes, updateRegistry } from "./registry.js";
 
@@ -51,13 +51,13 @@ export async function rememberSavedLogin(laneId: string, input: { website: strin
 }
 export async function findSavedLogins(input: {cwd: string; website: string; accountLabel?: string}): Promise<{lanes: Lane[]; unavailableProfileIds: string[]; reconnect: {laneId: string; command: string} | null}> {
   if (!input.cwd.trim()) throw new Error("workspace cwd must not be blank");
-  const cwd = normalizeCwd(input.cwd);
+  const cwd = cwdIdentity(input.cwd);
   const website = normalizeLoginWebsite(input.website);
   const accountLabel = accountNickname(input.accountLabel);
   const lanes: Lane[] = [];
   const unavailableProfileIds: string[] = [];
   for (const lane of await listLanes()) {
-    if (normalizeCwd(lane.cwd) !== cwd || !(lane.savedLogins ?? []).some(l => l.website === website && (!accountLabel || l.accountLabel === accountLabel))) continue;
+    if (cwdIdentity(lane.cwd) !== cwd || !(lane.savedLogins ?? []).some(l => l.website === website && (!accountLabel || l.accountLabel === accountLabel))) continue;
     lanes.push(lane);
     try { await verifyProfile(lane.chromeProfileDir); } catch { unavailableProfileIds.push(lane.id); }
   }

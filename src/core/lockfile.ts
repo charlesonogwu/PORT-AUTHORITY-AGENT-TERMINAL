@@ -85,7 +85,9 @@ export async function acquireLock(lockPath: string, opts: LockOptions = {}): Pro
     if (Date.now() > deadline) {
       throw new LockError(`Could not acquire lock within ${timeoutMs}ms: ${lockPath}`, lockPath);
     }
-    await sleep(retryMs);
+    // Jitter prevents a large burst of independent CLI/MCP processes from
+    // waking on the same fixed cadence and repeatedly colliding.
+    await sleep(retryMs + Math.floor(Math.random() * Math.max(1, retryMs)));
   }
 }
 

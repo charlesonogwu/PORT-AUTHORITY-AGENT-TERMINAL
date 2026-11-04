@@ -1,6 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
 import { relative, isAbsolute, resolve } from "node:path";
-import { normalizeCwd, nowIso } from "./lane.js";
+import { cwdIdentity, nowIso } from "./lane.js";
 import { profilesDir } from "./paths.js";
 import { listLanes, updateRegistry } from "./registry.js";
 /** Retain only the exact site host; never store URL paths, queries or credentials. */
@@ -54,13 +54,13 @@ export async function rememberSavedLogin(laneId, input) {
 export async function findSavedLogins(input) {
     if (!input.cwd.trim())
         throw new Error("workspace cwd must not be blank");
-    const cwd = normalizeCwd(input.cwd);
+    const cwd = cwdIdentity(input.cwd);
     const website = normalizeLoginWebsite(input.website);
     const accountLabel = accountNickname(input.accountLabel);
     const lanes = [];
     const unavailableProfileIds = [];
     for (const lane of await listLanes()) {
-        if (normalizeCwd(lane.cwd) !== cwd || !(lane.savedLogins ?? []).some(l => l.website === website && (!accountLabel || l.accountLabel === accountLabel)))
+        if (cwdIdentity(lane.cwd) !== cwd || !(lane.savedLogins ?? []).some(l => l.website === website && (!accountLabel || l.accountLabel === accountLabel)))
             continue;
         lanes.push(lane);
         try {
