@@ -1,15 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   MANAGED_SKILL_MARKER,
+  SKILL_MANIFEST,
+  appDirFor,
   installAgentSkill,
   portpilotSkillSourceDir,
 } from "../src/cli/install-skill.js";
+
+const require = createRequire(import.meta.url);
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "portpilot-skill-"));
@@ -18,6 +24,17 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+/** A minimal managed skill bundle, optionally with extra files. */
+async function writeBundle(dir: string, extra: Record<string, string> = {}): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "SKILL.md"), `---\nname: portpilot\n---\n${MANAGED_SKILL_MARKER}\nbody\n`, "utf8");
+  for (const [file, content] of Object.entries(extra)) {
+    await mkdir(join(dir, file, ".."), { recursive: true });
+    await writeFile(join(dir, file), content, "utf8");
+  }
+  return dir;
 }
 
 test("canonical PortPilot skill enforces task-scoped MCP-only browser control", async () => {
@@ -29,18 +46,22 @@ test("canonical PortPilot skill enforces task-scoped MCP-only browser control", 
   assert.match(skill, /Carry out the supplied browser task.*connected PortPilot MCP tools/i);
   assert.match(skill, /If it is unavailable.*stop instead of substituting/i);
   assert.match(skill, /absolute native project path as `cwd`/i);
-  assert.match(skill, /one unique, stable `sessionId`/i);
+  assert.match(skill, /one `sessionId` for this whole task/i);
+  assert.match(skill, /lowercase letters, digits and hyphens, at most 40 characters/i);
   assert.match(skill, /find_saved_login/);
   assert.match(skill, /exact immutable `laneId`/i);
   assert.match(skill, /page_newtab/);
+  assert.match(skill, /pass `tab` on every page call/i);
+  assert.match(skill, /already running.*navigate with `page_goto`/is);
   assert.match(skill, /Omit `browser` unless the user chose one/i);
   assert.match(skill, /Never use a personal browser profile/i);
-  assert.match(skill, /`release_lane` only clears bookkeeping and does not close the browser/i);
+  assert.match(skill, /`release_lane` only clears bookkeeping; it never closes the browser/i);
+  assert.match(skill, /call `close_browser` with its `laneId` first/i);
   assert.match(metadata, /display_name: "PortPilot"/);
   assert.match(metadata, /allow_implicit_invocation: false/);
 });
 
-test("installer writes the canonical skill to Codex and Claude personal skill locations", async () => {
+test("installer writes the canonical skill and a manifest to Codex and Claude skill locations", async () => {
   await withTempDir(async (home) => {
     const codex = await installAgentSkill("codex", { homeDir: home });
     const claude = await installAgentSkill("claude", { homeDir: home });
@@ -54,74 +75,167 @@ test("installer writes the canonical skill to Codex and Claude personal skill lo
     assert.equal(await readFile(join(codex.skillDir, "SKILL.md"), "utf8"), sourceSkill);
     assert.equal(await readFile(join(claude.skillDir, "SKILL.md"), "utf8"), sourceSkill);
     assert.match(await readFile(join(codex.skillDir, "agents", "openai.yaml"), "utf8"), /PortPilot/);
+    const manifest = JSON.parse(await readFile(join(codex.skillDir, SKILL_MANIFEST), "utf8")) as { files: Record<string, string> };
+    assert.ok(manifest.files["SKILL.md"] && manifest.files["agents/openai.yaml"], "manifest lists every installed file");
   });
 });
 
 test("installer honors explicit Codex and Claude config roots", async () => {
   await withTempDir(async (dir) => {
     const codexHome = join(dir, "codex-home");
-    const claudeConfigDir = join(dir, "claude-home");
-
+    const claudeHome = join(dir, "claude-config");
     const codex = await installAgentSkill("codex", { codexHome });
-    const claude = await installAgentSkill("claude", { claudeConfigDir });
-
+    const claude = await installAgentSkill("claude", { claudeConfigDir: claudeHome });
     assert.equal(codex.skillDir, join(codexHome, "skills", "portpilot"));
-    assert.equal(claude.skillDir, join(claudeConfigDir, "skills", "portpilot"));
+    assert.equal(claude.skillDir, join(claudeHome, "skills", "portpilot"));
   });
 });
 
-test("installer is idempotent when the managed skill already matches", async () => {
-  await withTempDir(async (home) => {
-    await installAgentSkill("codex", { homeDir: home });
-    const second = await installAgentSkill("codex", { homeDir: home });
+test("a blank CODEX_HOME or CLAUDE_CONFIG_DIR counts as unset instead of the current folder", () => {
+  const env = { CODEX_HOME: "  ", CLAUDE_CONFIG_DIR: "" };
+  assert.match(appDirFor("codex", {}, env), /[\\/]\.codex$/);
+  assert.match(appDirFor("claude", {}, env), /[\\/]\.claude$/);
+});
 
-    assert.equal(second.action, "already-installed");
-    assert.equal(second.backupPath, null);
+test("installer is idempotent when the managed skill already matches, with no backup", async () => {
+  await withTempDir(async (home) => {
+    await installAgentSkill("claude", { homeDir: home });
+    const again = await installAgentSkill("claude", { homeDir: home });
+    assert.equal(again.action, "already-installed");
+    assert.equal(again.backupPath, null);
+    assert.deepEqual((await readdir(join(home, ".claude", "skills"))).sort(), ["portpilot"]);
   });
 });
 
 test("installer refuses to overwrite an unmanaged same-name skill", async () => {
   await withTempDir(async (home) => {
-    const skillDir = join(home, ".codex", "skills", "portpilot");
+    const skillDir = join(home, ".claude", "skills", "portpilot");
     await mkdir(skillDir, { recursive: true });
-    const personal = "---\nname: portpilot\ndescription: My personal skill\n---\nDo my workflow.\n";
-    await writeFile(join(skillDir, "SKILL.md"), personal, "utf8");
-
-    const result = await installAgentSkill("codex", { homeDir: home });
-
+    await writeFile(join(skillDir, "SKILL.md"), "my own skill\n", "utf8");
+    const result = await installAgentSkill("claude", { homeDir: home });
     assert.equal(result.action, "conflict");
-    assert.match(result.reason ?? "", /not managed by PortPilot/i);
-    assert.equal(await readFile(join(skillDir, "SKILL.md"), "utf8"), personal);
+    assert.equal(await readFile(join(skillDir, "SKILL.md"), "utf8"), "my own skill\n");
   });
 });
 
-test("installer updates an older managed skill and preserves a backup", async () => {
+test("a folder whose SKILL.md was renamed away is left alone, not wiped", async () => {
+  await withTempDir(async (home) => {
+    const first = await installAgentSkill("codex", { homeDir: home });
+    await writeFile(join(first.skillDir, "SKILL.md.off"), await readFile(join(first.skillDir, "SKILL.md")));
+    await rm(join(first.skillDir, "SKILL.md"));
+    await writeFile(join(first.skillDir, "notes.md"), "mine\n", "utf8");
+
+    const result = await installAgentSkill("codex", { homeDir: home });
+    assert.equal(result.action, "conflict");
+    assert.equal(await readFile(join(first.skillDir, "notes.md"), "utf8"), "mine\n");
+    assert.ok(existsSync(join(first.skillDir, "SKILL.md.off")));
+    assert.ok(!existsSync(join(first.skillDir, "SKILL.md")), "the skill stays switched off");
+  });
+});
+
+test("a folder holding only OS clutter counts as empty", async () => {
+  await withTempDir(async (home) => {
+    const skillDir = join(home, ".claude", "skills", "portpilot");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(join(skillDir, ".DS_Store"), "x", "utf8");
+    assert.equal((await installAgentSkill("claude", { homeDir: home })).action, "installed");
+    assert.equal((await installAgentSkill("claude", { homeDir: home })).action, "already-installed");
+  });
+});
+
+test("a linked skill folder is never written through", async (t) => {
+  await withTempDir(async (home) => {
+    const checkout = await writeBundle(join(home, "my-checkout"), { "draft.md": "uncommitted\n" });
+    const skills = join(home, ".claude", "skills");
+    await mkdir(skills, { recursive: true });
+    try {
+      await symlink(checkout, join(skills, "portpilot"), process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      t.skip("cannot create a directory link here");
+      return;
+    }
+    const result = await installAgentSkill("claude", { homeDir: home });
+    assert.equal(result.action, "conflict");
+    assert.match(result.reason ?? "", /link/i);
+    assert.equal(await readFile(join(checkout, "draft.md"), "utf8"), "uncommitted\n");
+    assert.match(await readFile(join(checkout, "SKILL.md"), "utf8"), /body/);
+  });
+});
+
+test("upgrades keep files a user added and back up only edited PortPilot files", async () => {
+  await withTempDir(async (home) => {
+    const v1 = await writeBundle(join(home, "bundle-v1"), { "agents/openai.yaml": "v1\n" });
+    const first = await installAgentSkill("codex", { homeDir: home, sourceDir: v1 });
+    await writeFile(join(first.skillDir, "my-notes.md"), "keep me\n", "utf8");
+    await writeFile(join(first.skillDir, "agents", "openai.yaml"), "edited by me\n", "utf8");
+
+    const v2 = await writeBundle(join(home, "bundle-v2"), { "agents/openai.yaml": "v2\n" });
+    const result = await installAgentSkill("codex", { homeDir: home, sourceDir: v2 });
+
+    assert.equal(result.action, "updated");
+    assert.equal(await readFile(join(first.skillDir, "my-notes.md"), "utf8"), "keep me\n");
+    assert.equal(await readFile(join(first.skillDir, "agents", "openai.yaml"), "utf8"), "v2\n");
+    assert.ok(result.backupPath, "the user's edit was backed up");
+    assert.equal(await readFile(join(result.backupPath!, "agents", "openai.yaml"), "utf8"), "edited by me\n");
+    assert.ok(!existsSync(join(result.backupPath!, "SKILL.md")), "an unedited file needs no backup");
+  });
+});
+
+test("a file PortPilot installed and later dropped is removed; unknown files are not", async () => {
+  await withTempDir(async (home) => {
+    const v1 = await writeBundle(join(home, "bundle-v1"), { "agents/obsolete.yaml": "old\n" });
+    const first = await installAgentSkill("codex", { homeDir: home, sourceDir: v1 });
+    await writeFile(join(first.skillDir, "agents", "mine.yaml"), "mine\n", "utf8");
+
+    const v2 = await writeBundle(join(home, "bundle-v2"));
+    const result = await installAgentSkill("codex", { homeDir: home, sourceDir: v2 });
+
+    assert.equal(result.action, "updated");
+    assert.ok(!existsSync(join(first.skillDir, "agents", "obsolete.yaml")));
+    assert.equal(await readFile(join(first.skillDir, "agents", "mine.yaml"), "utf8"), "mine\n");
+    assert.equal(result.backupPath, null, "the dropped file was unedited, so nothing needed a backup");
+  });
+});
+
+test("an older managed copy without a manifest is upgraded without deleting anything", async () => {
   await withTempDir(async (home) => {
     const skillDir = join(home, ".claude", "skills", "portpilot");
     await mkdir(skillDir, { recursive: true });
     await writeFile(join(skillDir, "SKILL.md"), `${MANAGED_SKILL_MARKER}\nold managed content\n`, "utf8");
+    await writeFile(join(skillDir, "extra.md"), "unknown history\n", "utf8");
 
     const result = await installAgentSkill("claude", { homeDir: home });
 
     assert.equal(result.action, "updated");
     assert.ok(result.backupPath);
-    assert.match(await readFile(result.backupPath!, "utf8"), /old managed content/);
+    assert.match(await readFile(join(result.backupPath!, "SKILL.md"), "utf8"), /old managed content/);
+    assert.equal(await readFile(join(skillDir, "extra.md"), "utf8"), "unknown history\n");
     assert.match(await readFile(join(skillDir, "SKILL.md"), "utf8"), /name: portpilot/);
     assert.equal((await installAgentSkill("claude", { homeDir: home })).action, "already-installed");
   });
 });
 
-test("managed upgrades remove stale files that are no longer canonical", async () => {
+test("old backups are pruned to the newest three", async () => {
   await withTempDir(async (home) => {
-    const first = await installAgentSkill("codex", { homeDir: home });
-    const stale = join(first.skillDir, "agents", "obsolete.yaml");
-    await writeFile(stale, "stale metadata\n", "utf8");
+    const skills = join(home, ".codex", "skills");
+    await installAgentSkill("codex", { homeDir: home });
+    for (let i = 0; i < 4; i++) {
+      await writeFile(join(skills, "portpilot", "SKILL.md"), `${MANAGED_SKILL_MARKER}\nedit ${i}\n`, "utf8");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await installAgentSkill("codex", { homeDir: home });
+    }
+    const backups = (await readdir(skills)).filter((name) => name.startsWith("portpilot.backup-"));
+    assert.equal(backups.length, 3);
+  });
+});
 
-    const result = await installAgentSkill("codex", { homeDir: home });
-
-    assert.equal(result.action, "updated");
-    await assert.rejects(() => readFile(stale, "utf8"), /ENOENT/);
-    assert.equal((await installAgentSkill("codex", { homeDir: home })).action, "already-installed");
+test("onlyExistingApps skips an app that isn't installed and creates nothing", async () => {
+  await withTempDir(async (home) => {
+    const result = await installAgentSkill("codex", { homeDir: home, onlyExistingApps: true });
+    assert.equal(result.action, "skipped");
+    assert.ok(!existsSync(join(home, ".codex")));
+    await mkdir(join(home, ".codex"));
+    assert.equal((await installAgentSkill("codex", { homeDir: home, onlyExistingApps: true })).action, "installed");
   });
 });
 
@@ -139,11 +253,7 @@ test("install-skill CLI installs Codex and Claude integrations into configured r
     const cli = join(process.cwd(), "dist", "src", "cli", "index.js");
     const result = spawnSync(process.execPath, [cli, "install-skill", "all", "--json"], {
       encoding: "utf8",
-      env: {
-        ...process.env,
-        CODEX_HOME: codexHome,
-        CLAUDE_CONFIG_DIR: claudeHome,
-      },
+      env: { ...process.env, CODEX_HOME: codexHome, CLAUDE_CONFIG_DIR: claudeHome },
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -159,6 +269,50 @@ test("install-skill CLI installs Codex and Claude integrations into configured r
   });
 });
 
+test("install-skill --only-existing leaves missing app folders alone", async () => {
+  await withTempDir(async (dir) => {
+    const cli = join(process.cwd(), "dist", "src", "cli", "index.js");
+    const result = spawnSync(process.execPath, [cli, "install-skill", "all", "--only-existing", "--json"], {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_HOME: join(dir, "codex"), CLAUDE_CONFIG_DIR: join(dir, "claude") },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout) as { results: Array<{ action: string }> };
+    assert.ok(output.results.every((entry) => entry.action === "skipped"));
+    assert.ok(!existsSync(join(dir, "codex")) && !existsSync(join(dir, "claude")));
+  });
+});
+
+test("postinstall skips the skill when asked, under sudo, and for dependency installs", async () => {
+  const previous = { ...process.env };
+  process.env.PAAT_POSTINSTALL_NO_RUN = "1";
+  try {
+    const postinstall = require(join(process.cwd(), "scripts", "postinstall.cjs")) as {
+      shouldSkip(): string | null;
+      skillSkipReason(env: NodeJS.ProcessEnv): string | null;
+    };
+    assert.match(postinstall.skillSkipReason({ PAAT_SKIP_INSTALL_SKILL: "1" }) ?? "", /PAAT_SKIP_INSTALL_SKILL/);
+    assert.match(postinstall.skillSkipReason({ PAAT_SKIP_INSTALL_MCP: "1" }) ?? "", /PAAT_SKIP_INSTALL_MCP/);
+    assert.match(postinstall.skillSkipReason({ SUDO_UID: "501" }) ?? "", /sudo/);
+    assert.equal(postinstall.skillSkipReason({}), null);
+
+    await withTempDir(async (project) => {
+      await writeFile(join(project, "package.json"), JSON.stringify({ name: "some-app" }), "utf8");
+      for (const key of ["PAAT_SKIP_POSTINSTALL", "CI", "PAAT_PREPARE_RUNNING", "npm_config_global"]) delete process.env[key];
+      process.env.INIT_CWD = project;
+      assert.equal(postinstall.shouldSkip(), "transitive install");
+      process.env.npm_config_global = "true";
+      assert.equal(postinstall.shouldSkip(), null, "a global install runs");
+      delete process.env.npm_config_global;
+      process.env.INIT_CWD = process.cwd();
+      assert.equal(postinstall.shouldSkip(), null, "installing inside the PortPilot checkout runs");
+    });
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
+  }
+});
+
 test("CLI help and npm lifecycle expose the PortPilot skill installer", async () => {
   const cli = join(process.cwd(), "dist", "src", "cli", "index.js");
   const help = spawnSync(process.execPath, [cli, "help"], { encoding: "utf8" });
@@ -167,11 +321,9 @@ test("CLI help and npm lifecycle expose the PortPilot skill installer", async ()
   assert.match(help.stdout, /\/skill:Portpilot/);
   assert.match(help.stdout, /\$portpilot/);
   assert.match(help.stdout, /\/portpilot/);
-  assert.match(help.stdout, /Claude Code.*Desktop Code tab/i);
 
   const postinstall = await readFile(join(process.cwd(), "scripts", "postinstall.cjs"), "utf8");
-  assert.match(postinstall, /run\(cliJs, \["install-skill"\]\)/);
-  assert.match(postinstall, /Codex and Claude Code/);
+  assert.match(postinstall, /run\(cliJs, \["install-skill", "all", "--only-existing"\]\)/);
 
   const pkg = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as { files?: string[] };
   assert.ok(pkg.files?.includes("skills/portpilot"), "npm package must include the canonical skill asset");

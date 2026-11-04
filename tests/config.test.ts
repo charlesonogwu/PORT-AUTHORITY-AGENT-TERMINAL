@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { withTempHome } from "./helpers.js";
+import { DEFAULT_APP_PORT_RANGE } from "../src/core/lane.js";
 import {
   CapacityError,
   configForMachine,
@@ -30,6 +33,30 @@ test("saveConfig + loadConfig roundtrip", async () => {
     const cfg = await loadConfig();
     assert.equal(cfg.maxActiveLanes, 7);
     assert.equal(cfg.warnAtActiveLanes, 5);
+  });
+});
+
+test("config refuses out-of-range ports instead of persisting unusable values", async () => {
+  await withTempHome(async () => {
+    await assert.rejects(
+      saveConfig({
+        version: 1,
+        chromeDebugRange: { start: 70_000, end: 70_001 },
+      }),
+      /port range/i,
+    );
+  });
+});
+
+test("a hand-edited config with an impossible range falls back to the default instead of breaking PortPilot", async () => {
+  await withTempHome(async (home) => {
+    await writeFile(
+      join(home, "config.json"),
+      JSON.stringify({ version: 1, appPortRange: { start: 3000, end: 70_000 }, chromeDebugRange: { start: 9400, end: 9410 } }),
+    );
+    const cfg = await loadConfig();
+    assert.deepEqual(cfg.appPortRange, DEFAULT_APP_PORT_RANGE);
+    assert.deepEqual(cfg.chromeDebugRange, { start: 9400, end: 9410 }, "valid ranges are kept");
   });
 });
 

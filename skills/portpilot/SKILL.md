@@ -13,7 +13,9 @@ If the invocation contains no task, ask what the user wants PortPilot to do.
 
 ## Task identity
 
-Use the absolute native project path as `cwd`, your integration's owner name, and one unique, stable `sessionId` for this task. Prefer a stable host thread/task ID; if it is long, hash the complete ID into a short identifier. Keep the returned immutable `laneId` and use it for subsequent operations. A different task gets a different session. Never copy an unrelated lane's session or use `default`.
+Use the absolute native project path as `cwd`, your integration's owner name, and one `sessionId` for this whole task, so this task gets its own browser and every call reuses it. Make the sessionId from lowercase letters, digits and hyphens, at most 40 characters, starting with something stable for the task, for example `t3-` plus the first 8 characters of the thread ID plus a short topic (`t3-9f3a1c2b-ebay-search`). Write it down and pass exactly the same value on every call. A different task gets a different sessionId; never use `default` or another task's sessionId. Keep the returned immutable `laneId` and use it for subsequent operations.
+
+PortPilot's general tool descriptions warn that every extra sessionId starts another browser. That is about extra browsers within one task: inside this task, keep using this one sessionId and open more pages with `page_newtab`.
 
 Owners include `codex`, `claude`, `cursor`, `opencode`, and `gemini`; use `agent` for Grok, with a stable `grok-` session prefix. Do not put task suffixes in `owner`.
 
@@ -23,8 +25,14 @@ For an explicitly requested saved website login, call `find_saved_login` with th
 
 Otherwise call `open` with this task's owner, cwd, sessionId, and requested URL. Omit `browser` unless the user chose one. Use visible mode when the user needs to interact, and background/headless mode when appropriate for the task. Never use a personal browser profile.
 
+If `open` reports that the browser was already running, its `url` and `mode` were not applied: navigate with `page_goto` instead.
+
 ## Complete and verify
 
-Use PortPilot's `page_tabs`, `page_goto`, `page_newtab`, `page_text`, `page_eval`, `page_click`, `page_fill`, and `page_screenshot` as needed. Prefer new tabs inside this task's browser to extra browser processes. Verify navigation and actions from returned page state before reporting success.
+Use PortPilot's `page_tabs`, `page_goto`, `page_newtab`, `page_text`, `page_eval`, `page_click`, `page_fill`, and `page_screenshot` as needed. Prefer new tabs inside this task's browser to extra browser processes. Page tools act on the first tab unless you pass `tab` (an id or index from `page_tabs` or `page_newtab`), so pass `tab` on every page call once the browser has more than one tab; saved-login browsers are shared and may already have other tabs. Verify navigation and actions from returned page state before reporting success.
 
-Keep browser scope and permissions within the user's request. Invoking this skill does not authorize unrelated external actions or create a new agent thread. `release_lane` only clears bookkeeping and does not close the browser. Close a browser only when requested or when cleaning up a temporary browser you created for verification, after rechecking its exact lane. Preserve saved-login browsers the user expects to revisit.
+Keep browser scope and permissions within the user's request. Invoking this skill does not authorize unrelated external actions or create a new agent thread.
+
+## Finish
+
+`release_lane` only clears bookkeeping; it never closes the browser, and after it PortPilot can no longer find that browser to close it. To close a browser, call `close_browser` with its `laneId` first, and only when the user asked or when it is a temporary browser you created for this task. Leave saved-login browsers the user expects to revisit open.

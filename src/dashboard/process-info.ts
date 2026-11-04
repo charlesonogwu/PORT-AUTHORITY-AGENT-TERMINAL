@@ -16,6 +16,7 @@
 
 import { spawn } from "node:child_process";
 import process from "node:process";
+import type { PowerShellRunner } from "../core/powershell-host.js";
 
 export interface ProcessRecord {
   pid: number;
@@ -85,9 +86,20 @@ interface RawSnapshot {
  * never rejects — because partial data is more useful than no data when
  * computing the dashboard snapshot.
  */
-export async function collectProcessSnapshot(opts: { timeoutMs?: number } = {}): Promise<ProcessSnapshot> {
+export async function collectProcessSnapshot(opts: { timeoutMs?: number; powershell?: PowerShellRunner } = {}): Promise<ProcessSnapshot> {
   if (process.platform !== "win32") return EMPTY_PROCESS_SNAPSHOT;
   const timeoutMs = opts.timeoutMs ?? 4000;
+
+  // The dashboard's helper passes its long-lived PowerShell session, so a
+  // refresh costs one query instead of a whole powershell.exe start.
+  if (opts.powershell) {
+    try {
+      const result = await opts.powershell.run(COLLECT_SCRIPT, { timeoutMs });
+      return parseCollectorOutput(result.stdout);
+    } catch {
+      return EMPTY_PROCESS_SNAPSHOT;
+    }
+  }
 
   return new Promise<ProcessSnapshot>((resolve) => {
     let settled = false;
@@ -125,16 +137,20 @@ export async function collectProcessSnapshot(opts: { timeoutMs?: number } = {}):
 
     child.on("close", () => {
       clearTimeout(timer);
-      try {
-        const trimmed = stdout.trim();
-        if (!trimmed) return settle(EMPTY_PROCESS_SNAPSHOT);
-        const raw = JSON.parse(trimmed) as RawSnapshot;
-        settle(parseSnapshot(raw));
-      } catch {
-        settle(EMPTY_PROCESS_SNAPSHOT);
-      }
+      settle(parseCollectorOutput(stdout));
     });
   });
+}
+
+/** Parse the collector's JSON. Partial data beats no data, so bad output yields an empty snapshot. */
+function parseCollectorOutput(stdout: string): ProcessSnapshot {
+  const trimmed = stdout.trim();
+  if (!trimmed) return EMPTY_PROCESS_SNAPSHOT;
+  try {
+    return parseSnapshot(JSON.parse(trimmed) as RawSnapshot);
+  } catch {
+    return EMPTY_PROCESS_SNAPSHOT;
+  }
 }
 
 /**

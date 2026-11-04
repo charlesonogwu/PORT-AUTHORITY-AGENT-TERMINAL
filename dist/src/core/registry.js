@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { REGISTRY_VERSION, isStale, laneSessionId, canonicalizeOwner, normalizeCwd, nowIso, } from "./lane.js";
+import { REGISTRY_VERSION, isStale, laneSessionId, canonicalizeOwner, cwdIdentity, normalizeCwd, nowIso, laneBrowser, } from "./lane.js";
 import { lockPath, registryPath } from "./paths.js";
 import { atomicWriteJson, withLock } from "./lockfile.js";
 const EMPTY = { version: REGISTRY_VERSION, lanes: [] };
@@ -25,22 +25,32 @@ export async function listLanes() {
     const reg = await readRegistry();
     return reg.lanes;
 }
+export function normalizeProfilePurpose(value) {
+    return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+}
 export function filterLanes(lanes, filter) {
     const wantStatuses = Array.isArray(filter.status)
         ? filter.status
         : filter.status
             ? [filter.status]
             : null;
-    const cwd = filter.cwd ? normalizeCwd(filter.cwd) : null;
+    const cwd = filter.cwd ? cwdIdentity(filter.cwd) : null;
     const wantSession = typeof filter.sessionId === "string" ? filter.sessionId : null;
     const owner = filter.owner ? canonicalizeOwner(filter.owner).canonical : null;
     return lanes.filter((lane) => {
         if (owner && canonicalizeOwner(lane.owner).canonical !== owner)
             return false;
-        if (cwd && normalizeCwd(lane.cwd) !== cwd)
+        if (cwd && cwdIdentity(lane.cwd) !== cwd)
             return false;
         if (wantSession !== null && laneSessionId(lane) !== wantSession)
             return false;
+        if (filter.browser && laneBrowser(lane) !== filter.browser)
+            return false;
+        if (filter.purpose) {
+            const purpose = normalizeProfilePurpose(filter.purpose);
+            if (!purpose || !(lane.profilePurposes ?? []).some((item) => normalizeProfilePurpose(item) === purpose))
+                return false;
+        }
         if (wantStatuses && !wantStatuses.includes(lane.status))
             return false;
         if (!filter.includeReleased && !wantStatuses && lane.status === "released")
@@ -48,9 +58,66 @@ export function filterLanes(lanes, filter) {
         return true;
     });
 }
+export async function rememberLaneProfile(laneId, input) {
+    let updated;
+    const label = input.label?.trim().slice(0, 80);
+    const purposes = [...new Set((input.purposes ?? []).map(normalizeProfilePurpose).filter(Boolean))].sort();
+    await updateRegistry((lanes) => lanes.map((lane) => {
+        if (lane.id !== laneId)
+            return lane;
+        updated = {
+            ...lane,
+            ...(label ? { profileLabel: label } : {}),
+            ...(purposes.length ? { profilePurposes: purposes } : {}),
+            lastSeen: nowIso(),
+        };
+        return updated;
+    }));
+    return updated;
+}
 export async function findLane(filter) {
     const lanes = await listLanes();
     return filterLanes(lanes, filter)[0];
+}
+export class AmbiguousLaneError extends Error {
+    candidateIds;
+    candidates;
+    constructor(candidates) {
+        const ordered = [...candidates].sort((a, b) => a.id.localeCompare(b.id));
+        const details = ordered.map((lane) => `${lane.id} (${lane.chromeProfileDir})`).join(", ");
+        super(`ambiguous lane selector; use --lane-id with one of: ${details}`);
+        this.name = "AmbiguousLaneError";
+        this.candidateIds = ordered.map((lane) => lane.id);
+        this.candidates = ordered.map((lane) => ({ id: lane.id, profileDir: lane.chromeProfileDir }));
+    }
+}
+function stableLaneOrder(a, b) {
+    const created = a.createdAt.localeCompare(b.createdAt);
+    return created !== 0 ? created : a.id.localeCompare(b.id);
+}
+/**
+ * Resolve either one immutable lane id or the legacy owner/cwd/session tuple.
+ * Tuple lookup never guesses across distinct browser-profile identities.
+ */
+export function resolveLaneSelectorFrom(lanes, selector) {
+    if (selector.laneId) {
+        const exact = lanes.find((lane) => lane.id === selector.laneId);
+        if (!exact)
+            return undefined;
+        if (!selector.includeReleased && exact.status === "released")
+            return undefined;
+        return exact;
+    }
+    const matches = filterLanes(lanes, selector);
+    if (matches.length <= 1)
+        return matches[0];
+    const identities = new Set(matches.map((lane) => `${laneBrowser(lane)}\0${normalizeCwd(lane.chromeProfileDir)}`));
+    if (identities.size > 1)
+        throw new AmbiguousLaneError(matches);
+    return [...matches].sort(stableLaneOrder)[0];
+}
+export async function resolveLaneSelector(selector) {
+    return resolveLaneSelectorFrom(await listLanes(), selector);
 }
 /**
  * Read-modify-write the registry while holding the lockfile. The updater
@@ -64,7 +131,7 @@ export async function updateRegistry(updater) {
         const file = { version: REGISTRY_VERSION, lanes: next };
         await atomicWriteJson(registryPath(), file);
         return next;
-    });
+    }, { timeoutMs: 30_000, retryMs: 25, staleMs: 30_000 });
 }
 export async function upsertLane(lane) {
     await updateRegistry((lanes) => {
@@ -82,6 +149,8 @@ export async function removeLane(id) {
     await updateRegistry((lanes) => {
         const next = lanes.filter((l) => {
             if (l.id === id) {
+                if (l.savedLogins?.length)
+                    throw new Error("profile has saved login records; use Erase to delete its profile and associations");
                 removed = true;
                 return false;
             }
@@ -150,6 +219,8 @@ export async function pruneReleasedLanes(opts = {}) {
     const cutoff = opts.all ? Number.POSITIVE_INFINITY : (opts.olderThanMs ?? DEFAULT_PRUNE_AGE_MS);
     const now = Date.now();
     const isCandidate = (lane) => {
+        if (lane.savedLogins?.length)
+            return false;
         if (lane.status !== "released")
             return false;
         if (opts.all)

@@ -31,19 +31,18 @@ import {
   hideChrome,
   killChrome,
   setDefaultBrowser,
-  setHiddenPids,
+  setHiddenTargets,
   unhideChrome,
   type DefaultBrowser,
   type WindowPlacement,
 } from "@/api/client"
 import { cn } from "@/lib/utils"
 
-// 3-second poll cadence balances "live feel" with subprocess cost. Each
-// poll spawns `paat dashboard-snapshot --json` (Node, ~500ms cold start on
-// Windows) so 2s was burning ~25-50% of every poll interval on process
-// spawn alone. 3s keeps the dashboard feeling current while halving that
-// background churn. The poll also auto-pauses when the window is hidden
-// (see useSnapshot) so the cost only applies when the user is looking.
+// 3-second poll cadence keeps the dashboard feeling live. Each poll is one
+// request to the long-lived `paat dashboard-serve` helper, which starts no
+// new processes (previously every poll started two Node processes and three
+// PowerShells). The poll also auto-pauses when the window is hidden (see
+// useSnapshot), and the helper's PowerShell session stops after 30s idle.
 const POLL_MS = 3_000
 const KILL_CONFIRM_MS = 3_000
 
@@ -210,19 +209,19 @@ function useHideEnforcement(
     const api = apiRef.current
     const live = snap?.liveSessions ?? []
     const liveKeys = new Set<string>()
-    const hiddenPids: number[] = []
+    const hiddenSessions: LiveSession[] = []
     for (const s of live) {
       const key = stableKeyOf(s)
       liveKeys.add(key)
       const entry = api.map.get(key)
       if (!entry) continue
-      hiddenPids.push(s.pid)
+      hiddenSessions.push(s)
       // Chrome restarted for a hidden lane (new pid -> new on-screen window):
       // capture the fresh window's placement so a later Unhide restores right.
       // (The watcher already parks it via the pushed pid set below.)
       if (entry.lastPid !== s.pid && seenPidForKey.current.get(key) !== s.pid) {
         seenPidForKey.current.set(key, s.pid)
-        void hideChrome(s.pid)
+        void hideChrome(s)
           .then((res) => {
             if (res.ok) {
               apiRef.current.patchEntry(key, {
@@ -239,7 +238,7 @@ function useHideEnforcement(
     }
 
     // Keep the native watcher's pid set in sync (empty array -> watcher idles).
-    void setHiddenPids(hiddenPids).catch(() => {})
+    void setHiddenTargets(hiddenSessions).catch(() => {})
   }, [snap, hiddenApi.map])
 }
 
@@ -694,6 +693,11 @@ function SessionRow({
         </TableCell>
         <TableCell>
           <div className="font-medium">{s.project}</div>
+          {s.profileLabel && (
+            <div className="truncate text-[11px] text-muted-foreground" title={s.profileLabel}>
+              {s.profileLabel}
+            </div>
+          )}
         </TableCell>
         <TableCell>
           <BrowserCell browser={s.browser} />
@@ -782,9 +786,9 @@ function SessionRow({
                 hidden window back on-screen, and the watcher would re-park it
                 anyway. So once a lane is hidden, the only bring-it-back action
                 is "Unhide" — hide the dead button to avoid the confusion. */}
-            {!hiddenApi.isHidden(s) && <FocusButton pid={s.pid} />}
+            {!hiddenApi.isHidden(s) && <FocusButton session={s} />}
             <HideToggleButton s={s} hiddenApi={hiddenApi} />
-            <KillButton pid={s.pid} onKilled={onKilled} />
+            <KillButton session={s} onKilled={onKilled} />
             <EraseButton s={s} onErased={onKilled} />
           </div>
         </TableCell>
@@ -813,8 +817,51 @@ function ExpandedRow({ s }: { s: LiveSession }) {
         />
         <Field label="browser version" value={s.browserVersion ?? "?"} />
         {s.task && <Field label="task (declared)" value={s.task} />}
+        {s.profilePurposes && s.profilePurposes.length > 0 && (
+          <Field label="saved profile purposes" value={s.profilePurposes.join(", ")} />
+        )}
         {s.appPort && <Field label="app port" mono value={`:${s.appPort}`} />}
-        {s.laneId && <Field label="lane id" mono value={s.laneId} />}
+        {s.laneId && (
+          <div className="space-y-1">
+            <Field label="immutable PPID / lane id" mono value={s.laneId} />
+            {s.savedLogins && s.savedLogins.length > 0 && (
+              <div className="space-y-1 break-words">
+                <div className="text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
+                  Remembered website associations
+                </div>
+                <ul className="space-y-1">
+                  {s.savedLogins.map((login, i) => (
+                    <li key={i}>
+                      {login.website}{login.accountLabel ? ` (${login.accountLabel})` : ""}
+                      <div className="text-[10px] text-muted-foreground">
+                        Historical user confirmation: {login.confirmedAt}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[10px] text-muted-foreground">
+                  Not currently verified. These records do not prove you are still signed in.
+                </p>
+              </div>
+            )}
+            <p className="text-[10px] text-muted-foreground">
+              Close/Kill keeps profile cookies/logins and remembered website associations.
+              Erase deletes both, including profile history, and cannot be undone.
+            </p>
+            <div className="flex items-center gap-2">
+              <code className="break-all text-[10px] text-muted-foreground">{`paat open --lane-id ${s.laneId}`}</code>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-6 px-2 text-[10px]"
+                onClick={() => void navigator.clipboard.writeText(`paat open --lane-id ${s.laneId}`)}
+              >
+                Copy reconnect
+              </Button>
+            </div>
+          </div>
+        )}
         {s.agentInferenceEvidence && s.agentInferenceEvidence.length > 0 && (
           <div>
             <div className="mb-0.5 text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
@@ -963,7 +1010,7 @@ function SourcePill({ session }: { session: LiveSession }) {
  * and the user wants to visually inspect one of them without hunting
  * through the taskbar.
  */
-function FocusButton({ pid }: { pid: number }) {
+function FocusButton({ session }: { session: LiveSession }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [shownAt, setShownAt] = useState<number | null>(null)
@@ -985,7 +1032,7 @@ function FocusButton({ pid }: { pid: number }) {
     setBusy(true)
     setError(null)
     try {
-      const data = await focusChrome(pid)
+      const data = await focusChrome(session)
       if (!data.ok) {
         setError(data.error ?? "focus failed")
       } else {
@@ -996,7 +1043,7 @@ function FocusButton({ pid }: { pid: number }) {
     } finally {
       setBusy(false)
     }
-  }, [busy, pid])
+  }, [busy, session])
 
   if (error) {
     return (
@@ -1013,7 +1060,7 @@ function FocusButton({ pid }: { pid: number }) {
       disabled={busy}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={`Bring Chrome pid ${pid} to the foreground`}
+      title={`Bring ${session.browser ?? "chrome"} pid ${session.pid} to the foreground`}
     >
       {busy ? (
         "showing…"
@@ -1076,10 +1123,10 @@ function HideAllButton({
           if (allHidden) {
             const entry = hiddenApi.getEntry(s)
             hiddenApi.clearHidden(s)
-            const res = await unhideChrome(s.pid, entry?.placement)
+            const res = await unhideChrome(s, entry?.placement)
             if (res.ok) ok++
           } else {
-            const res = await hideChrome(s.pid)
+            const res = await hideChrome(s)
             if (res.ok) {
               hiddenApi.markHidden(s, res.placement)
               ok++
@@ -1185,7 +1232,7 @@ function KillAllButton({
     const responses = await Promise.all(
       sessions.map(async (s) => {
         try {
-          const data = await killChrome(s.pid)
+          const data = await killChrome(s)
           return data.ok
         } catch {
           return false
@@ -1265,10 +1312,10 @@ function HideToggleButton({
         // Clear the persistent flag FIRST, so a concurrent poll tick can't
         // re-park the window we are about to bring back.
         hiddenApi.clearHidden(s)
-        const res = await unhideChrome(s.pid, entry?.placement)
+        const res = await unhideChrome(s, entry?.placement)
         if (!res.ok) setError(res.error ?? "unhide failed")
       } else {
-        const res = await hideChrome(s.pid)
+        const res = await hideChrome(s)
         if (!res.ok) setError(res.error ?? "hide failed")
         else hiddenApi.markHidden(s, res.placement)
       }
@@ -1311,7 +1358,13 @@ function HideToggleButton({
   )
 }
 
-function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
+function KillButton({
+  session,
+  onKilled,
+}: {
+  session: LiveSession
+  onKilled: () => void
+}) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1336,7 +1389,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
     setBusy(true)
     setError(null)
     try {
-      const data = await killChrome(pid)
+      const data = await killChrome(session)
       if (!data.ok) {
         setError(data.error ?? "unknown error")
         setBusy(false)
@@ -1349,7 +1402,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
       setBusy(false)
       setConfirming(false)
     }
-  }, [busy, confirming, pid, onKilled, reset])
+  }, [busy, confirming, session, onKilled, reset])
 
   if (error) {
     return (
@@ -1366,7 +1419,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
       disabled={busy}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={`Terminate Chrome process pid ${pid}`}
+      title={`Terminate ${session.browser ?? "chrome"} process pid ${session.pid}. Keeps profile cookies/logins and remembered website associations.`}
     >
       {busy ? (
         "killing…"
@@ -1412,7 +1465,7 @@ function EraseButton({ s, onErased }: { s: LiveSession; onErased: () => void }) 
     setBusy(true)
     setError(null)
     try {
-      const data = await eraseChrome(s.pid, s.chromeProfileDir, s.laneId)
+      const data = await eraseChrome(s)
       if (!data.ok) {
         setError(data.error ?? "unknown error")
         setBusy(false)
@@ -1442,12 +1495,12 @@ function EraseButton({ s, onErased }: { s: LiveSession; onErased: () => void }) 
       disabled={busy}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title="Erase this session's saved logins, cookies & history. Closes Chrome and cannot be undone."
+      title="Erase deletes profile cookies/logins, history AND remembered website associations. Closes the browser and cannot be undone. Close/Kill keeps both profile data and remembered associations."
     >
       {busy ? (
         "erasing…"
       ) : confirming ? (
-        "Erase all data?"
+        "Erase logins & associations?"
       ) : (
         <>
           <Eraser className="size-3" />
@@ -1495,6 +1548,22 @@ export function App() {
         )}
         {snap && (
           <>
+            {error && (
+              <Alert variant="destructive" className="mb-6">
+                <AlertTriangle className="size-4" />
+                <AlertTitle>Refresh failed. Showing the last good view</AlertTitle>
+                <AlertDescription className="mt-1 font-mono text-[11px]">
+                  {error}
+                </AlertDescription>
+              </Alert>
+            )}
+            {(snap.warnings?.length ?? 0) > 0 && (
+              <Alert variant="destructive" className="mb-6">
+                <AlertTriangle className="size-4" />
+                <AlertTitle>PortPilot needs attention</AlertTitle>
+                <AlertDescription>{snap.warnings!.join(" ")}</AlertDescription>
+              </Alert>
+            )}
             <ConflictsBanner snap={snap} />
             <div className="mb-3 flex items-center justify-between">
               <SectionLabel className="mb-0">Live Chrome sessions</SectionLabel>

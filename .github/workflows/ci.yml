@@ -123,6 +123,10 @@ jobs:
       - name: Build dashboard
         run: node scripts/build-dashboard-tauri.cjs --strict
 
+      - name: Test Windows console suppression and job breakaway
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path gui/src-tauri/Cargo.toml
+
       - name: Verify bin/ artifact exists
         shell: bash
         run: |

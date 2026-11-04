@@ -5,6 +5,8 @@
  * a Chrome profile directory, and metadata identifying who owns it.
  */
 export type LaneStatus = "reserved" | "active" | "stale" | "released";
+/** Browser-process state, separate from the lane's allocation status. */
+export type BrowserLifecycleState = "starting" | "active" | "disconnected" | "recoverable" | "crashed" | "closed";
 /**
  * Which browser backend a lane launches/coordinates.
  *
@@ -37,6 +39,16 @@ export interface Lane {
      */
     sessionId: string;
     task?: string;
+    /** Historical user confirmation only; never proof of current authentication. */
+    savedLogins?: {
+        website: string;
+        confirmedAt: string;
+        accountLabel?: string;
+    }[];
+    /** User-facing name for the intended saved browser account/profile. */
+    profileLabel?: string;
+    /** Normalized purpose tags used to rediscover this PPID across agents. */
+    profilePurposes?: string[];
     appPort?: number;
     /**
      * Remote-debugging port. For Chrome lanes this is the CDP port; for Firefox
@@ -54,6 +66,14 @@ export interface Lane {
     createdAt: string;
     lastSeen: string;
     pid?: number;
+    /** Verified browser root pid. `pid` remains for registry compatibility. */
+    browserPid?: number;
+    /** Supervisor instance that last verified or launched the browser. */
+    supervisorId?: string;
+    /** Browser process lifecycle, independent of lane reservation status. */
+    browserState?: BrowserLifecycleState;
+    /** Time the supervisor launched or first verified this browser identity. */
+    browserStartedAt?: string;
     notes?: string;
 }
 /**
@@ -71,6 +91,10 @@ export interface PortRange {
     start: number;
     end: number;
 }
+export declare class PortRangeError extends Error {
+    constructor(label: string, range: PortRange);
+}
+export declare function validatePortRange(range: PortRange, label?: string): PortRange;
 export declare const DEFAULT_CHROME_DEBUG_RANGE: PortRange;
 export declare const DEFAULT_APP_PORT_RANGE: PortRange;
 /**
@@ -112,4 +136,10 @@ export declare function laneSessionId(lane: {
     sessionId?: string;
 }): string;
 export declare function normalizeCwd(cwd: string): string;
+/** Stable comparison key for lane identity. Windows paths are resolved,
+ * separator-normalized, stripped of the `\\?\` long-path prefix, and
+ * case-folded because NTFS paths are normally case-insensitive. The stored
+ * `cwd` remains human-readable via normalizeCwd. Junctions and symlinks are
+ * not resolved: a link and its target are still different lanes. */
+export declare function cwdIdentity(cwd: string, platform?: NodeJS.Platform): string;
 export declare function isStale(lane: Lane, now?: number): boolean;

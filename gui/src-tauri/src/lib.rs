@@ -10,14 +10,16 @@ mod cli;
 mod commands;
 mod hide_watcher;
 mod paths;
+mod snapshot_worker;
+mod target;
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Shared set of pids the real-time watcher keeps off-screen.
-    let hidden_pids: hide_watcher::HiddenPids = Arc::new(Mutex::new(HashSet::new()));
+    let hidden_pids: hide_watcher::HiddenPids = Arc::new(Mutex::new(HashMap::new()));
 
     tauri::Builder::default()
         // Single-instance plugin: a second `paat-dashboard.exe` invocation
@@ -35,6 +37,9 @@ pub fn run() {
             // Start the real-time hide watcher: keeps every window of every
             // hidden lane off-screen within ~150ms of it appearing.
             hide_watcher::spawn(hidden_pids.clone());
+            // Browser lifetime belongs to this independently launched native
+            // app, never to a disposable MCP stdio worker.
+            cli::record_supervisor_startup(cli::start_supervisor_background());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -48,7 +53,7 @@ pub fn run() {
             commands::focus::focus_chrome,
             commands::focus::hide_chrome,
             commands::focus::unhide_chrome,
-            hide_watcher::set_hidden_pids,
+            hide_watcher::set_hidden_targets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running paat-dashboard");

@@ -2,9 +2,9 @@
 import process from "node:process";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { allocateLane, checkLane, findFreePort } from "../core/allocator.js";
-import { isStale, laneBrowser, normalizeCwd, nowIso } from "../core/lane.js";
-import { DEFAULT_PRUNE_AGE_MS, findLane, listLanes, markStaleLanes, pruneReleasedLanes, removeLane, setLaneStatus, touchLane, updateRegistry } from "../core/registry.js";
+import { adoptProfileLane, allocateLane, checkLane, findFreePort } from "../core/allocator.js";
+import { isStale, laneBrowser, normalizeCwd } from "../core/lane.js";
+import { AmbiguousLaneError, DEFAULT_PRUNE_AGE_MS, filterLanes, listLanes, markStaleLanes, pruneReleasedLanes, rememberLaneProfile, removeLane, resolveLaneSelector, setLaneStatus, touchLane } from "../core/registry.js";
 import { scanPorts, hasSonar } from "../core/scanner.js";
 import { evaluateChromeAttach, launchChromeForLane, resolveChromeMode } from "../core/chrome.js";
 import { assertModeSupported, browserLabel, launchBrowserForLane, normalizeBrowserKind } from "../core/browsers.js";
@@ -16,9 +16,11 @@ import { installShortcut, shortcutStatus, uninstallShortcut } from "./shortcut.j
 import { installMcpFor } from "./install-mcp.js";
 import { installAgentSkill } from "./install-skill.js";
 import { formatMissingDependencyMessage, isMissingDependencyError, missingDependencyName } from "./mcp-preflight.js";
-import { flagBool, flagString, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
+import { flagBool, flagString, flagStrings, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
 import { formatLanesTable, formatReserveBlock } from "./format.js";
 import { HELP } from "./help.js";
+import { launchPersistentBrowser } from "../supervisor/routing.js";
+import { rememberSavedLogin, findSavedLogins } from "../core/saved-logins.js";
 function fail(ctx, message, code = 1) {
     if (ctx.json)
         ctx.stdout.write(JSON.stringify({ ok: false, error: message }) + "\n");
@@ -38,10 +40,46 @@ function requireOwnerCwd(ctx) {
         fail(ctx, "missing required --cwd");
     return { owner: owner, cwd: normalizeCwd(cwd) };
 }
+async function selectedLane(ctx, includeReleased = false) {
+    const laneId = flagString(ctx.args, "lane-id");
+    try {
+        if (laneId) {
+            const lane = await resolveLaneSelector({ laneId, includeReleased });
+            if (!lane)
+                fail(ctx, `no lane found for immutable PPID ${laneId}`, 2);
+            return lane;
+        }
+        const { owner, cwd } = requireOwnerCwd(ctx);
+        const sessionId = flagString(ctx.args, "session");
+        const lane = await resolveLaneSelector({ owner, cwd, ...(sessionId ? { sessionId } : {}), includeReleased });
+        if (!lane)
+            fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}`, 2);
+        return lane;
+    }
+    catch (error) {
+        if (error instanceof AmbiguousLaneError)
+            fail(ctx, error.message, 2);
+        throw error;
+    }
+}
 async function cmdList(ctx) {
-    const lanes = await listLanes();
+    const cwd = flagString(ctx.args, "cwd");
+    if ("cwd" in ctx.args.flags && !cwd?.trim())
+        fail(ctx, "--cwd must not be blank", 2);
+    const purpose = flagString(ctx.args, "purpose");
+    const owner = flagString(ctx.args, "owner");
+    const lanes = filterLanes(await listLanes(), {
+        ...(cwd ? { cwd } : {}),
+        ...(purpose ? { purpose } : {}),
+        ...(owner ? { owner } : {}),
+        includeReleased: true,
+    });
+    const reconnect = lanes.length === 1 ? {
+        command: `portpilot open --lane-id ${lanes[0].id}`,
+        reason: "one exact saved profile matched; reopen this PPID instead of creating a new lane",
+    } : null;
     if (ctx.json) {
-        emit(ctx, { ok: true, lanes });
+        emit(ctx, { ok: true, lanes, reconnect });
         return;
     }
     if (lanes.length === 0) {
@@ -49,6 +87,65 @@ async function cmdList(ctx) {
         return;
     }
     ctx.stdout.write(formatLanesTable(lanes) + "\n");
+    if (reconnect)
+        ctx.stdout.write(`\nReopen exact profile: ${reconnect.command}\n`);
+}
+async function cmdRememberLogin(ctx) {
+    const laneId = flagString(ctx.args, "lane-id");
+    const website = flagString(ctx.args, "website");
+    if (!laneId?.trim())
+        fail(ctx, "missing required --lane-id", 2);
+    if (!website?.trim())
+        fail(ctx, "missing required --website", 2);
+    const confirmed = ctx.args.flags.confirmed === true || ctx.args.flags.confirmed === "true";
+    if (!confirmed)
+        fail(ctx, "--confirmed is required, only after the user confirms this website login", 2);
+    const lane = await rememberSavedLogin(laneId, { website: website, confirmed, accountLabel: flagString(ctx.args, "account-label") });
+    if (ctx.json)
+        emit(ctx, { ok: true, lane });
+    else
+        ctx.stdout.write(`Remembered confirmed website login for PPID ${lane.id}. This does not prove current authentication.\n`);
+}
+async function cmdFindLogin(ctx) {
+    const cwd = flagString(ctx.args, "cwd");
+    const website = flagString(ctx.args, "website");
+    if (!cwd?.trim())
+        fail(ctx, "--cwd is required and must not be blank", 2);
+    if (!website?.trim())
+        fail(ctx, "missing required --website", 2);
+    const result = await findSavedLogins({ cwd: cwd, website: website, accountLabel: flagString(ctx.args, "account-label") });
+    const error = result.lanes.length === 0
+        ? "No saved login matches. Do not create a replacement profile."
+        : result.lanes.length > 1 ? "Multiple saved logins match. Ask the user which PPID/account to use; do not create a replacement profile."
+            : !result.reconnect ? `Saved profile unavailable for PPID ${result.lanes[0].id}. Ask the user to restore or verify this exact managed profile; do not create a replacement profile.` : undefined;
+    if (ctx.json)
+        emit(ctx, { ok: !error, ...result, ...(error ? { error } : {}) });
+    else {
+        if (result.lanes.length)
+            ctx.stdout.write(formatLanesTable(result.lanes) + "\n");
+        if (error)
+            ctx.stderr.write(error + "\n");
+        else if (result.reconnect)
+            ctx.stdout.write(`Reopen exact profile: ${result.reconnect.command}\nThis record does not prove current authentication.\n`);
+    }
+    if (error)
+        process.exitCode = 2;
+}
+async function cmdRememberProfile(ctx) {
+    const laneId = flagString(ctx.args, "lane-id");
+    const label = flagString(ctx.args, "label");
+    const purposes = flagStrings(ctx.args, "purpose");
+    if (!laneId)
+        fail(ctx, "missing required --lane-id", 2);
+    if (!label && purposes.length === 0)
+        fail(ctx, "provide --label and/or at least one --purpose", 2);
+    const lane = await rememberLaneProfile(laneId, { ...(label ? { label } : {}), purposes });
+    if (!lane)
+        fail(ctx, `no lane found for immutable PPID ${laneId}`, 2);
+    if (ctx.json)
+        emit(ctx, { ok: true, lane });
+    else
+        ctx.stdout.write(`Remembered ${lane.profileLabel ?? lane.id}: ${(lane.profilePurposes ?? []).join(", ") || "no purpose tags"}\n`);
 }
 async function cmdStatus(ctx) {
     await markStaleLanes();
@@ -130,12 +227,31 @@ async function cmdReserve(ctx) {
     if (result.alreadyExisted)
         ctx.stdout.write("\n(reused existing reservation)\n");
 }
-async function cmdCheck(ctx) {
+async function cmdAdoptProfile(ctx) {
     const { owner, cwd } = requireOwnerCwd(ctx);
-    const sessionId = flagString(ctx.args, "session");
-    const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}) });
-    if (!lane)
-        fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}. Run: portpilot reserve --owner ${owner} --cwd ${cwd}${sessionId ? ` --session ${sessionId}` : ""}`, 2);
+    const profileDir = flagString(ctx.args, "profile-dir");
+    if (!profileDir)
+        fail(ctx, "missing required --profile-dir");
+    const browserFlag = flagString(ctx.args, "browser");
+    const browser = normalizeBrowserKind(browserFlag) ?? "chrome";
+    if (browserFlag && !normalizeBrowserKind(browserFlag)) {
+        fail(ctx, `unknown --browser "${browserFlag}". Valid values: chrome, edge, firefox.`);
+    }
+    const result = await adoptProfileLane({
+        owner,
+        cwd,
+        sessionId: flagString(ctx.args, "session"),
+        task: flagString(ctx.args, "task"),
+        profileDir: profileDir,
+        browser,
+    });
+    if (ctx.json)
+        emit(ctx, { ok: true, adopted: true, lane: result.lane });
+    else
+        ctx.stdout.write(`Adopted ${result.lane.chromeProfileDir}\nImmutable PPID: ${result.lane.id}\n`);
+}
+async function cmdCheck(ctx) {
+    const lane = await selectedLane(ctx);
     await touchLane(lane.id);
     const result = await checkLane(lane);
     const verdict = result.verdict;
@@ -171,11 +287,7 @@ async function cmdCheck(ctx) {
         ctx.stdout.write(`  Status:              your Chrome is already running, you may attach.\n`);
 }
 async function cmdRelease(ctx) {
-    const { owner, cwd } = requireOwnerCwd(ctx);
-    const sessionId = flagString(ctx.args, "session");
-    const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}), includeReleased: true });
-    if (!lane)
-        fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}`, 2);
+    const lane = await selectedLane(ctx, true);
     if (flagBool(ctx.args, "remove")) {
         await removeLane(lane.id);
         if (ctx.json)
@@ -297,7 +409,12 @@ async function cmdDoctor(ctx) {
  * of that browser.
  */
 async function cmdOpen(ctx) {
-    const { owner, cwd } = requireOwnerCwd(ctx);
+    const laneId = flagString(ctx.args, "lane-id");
+    const exact = laneId ? await resolveLaneSelector({ laneId, includeReleased: true }) : undefined;
+    if (laneId && !exact)
+        fail(ctx, `no lane found for immutable PPID ${laneId}`, 2);
+    const target = exact ? { owner: exact.owner, cwd: exact.cwd } : requireOwnerCwd(ctx);
+    const { owner, cwd } = target;
     const sessionId = flagString(ctx.args, "session");
     const task = flagString(ctx.args, "task");
     const url = flagString(ctx.args, "url");
@@ -311,6 +428,7 @@ async function cmdOpen(ctx) {
     const reserve = await allocateLane({
         owner,
         cwd,
+        ...(laneId ? { laneId } : {}),
         ...(sessionId ? { sessionId } : {}),
         ...(task ? { task } : {}),
         ...(requestedBrowser ? { browser: requestedBrowser } : {}),
@@ -324,8 +442,9 @@ async function cmdOpen(ctx) {
         fail(ctx, `unsafe to launch ${label} on lane ${lane.id}: ${result.verdict.kind}. Run portpilot doctor for details.`, 3);
     }
     if (result.verdict.kind === "safe-attach") {
+        const attached = await launchPersistentBrowser(lane, {});
         if (ctx.json)
-            emit(ctx, { ok: true, alreadyRunning: true, browser, lane });
+            emit(ctx, { ok: true, alreadyRunning: true, browser, lane, pid: attached.pid });
         else
             ctx.stdout.write(`${label} already running on port ${lane.chromeDebugPort} with the matching profile. Reusing it.\n`);
         return;
@@ -340,19 +459,26 @@ async function cmdOpen(ctx) {
     catch (err) {
         fail(ctx, err.message, 1);
     }
-    const launch = await launchBrowserForLane(lane, {
-        dryRun,
+    if (dryRun) {
+        const plan = await launchBrowserForLane(lane, {
+            dryRun: true,
+            binaryPath: bin,
+            mode,
+            ...(url ? { initialUrl: url } : {}),
+        });
+        if (ctx.json)
+            emit(ctx, { ok: true, launched: false, browser, mode, lane, navigatedTo: url ?? null, command: { binary: plan.binary, args: plan.args } });
+        else
+            ctx.stdout.write(`Would launch (${browser}, ${mode}): ${plan.binary} ${plan.args.join(" ")}\n`);
+        return;
+    }
+    const launch = await launchPersistentBrowser(lane, {
         binaryPath: bin,
         mode,
         ...(url ? { initialUrl: url } : {}),
     });
-    await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
     if (ctx.json) {
-        emit(ctx, { ok: true, launched: !dryRun, browser, mode, lane, pid: launch.pid, navigatedTo: url ?? null, command: { binary: launch.binary, args: launch.args } });
-        return;
-    }
-    if (dryRun) {
-        ctx.stdout.write(`Would launch (${browser}, ${mode}): ${launch.binary} ${launch.args.join(" ")}\n`);
+        emit(ctx, { ok: true, launched: true, browser, mode, lane, pid: launch.pid, navigatedTo: url ?? null, command: launch.command });
         return;
     }
     ctx.stdout.write(`Launched ${label} (pid=${launch.pid ?? "?"}, mode=${mode})\nDebug port: ${lane.chromeDebugPort}\nProfile:    ${lane.chromeProfileDir}\n`);
@@ -371,12 +497,8 @@ async function cmdPage(ctx) {
     if (!sub || !subs.includes(sub)) {
         fail(ctx, `usage: portpilot page <${subs.join("|")}> --owner <n> --cwd <p> [--session <id>] [--tab <id>] ...`);
     }
-    const { owner, cwd } = requireOwnerCwd(ctx);
-    const sessionId = flagString(ctx.args, "session");
     const tab = flagString(ctx.args, "tab");
-    const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}) });
-    if (!lane)
-        fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}. Run 'open' first.`, 2);
+    const lane = await selectedLane(ctx);
     let page;
     try {
         page = await openPageController(lane);
@@ -441,18 +563,15 @@ async function cmdPage(ctx) {
     }
 }
 async function cmdLaunchChrome(ctx) {
-    const { owner, cwd } = requireOwnerCwd(ctx);
-    const sessionId = flagString(ctx.args, "session");
-    const lane = await findLane({ owner, cwd, ...(sessionId ? { sessionId } : {}) });
-    if (!lane)
-        fail(ctx, `no lane found for owner=${owner} cwd=${cwd}${sessionId ? ` session=${sessionId}` : ""}. Run reserve first.`, 2);
+    const lane = await selectedLane(ctx);
     const result = await checkLane(lane);
     if (result.verdict.kind === "unsafe-foreign-chrome" || result.verdict.kind === "unsafe-unknown") {
         fail(ctx, `unsafe to launch Chrome: ${result.verdict.kind}. Run portpilot doctor for details.`, 3);
     }
     if (result.verdict.kind === "safe-attach") {
+        const attached = await launchPersistentBrowser(lane, {});
         if (ctx.json)
-            emit(ctx, { ok: true, attached: true, lane });
+            emit(ctx, { ok: true, attached: true, lane, pid: attached.pid });
         else
             ctx.stdout.write(`Chrome already running on port ${lane.chromeDebugPort} with the matching profile. Attach instead.\n`);
         return;
@@ -462,16 +581,28 @@ async function cmdLaunchChrome(ctx) {
     // --mode wins, then PORTPILOT_CHROME_MODE env, then config, then "visible".
     const cfg = await loadConfig();
     const mode = resolveChromeMode(flagString(ctx.args, "mode"), cfg.chromeMode);
-    const launch = await launchChromeForLane(lane, { dryRun, binaryPath: bin, mode });
-    await updateRegistry((lanes) => lanes.map((l) => (l.id === lane.id ? { ...l, status: "active", lastSeen: nowIso(), pid: launch.pid ?? l.pid } : l)));
-    if (ctx.json)
-        emit(ctx, { ok: true, launched: !dryRun, mode, lane, command: { binary: launch.binary, args: launch.args }, pid: launch.pid });
-    else {
-        if (dryRun)
-            ctx.stdout.write(`Would launch (${mode}): ${launch.binary} ${launch.args.join(" ")}\n`);
+    if (dryRun) {
+        const plan = await launchChromeForLane(lane, { dryRun: true, binaryPath: bin, mode });
+        if (ctx.json)
+            emit(ctx, { ok: true, launched: false, mode, lane, command: { binary: plan.binary, args: plan.args } });
         else
-            ctx.stdout.write(`Launched ${launch.binary} (pid=${launch.pid ?? "?"}, mode=${mode})\nDebug port: ${lane.chromeDebugPort}\nProfile:    ${lane.chromeProfileDir}\n`);
+            ctx.stdout.write(`Would launch (${mode}): ${plan.binary} ${plan.args.join(" ")}\n`);
+        return;
     }
+    const launch = await launchPersistentBrowser(lane, { binaryPath: bin, mode });
+    if (ctx.json)
+        emit(ctx, { ok: true, launched: true, mode, lane, command: launch.command, pid: launch.pid });
+    else
+        ctx.stdout.write(`Launched ${launch.command?.binary ?? "Chrome"} (pid=${launch.pid ?? "?"}, mode=${mode})\nDebug port: ${lane.chromeDebugPort}\nProfile:    ${lane.chromeProfileDir}\n`);
+}
+async function cmdCloseBrowser(ctx) {
+    const lane = await selectedLane(ctx);
+    const { createSupervisorClient } = await import("../supervisor/client.js");
+    const result = await createSupervisorClient().close({ laneId: lane.id });
+    if (ctx.json)
+        emit(ctx, { ok: true, ...result });
+    else
+        ctx.stdout.write(result.closed ? `Closed browser for ${lane.id}.\n` : `Browser for ${lane.id} was already closed.\n`);
 }
 async function cmdConfig(ctx) {
     const sub = ctx.args.positional[0] ?? "show";
@@ -723,6 +854,19 @@ async function cmdDashboardSnapshot(ctx) {
     // and there's no reasonable human-readable fallback for ~3KB of nested data.
     ctx.stdout.write(JSON.stringify(snap) + "\n");
 }
+/**
+ * `paat dashboard-serve`: the desktop dashboard's long-lived helper. It reads
+ * one JSON request per stdin line and answers on stdout (protocol in
+ * src/dashboard/serve.ts), replacing a fresh `dashboard-snapshot` plus
+ * `supervisor status` process pair on every dashboard refresh.
+ */
+async function cmdDashboardServe() {
+    const { runDashboardServer } = await import("../dashboard/serve.js");
+    await runDashboardServer(process.stdin, process.stdout);
+    // The dashboard has gone. Give the last reply a moment to flush, then exit
+    // even if a stray socket or timer would otherwise keep Node alive.
+    setTimeout(() => process.exit(0), 2_000).unref();
+}
 function formatBytes(n) {
     if (n < 1024)
         return `${n} B`;
@@ -890,6 +1034,26 @@ async function cmdMcp(ctx) {
     }
     await mod.runMcpStdio();
 }
+async function cmdSupervisor(ctx) {
+    const sub = ctx.args.positional[0] ?? "status";
+    if (sub === "serve") {
+        const { runProductionSupervisor } = await import("../supervisor/production.js");
+        const result = await runProductionSupervisor();
+        if (ctx.json)
+            emit(ctx, { ok: true, result });
+        return;
+    }
+    if (sub === "status") {
+        const { getSupervisorStatus } = await import("../supervisor/client.js");
+        const status = await getSupervisorStatus({ timeoutMs: 1_000 });
+        if (ctx.json)
+            emit(ctx, status);
+        else
+            ctx.stdout.write(status.running ? `supervisor: running (${status.supervisorId})\n` : "supervisor: not running\n");
+        return;
+    }
+    fail(ctx, `unknown supervisor subcommand: ${sub}. Try: serve, status`, 1);
+}
 async function cmdInstallMcp(ctx) {
     // Argument shape: paat install-mcp <claude|claude-code|codex|all|--all>
     // Default (no positional) is "all" so the simplest invocation Just Works.
@@ -964,6 +1128,7 @@ async function cmdInstallSkill(ctx) {
     const valid = ["codex", "claude"];
     const target = ctx.args.positional[0];
     const allFlag = flagBool(ctx.args, "all");
+    const onlyExistingApps = flagBool(ctx.args, "only-existing", false);
     let clients;
     if (!target || target === "all" || allFlag)
         clients = valid;
@@ -974,7 +1139,7 @@ async function cmdInstallSkill(ctx) {
     const results = [];
     for (const client of clients) {
         try {
-            const result = await installAgentSkill(client);
+            const result = await installAgentSkill(client, { onlyExistingApps });
             results.push({
                 client,
                 ok: result.action !== "conflict",
@@ -1000,6 +1165,10 @@ async function cmdInstallSkill(ctx) {
             ctx.stderr.write(`x ${result.client}: ${result.reason ?? result.error}\n`);
             continue;
         }
+        if (result.action === "skipped") {
+            ctx.stdout.write(`- ${result.client}: skipped (${result.reason})\n`);
+            continue;
+        }
         const label = result.action === "installed"
             ? "installed"
             : result.action === "updated"
@@ -1010,8 +1179,12 @@ async function cmdInstallSkill(ctx) {
         if (result.backupPath)
             ctx.stdout.write(`  backup: ${result.backupPath}\n`);
     }
+    const installedFor = results.filter((result) => result.ok && result.action !== "skipped").map((result) => result.client);
     if (allOk) {
-        ctx.stdout.write("\nPortPilot now appears in Codex and Claude Code (including the Desktop Code tab). Restart an open app if it does not refresh automatically.\n");
+        if (installedFor.length > 0) {
+            const names = installedFor.map((client) => (client === "codex" ? "Codex" : "Claude Code")).join(" and ");
+            ctx.stdout.write(`\nThe PortPilot skill is set up for ${names}. Restart an open app if it does not refresh automatically.\n`);
+        }
     }
     else {
         process.exit(1);
@@ -1078,10 +1251,20 @@ async function dispatch(args) {
             return cmdStatus(ctx);
         case "reserve":
             return cmdReserve(ctx);
+        case "adopt-profile":
+            return cmdAdoptProfile(ctx);
+        case "remember-profile":
+            return cmdRememberProfile(ctx);
+        case "remember-login":
+            return cmdRememberLogin(ctx);
+        case "find-login":
+            return cmdFindLogin(ctx);
         case "check":
             return cmdCheck(ctx);
         case "release":
             return cmdRelease(ctx);
+        case "close-browser":
+            return cmdCloseBrowser(ctx);
         case "next":
             return cmdNext(ctx);
         case "doctor":
@@ -1098,6 +1281,8 @@ async function dispatch(args) {
             return cmdDashboard(ctx);
         case "dashboard-snapshot":
             return cmdDashboardSnapshot(ctx);
+        case "dashboard-serve":
+            return cmdDashboardServe();
         case "shortcut":
             return cmdShortcut(ctx);
         case "install-mcp":
@@ -1112,6 +1297,8 @@ async function dispatch(args) {
             return cmdProfiles(ctx);
         case "mcp":
             return cmdMcp(ctx);
+        case "supervisor":
+            return cmdSupervisor(ctx);
         case "help":
         case "--help":
         case "-h":

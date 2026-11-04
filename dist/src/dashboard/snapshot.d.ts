@@ -11,6 +11,7 @@
  * view.
  */
 import { BrowserKind } from "../core/lane.js";
+import type { PowerShellRunner } from "../core/powershell-host.js";
 import { EntrySource } from "./sources.js";
 export interface CdpTab {
     id: string;
@@ -46,6 +47,14 @@ export interface LiveSession {
     cwd?: string;
     cwdConfidence: Confidence;
     task?: string;
+    profileLabel?: string;
+    profilePurposes?: string[];
+    /** Historical user confirmations, not proof of a current sign-in. */
+    savedLogins?: {
+        website: string;
+        confirmedAt: string;
+        accountLabel?: string;
+    }[];
     pid: number;
     chromeDebugPort: number;
     /**
@@ -143,4 +152,5 @@ export interface DashboardSnapshot {
 }
 export declare function buildSnapshot(opts?: {
     cdpTimeoutMs?: number;
+    powershell?: PowerShellRunner;
 }): Promise<DashboardSnapshot>;

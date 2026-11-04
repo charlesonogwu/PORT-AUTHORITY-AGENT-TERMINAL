@@ -119,7 +119,7 @@ Restart the app and the agent has these tools:
 - **`open`** — reserve + launch + navigate in one call, the one to reach for.
   Takes `browser: "chrome" | "edge" | "firefox"` (default chrome, or whatever
   you picked as the dashboard's default browser).
-- Lane management: `reserve_lane`, `check_lane`, `release_lane`,
+- Lane management: `reserve_lane`, `check_lane`, `release_lane`, `close_browser`,
   `launch_browser_lane` (any backend), `launch_chrome_lane` (kept for
   back-compat), `list_lanes`, `find_free_lane`, `scan_ports`, `doctor`.
 - **Page control** — drive the lane's browser through one uniform interface,
@@ -169,14 +169,37 @@ To reinstall the skill without reinstalling the package:
 paat install-skill all
 ```
 
-PortPilot will update only copies it previously installed. If you already
-created your own skill named `portpilot`, it is left unchanged.
+PortPilot updates only copies it installed. An upgrade replaces only the files
+PortPilot put there, backs up any of them you edited, and keeps files you added
+yourself. A `portpilot` folder PortPilot didn't create, a folder whose
+`SKILL.md` you renamed to switch the skill off, or a linked folder is left
+unchanged.
 
-The same setup also writes PortPilot's user-scoped MCP entry to
-`~/.claude.json`, which is shared by Claude Code CLI and Claude Desktop's Code
-tab. If the standalone `claude` command is installed, PortPilot delegates that
-write to `claude mcp add`; otherwise it performs a backed-up, non-destructive
-JSON merge itself.
+The npm installer adds the skill only for apps that are already installed
+(their `~/.codex` or `~/.claude` folder exists), never under `sudo`, and not
+when PortPilot is installed as another project's dependency. Set
+`PAAT_SKIP_INSTALL_SKILL=1` (or `PAAT_SKIP_INSTALL_MCP=1`, which also skips
+the MCP wiring) to turn it off.
+
+The MCP entry for Claude Code is still written by Claude Code's own
+`claude mcp add`. If the standalone `claude` command isn't available, PortPilot
+skips that step and tells you the command to run, rather than editing
+`~/.claude.json` itself while Claude Code may be writing it.
+
+### Persistent browser lifetime
+
+The native PortPilot app starts one local supervisor that owns persistent
+browser launches. MCP servers and CLI commands are clients of that supervisor;
+they do not own the Chrome, Edge, or Firefox process tree. An MCP cancellation,
+agent restart, or controller disconnect therefore does not close every browser.
+Restarted agents reconnect only after PortPilot re-verifies the exact lane,
+browser, profile, debugging port, and live process.
+
+`release_lane` only changes registry bookkeeping. To actually exit one browser,
+call `close_browser` (or `paat close-browser`), which performs a fresh ownership
+check and refuses foreign or unverifiable processes. If the supervisor is not
+running, persistent launch fails clearly instead of falling back to a
+controller-owned browser; open or restart the PortPilot dashboard and retry.
 
 ## Browser backends
 
@@ -264,6 +287,7 @@ How to use it:
    Page.bringToFront() or Browser.setWindowBounds with on-screen coordinates,
    since both yank the window onto the user's screen.
 5. Release when finished: call release_lane (it does not kill the browser).
+   Use close_browser only when the browser itself should explicitly exit.
 
 No PortPilot MCP tools in this agent? Use the CLI instead:
    paat open --owner <you> --cwd "<path>" --browser chrome --mode background
@@ -362,11 +386,17 @@ the only path to termination, and it refuses anything that isn't Chromium-family
 | Command | Purpose |
 |---|---|
 | `paat list`                               | List every lane |
+| `paat list --cwd <p> --purpose <tag>`     | Find saved profiles by workspace and intended purpose |
+| `paat remember-profile --lane-id <PPID> --label "Vendor support" --purpose vendor-portal` | Generic metadata (not a confirmed website login) |
+| `paat remember-login --lane-id <PPID> --website example.com --confirmed --account-label "Work"` | Record a website login only after explicit user confirmation |
+| `paat find-login --cwd /path/to/project --website example.com --account-label "Work" --json` | Find confirmed saved logins, then reopen the exact returned PPID |
 | `paat status`                             | List + live port observations + warnings |
 | `paat reserve --owner <n> --cwd <p> --task <s>` | Reserve a lane (idempotent per owner+cwd+session) |
 | `paat check --owner <n> --cwd <p>`        | Verify the lane is safe to use right now |
 | `paat release --owner <n> --cwd <p>`      | Release a lane (does NOT kill Chrome) |
 | `paat open --owner <n> --cwd <p> [--browser chrome\|edge\|firefox] [--url <u>] [--mode ...]` | Reserve + launch + navigate in one step |
+| `paat open --lane-id <PPID> [--url <u>]` | Reopen one exact saved browser profile by immutable identity |
+| `paat adopt-profile --owner <n> --cwd <p> --profile-dir <path>` | Explicitly adopt an orphan beneath `~/.portpilot/profiles` |
 | `paat launch-chrome --owner <n> --cwd <p> [--mode visible\|background\|headless]` | Launch Chrome bound to the lane |
 | `paat page <tabs\|goto\|eval\|text\|click\|fill\|screenshot> --owner <n> --cwd <p>` | Drive the lane's browser (CDP or BiDi, same commands) |
 | `paat next [--range 9322-9399]`           | Print the next free port in a range |
@@ -377,6 +407,43 @@ the only path to termination, and it refuses anything that isn't Chromium-family
 | `paat mcp`                                | Run as an MCP stdio server |
 
 Add `--json` to any command for machine-readable output.
+
+Profile labels and purpose tags are local organizational metadata. They let an
+agent find the same immutable PPID across tasks and agent owners, but they do
+not claim or verify that any website is currently signed in. If several saved
+profiles match, PortPilot returns every candidate and requires an exact PPID
+instead of guessing.
+
+### Confirmed saved website logins
+
+After the user explicitly confirms a login in an exact PortPilot profile, use
+`remember-login --lane-id <PPID> --website example.com --confirmed` (MCP:
+`remember_login` with `confirmed: true`). An optional `accountLabel`, such as
+"Work", distinguishes accounts. Never infer confirmation from a purpose tag or
+page content. Records contain `website`, `confirmedAt`, and optional
+`accountLabel`, and remain tied to the immutable PPID.
+
+For later requests, first use `find-login --cwd /path/to/project --website
+example.com --json` (MCP: `find_saved_login`). Lookup crosses agent owners and
+matches the exact normalized hostname including port: `example.com:8443` is
+distinct from `example.com`, `www.example.com`, and other subdomains. Missing or
+unverifiable profiles remain candidates for ambiguity checks and are reported in
+`unavailableProfileIds`. On one match with a non-null `reconnect`, use
+`open --lane-id <returned-PPID>` (MCP: `open` with `laneId`). If that one profile
+is unavailable (`reconnect: null`), stop and ask the user to restore or verify
+the exact managed profile; do not create a replacement.
+On no matches, stop and report failure; on ambiguity, ask which PPID/account to
+use. Never create a replacement profile to satisfy a saved-login request.
+
+This is local metadata exposed to the requesting agent. It contains no
+credentials, passwords, cookies, or tokens and does not prove current
+authentication. Generic labels/purpose tags remain supported separately.
+Choose account labels with that visibility in mind.
+
+Release is permitted and preserves saved-login records. Ordinary lane removal,
+registry pruning, and profile pruning protect saved logins. Explicit profile
+forgetting is destructive: after profile deletion, matching registry cleanup is
+atomic. Use it only when intentionally discarding that saved profile.
 
 ## Live dashboard
 
