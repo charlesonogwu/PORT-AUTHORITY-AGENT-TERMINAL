@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { REGISTRY_VERSION, isStale, laneSessionId, canonicalizeOwner, normalizeCwd, nowIso, laneBrowser, } from "./lane.js";
+import { REGISTRY_VERSION, isStale, laneSessionId, canonicalizeOwner, cwdIdentity, normalizeCwd, nowIso, laneBrowser, } from "./lane.js";
 import { lockPath, registryPath } from "./paths.js";
 import { atomicWriteJson, withLock } from "./lockfile.js";
 const EMPTY = { version: REGISTRY_VERSION, lanes: [] };
@@ -34,13 +34,13 @@ export function filterLanes(lanes, filter) {
         : filter.status
             ? [filter.status]
             : null;
-    const cwd = filter.cwd ? normalizeCwd(filter.cwd) : null;
+    const cwd = filter.cwd ? cwdIdentity(filter.cwd) : null;
     const wantSession = typeof filter.sessionId === "string" ? filter.sessionId : null;
     const owner = filter.owner ? canonicalizeOwner(filter.owner).canonical : null;
     return lanes.filter((lane) => {
         if (owner && canonicalizeOwner(lane.owner).canonical !== owner)
             return false;
-        if (cwd && normalizeCwd(lane.cwd) !== cwd)
+        if (cwd && cwdIdentity(lane.cwd) !== cwd)
             return false;
         if (wantSession !== null && laneSessionId(lane) !== wantSession)
             return false;
@@ -131,7 +131,7 @@ export async function updateRegistry(updater) {
         const file = { version: REGISTRY_VERSION, lanes: next };
         await atomicWriteJson(registryPath(), file);
         return next;
-    });
+    }, { timeoutMs: 30_000, retryMs: 25, staleMs: 30_000 });
 }
 export async function upsertLane(lane) {
     await updateRegistry((lanes) => {

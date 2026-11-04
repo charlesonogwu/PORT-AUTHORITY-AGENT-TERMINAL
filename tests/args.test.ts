@@ -47,5 +47,7 @@ test("parsePortRange parses NNN-MMM", () => {
   assert.deepEqual(parsePortRange("9322-9399"), { start: 9322, end: 9399 });
   assert.equal(parsePortRange("badrange"), undefined);
   assert.equal(parsePortRange("9000-1000"), undefined);
+  assert.equal(parsePortRange("65535-65536"), undefined);
+  assert.equal(parsePortRange("0-10"), undefined);
   assert.equal(parsePortRange(undefined), undefined);
 });

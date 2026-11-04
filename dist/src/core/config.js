@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { totalmem } from "node:os";
-import { DEFAULT_APP_PORT_RANGE, DEFAULT_CHROME_DEBUG_RANGE } from "./lane.js";
+import { DEFAULT_APP_PORT_RANGE, DEFAULT_CHROME_DEBUG_RANGE, validatePortRange, } from "./lane.js";
 import { atomicWriteJson } from "./lockfile.js";
 import { portpilotHome } from "./paths.js";
 export const CONFIG_VERSION = 1;
@@ -13,6 +13,44 @@ export const DEFAULT_CONFIG = {
 export function configPath() {
     return join(portpilotHome(), "config.json");
 }
+function validateConfig(cfg) {
+    if (cfg.chromeDebugRange)
+        validatePortRange(cfg.chromeDebugRange, "browser debug");
+    if (cfg.appPortRange)
+        validatePortRange(cfg.appPortRange, "app");
+    return cfg;
+}
+const warnedConfigProblems = new Set();
+/**
+ * A hand-edited config.json with an impossible port range must not stop
+ * every allocation, launch and dashboard refresh (or `paat config`, the tool
+ * that would repair it). Saving stays strict; loading falls back to the
+ * default range and says so on stderr, once per process.
+ */
+function withUsableRanges(cfg) {
+    const fields = [
+        ["chromeDebugRange", "browser debug"],
+        ["appPortRange", "app"],
+    ];
+    let usable = cfg;
+    for (const [field, label] of fields) {
+        const range = usable[field];
+        if (!range)
+            continue;
+        try {
+            validatePortRange(range, label);
+        }
+        catch (error) {
+            const message = `[portpilot] ${error.message} Using the default ${label} range; fix ${field} in ${configPath()}.`;
+            if (!warnedConfigProblems.has(message)) {
+                warnedConfigProblems.add(message);
+                process.stderr.write(`${message}\n`);
+            }
+            usable = { ...usable, [field]: DEFAULT_CONFIG[field] };
+        }
+    }
+    return usable;
+}
 export async function loadConfig() {
     try {
         const raw = await readFile(configPath(), "utf8");
@@ -20,7 +58,7 @@ export async function loadConfig() {
         if (!parsed || parsed.version !== CONFIG_VERSION) {
             return { ...DEFAULT_CONFIG };
         }
-        return { ...DEFAULT_CONFIG, ...parsed, version: CONFIG_VERSION };
+        return withUsableRanges({ ...DEFAULT_CONFIG, ...parsed, version: CONFIG_VERSION });
     }
     catch (err) {
         if (err.code === "ENOENT")
@@ -29,7 +67,7 @@ export async function loadConfig() {
     }
 }
 export async function saveConfig(cfg) {
-    await atomicWriteJson(configPath(), { ...cfg, version: CONFIG_VERSION });
+    await atomicWriteJson(configPath(), validateConfig({ ...cfg, version: CONFIG_VERSION }));
     // touch a noop just to keep API symmetric with future writes
     void writeFile;
 }
