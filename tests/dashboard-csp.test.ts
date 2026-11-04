@@ -12,7 +12,10 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 test("Tauri dashboard ships a restrictive content security policy", () => {
   const config = JSON.parse(
     readFileSync(join(repoRoot, "gui", "src-tauri", "tauri.conf.json"), "utf8"),
-  ) as { app?: { security?: { csp?: unknown } } };
+  ) as { app?: { security?: { csp?: unknown; dangerousDisableAssetCspModification?: unknown } } };
+  // Tauri may only skip adding hashes to style-src (so 'unsafe-inline' keeps
+  // working for runtime-injected component styles); scripts stay hashed.
+  assert.deepEqual(config.app?.security?.dangerousDisableAssetCspModification, ["style-src"]);
   const csp = config.app?.security?.csp;
   assert.equal(typeof csp, "string", "csp must not be null");
   assert.match(String(csp), /default-src\s+'self'/);

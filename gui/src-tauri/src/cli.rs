@@ -416,11 +416,8 @@ pub fn run_cli_json(args: &[&str]) -> Result<Value, String> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout).map_err(|e| {
-        let preview = if stdout.len() > 200 {
-            &stdout[..200]
-        } else {
-            &stdout
-        };
+        // chars(), not a byte slice: cutting a multi-byte character panics.
+        let preview: String = stdout.chars().take(200).collect();
         format!(
             "invalid JSON from `paat {}`: {} (stdout preview: {})",
             args.join(" "),

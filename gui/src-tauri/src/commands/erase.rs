@@ -1,49 +1,74 @@
 // erase_chrome — the dashboard "Erase" button.
 //
-// Unlike kill_chrome (which only CLOSES Chrome and leaves the saved profile on
-// disk, so the agent reopens still logged in), this also WIPES the lane's saved
-// browser data. It:
-//   1. kills the Chrome pid so it releases the profile's file locks,
-//   2. waits for those locks to clear (Windows holds them briefly after exit),
+// Unlike kill_chrome (which only CLOSES the browser and leaves the saved
+// profile on disk, so the agent reopens still logged in), this also WIPES the
+// lane's saved browser data. It:
+//   1. pins the browser process (Windows) and re-checks the full lane target
+//      against a snapshot taken after the click,
+//   2. closes the browser and confirms it exited, so it releases the
+//      profile's files,
 //   3. shells out to `paat profiles forget` to delete the profile directory
-//      (guarded to ~/.portpilot/profiles) and drop the lane from the registry.
+//      the snapshot just reported (guarded to ~/.portpilot/profiles in the
+//      Node core) and drop the lane from the registry.
 //
-// async + spawn_blocking so the multi-second kill+retry never freezes the UI
+// async + spawn_blocking so the multi-second close+retry never freezes the UI
 // thread — same pattern as commands/snapshot.rs.
 
-use crate::cli::{quiet_command, run_cli_json};
+use crate::cli::run_cli_json;
 use crate::target::{verify_live_target, LaneTarget};
 use serde_json::Value;
 use std::{thread, time::Duration};
 
-fn kill_pid(pid: u32) {
-    let _ = if cfg!(target_os = "windows") {
-        quiet_command("taskkill.exe")
-            .args(["/F", "/PID", &pid.to_string()])
+/// Close the verified browser and wait until it has really exited.
+#[cfg(target_os = "windows")]
+fn close_verified(target: &LaneTarget) -> Result<String, String> {
+    use crate::target::ProcessPin;
+
+    let pin = ProcessPin::open(target.pid)?;
+    let profile_dir = verify_live_target(target)?;
+    if let Some(pin) = pin {
+        pin.terminate_and_wait(Duration::from_secs(10)).map_err(|e| {
+            format!("could not close the browser (pid {}) before erasing: {}", target.pid, e)
+        })?;
+    }
+    Ok(profile_dir)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn close_verified(target: &LaneTarget) -> Result<String, String> {
+    use crate::cli::quiet_command;
+
+    let profile_dir = verify_live_target(target)?;
+    let pid = target.pid.to_string();
+    let _ = quiet_command("kill").args(["-9", &pid]).output();
+    for _ in 0..50 {
+        let alive = quiet_command("kill")
+            .args(["-0", &pid])
             .output()
-    } else {
-        quiet_command("kill").args(["-9", &pid.to_string()]).output()
-    };
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !alive {
+            return Ok(profile_dir);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("could not close the browser (pid {}) before erasing", target.pid))
 }
 
 fn erase_blocking(target: LaneTarget) -> Result<Value, String> {
-    verify_live_target(&target)?;
     let pid = target.pid;
-    let profile_dir = target.profile_dir;
-    let lane_id = target.lane_id;
-    // 1. Close Chrome so it releases the profile's file handles.
-    kill_pid(pid);
+    let profile_dir = close_verified(&target)?;
 
-    // 2. Erase via the CLI. The guarded delete + lane removal live in the
-    //    tested Node core; we just retry because Windows can keep the profile
-    //    locked for a moment after the process dies.
+    // Erase via the CLI. The guarded delete + lane removal live in the
+    // tested Node core; we retry because Windows can keep the profile locked
+    // for a moment after the process dies.
     let mut args: Vec<String> = vec![
         "profiles".into(),
         "forget".into(),
         "--profile-dir".into(),
         profile_dir,
     ];
-    if let Some(id) = lane_id {
+    if let Some(id) = target.lane_id {
         args.push("--lane".into());
         args.push(id);
     }
@@ -58,16 +83,14 @@ fn erase_blocking(target: LaneTarget) -> Result<Value, String> {
         }
     }
     Err(format!(
-        "closed Chrome (pid {}) but could not erase the saved data after several tries \
+        "closed the browser (pid {}) but could not erase the saved data after several tries \
          (a file may still be locked): {}",
         pid, last_err
     ))
 }
 
 #[tauri::command]
-pub async fn erase_chrome(
-    target: LaneTarget,
-) -> Result<Value, String> {
+pub async fn erase_chrome(target: LaneTarget) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || erase_blocking(target))
         .await
         .map_err(|e| format!("erase worker join failed: {}", e))?

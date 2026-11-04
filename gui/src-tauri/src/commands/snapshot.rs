@@ -103,6 +103,14 @@ fn fetch_snapshot_parts() -> SnapshotParts {
     })
 }
 
+/// A snapshot computed after this call began, from the same long-lived
+/// helper as the refresh loop (else the one-shot CLI), so checking an action's
+/// target never starts an extra program while the helper is healthy.
+/// Blocking: call it from a spawn_blocking thread.
+pub(crate) fn fresh_snapshot() -> Result<Value, String> {
+    fetch_snapshot_parts().0
+}
+
 /// 0.2.3 fix: async + spawn_blocking. Previously this was a sync
 /// `pub fn`, which Tauri runs on the **main UI thread**. Every 3-second
 /// poll then blocked the message pump for ~500-1000 ms (cost of spawning

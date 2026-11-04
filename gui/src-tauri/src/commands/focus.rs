@@ -178,7 +178,15 @@ pub async fn unhide_chrome(
 }
 
 fn unhide_verified(target: LaneTarget, placement: WinPlacement) -> Result<Value, String> {
-    verify_live_target(&target)?;
+    // Fail open: the window is off-screen because the dashboard put it there.
+    // If the check can't run or the snapshot is stale, still bring it back
+    // rather than strand it at (-32000, -32000) with its Show button hidden.
+    if let Err(error) = verify_live_target(&target) {
+        eprintln!(
+            "paat-dashboard: unhiding pid {} without a fresh target check: {}",
+            target.pid, error
+        );
+    }
     let pid = target.pid;
     // Sanity-guard the saved rect: if it is degenerate or itself off-screen
     // (lost/garbled state, monitor unplugged), never restore the window

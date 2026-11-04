@@ -1,13 +1,13 @@
-// kill_chrome — terminate a process by PID. Cross-platform: taskkill on
-// Windows, `kill -9` on macOS/Linux. The dashboard calls this when the user
-// hits the "Kill" button on a lane that has stale or crashed Chrome.
+// kill_chrome — the dashboard "Kill" button: close one PortPilot browser.
 //
-// We deliberately do NOT validate that the PID is paat-owned here — the
-// dashboard UI only surfaces PIDs that came out of `paat status`, so by the
-// time a user clicks Kill we already know the PID is one of ours. If the
-// PID has already exited the OS-level kill is a no-op and we return ok.
+// The pid comes from the last refresh, so it is never trusted on its own:
+//   1. Windows: pin the exact process with a handle first.
+//   2. Re-check the full lane target (lane, pid, browser, port, profile)
+//      against a snapshot taken after the click.
+//   3. Terminate through the pinned handle, so a pid Windows reused for
+//      another program after the check can never be the one closed.
+// macOS/Linux have no handle to pin; they re-check, then `kill -9`.
 
-use crate::cli::quiet_command;
 use crate::target::{verify_live_target, LaneTarget};
 use serde_json::{json, Value};
 
@@ -18,32 +18,35 @@ pub async fn kill_chrome(target: LaneTarget) -> Result<Value, String> {
         .map_err(|e| format!("kill worker join failed: {}", e))?
 }
 
+#[cfg(target_os = "windows")]
 fn kill_verified(target: LaneTarget) -> Result<Value, String> {
+    use crate::target::ProcessPin;
+    use std::time::Duration;
+
+    let pid = target.pid;
+    let Some(pin) = ProcessPin::open(pid)? else {
+        return Ok(json!({ "ok": true, "pid": pid, "alreadyExited": true }));
+    };
+    verify_live_target(&target)?;
+    match pin.terminate_and_wait(Duration::from_secs(5)) {
+        Ok(()) => Ok(json!({ "ok": true, "pid": pin.pid() })),
+        Err(error) => Ok(json!({ "ok": false, "pid": pin.pid(), "error": error })),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn kill_verified(target: LaneTarget) -> Result<Value, String> {
+    use crate::cli::quiet_command;
+
     verify_live_target(&target)?;
     let pid = target.pid;
-    // quiet_command() suppresses the brief CMD-window flash that
-    // std::process::Command::new("taskkill.exe") would otherwise pop on
-    // Windows. Same fix applied across cli.rs and focus.rs in 0.2.3.
-    let result = if cfg!(target_os = "windows") {
-        quiet_command("taskkill.exe")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output()
-    } else {
-        // macOS + Linux: SIGKILL is universal. (CREATE_NO_WINDOW is a no-op
-        // here since quiet_command only sets it under #[cfg(windows)].)
-        quiet_command("kill")
-            .args(["-9", &pid.to_string()])
-            .output()
-    };
-
-    let output = result.map_err(|e| format!("failed to spawn kill command: {}", e))?;
+    let output = quiet_command("kill")
+        .args(["-9", &pid.to_string()])
+        .output()
+        .map_err(|e| format!("failed to spawn kill command: {}", e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok(json!({
-            "ok": false,
-            "pid": pid,
-            "error": stderr.trim().to_string()
-        }));
+        return Ok(json!({ "ok": false, "pid": pid, "error": stderr.trim().to_string() }));
     }
     Ok(json!({ "ok": true, "pid": pid }))
 }
