@@ -12,6 +12,7 @@ import {
   SKILL_MANIFEST,
   appDirFor,
   installAgentSkill,
+  isSafeManifestKey,
   portpilotSkillSourceDir,
 } from "../src/cli/install-skill.js";
 
@@ -195,6 +196,32 @@ test("a file PortPilot installed and later dropped is removed; unknown files are
     assert.equal(await readFile(join(first.skillDir, "agents", "mine.yaml"), "utf8"), "mine\n");
     assert.equal(result.backupPath, null, "the dropped file was unedited, so nothing needed a backup");
   });
+});
+
+test("a corrupt or planted manifest can't make an upgrade delete anything outside the skill", async () => {
+  await withTempDir(async (home) => {
+    const first = await installAgentSkill("codex", { homeDir: home });
+    const outside = join(home, "precious.txt");
+    await writeFile(outside, "do not delete\n", "utf8");
+    await mkdir(join(first.skillDir, "a-folder"));
+    const manifest = JSON.parse(await readFile(join(first.skillDir, SKILL_MANIFEST), "utf8")) as { files: Record<string, string> };
+    manifest.files["../../../precious.txt"] = "0".repeat(64);
+    manifest.files[outside] = "0".repeat(64);
+    manifest.files["a-folder"] = "0".repeat(64);
+    await writeFile(join(first.skillDir, SKILL_MANIFEST), JSON.stringify(manifest), "utf8");
+
+    await installAgentSkill("codex", { homeDir: home });
+
+    assert.equal(await readFile(outside, "utf8"), "do not delete\n");
+    assert.ok(existsSync(join(first.skillDir, "a-folder")), "a folder is never removed");
+  });
+});
+
+test("manifest keys must stay inside the skill folder", () => {
+  for (const bad of ["../x", "a/../../x", "/etc/passwd", "C:\\Windows\\x", "\\\\srv\\share\\x", "", "a//b", "./x"]) {
+    assert.equal(isSafeManifestKey(bad), false, bad);
+  }
+  for (const good of ["SKILL.md", "agents/openai.yaml", "a/b/c.txt"]) assert.equal(isSafeManifestKey(good), true, good);
 });
 
 test("an older managed copy without a manifest is upgraded without deleting anything", async () => {

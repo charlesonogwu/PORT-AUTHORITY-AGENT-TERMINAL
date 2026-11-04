@@ -21,6 +21,12 @@ export interface InstallAgentSkillResult {
     action: "installed" | "updated" | "already-installed" | "conflict" | "skipped";
     reason?: string;
 }
+/**
+ * A manifest key may only name a file inside the skill folder. A corrupt or
+ * planted manifest must never make an upgrade replace or delete anything
+ * else, so absolute paths, drive letters and ".." segments are rejected.
+ */
+export declare function isSafeManifestKey(key: string): boolean;
 export declare function portpilotSkillSourceDir(): string;
 /** The app folder a client keeps its skills in. A blank env var counts as unset. */
 export declare function appDirFor(client: AgentSkillClient, opts?: InstallAgentSkillOptions, env?: NodeJS.ProcessEnv): string;

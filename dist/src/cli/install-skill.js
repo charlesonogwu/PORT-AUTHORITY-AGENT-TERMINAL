@@ -51,15 +51,32 @@ async function listFiles(root, current = root) {
     }
     return files.sort();
 }
+/**
+ * A manifest key may only name a file inside the skill folder. A corrupt or
+ * planted manifest must never make an upgrade replace or delete anything
+ * else, so absolute paths, drive letters and ".." segments are rejected.
+ */
+export function isSafeManifestKey(key) {
+    if (!key || key.length > 512)
+        return false;
+    if (/^[\\/]/.test(key) || /^[a-zA-Z]:/.test(key) || key.includes("\0"))
+        return false;
+    return key.split(/[\\/]/).every((part) => part !== "" && part !== "." && part !== "..");
+}
 async function readManifest(skillDir) {
     const raw = await readIfExists(join(skillDir, SKILL_MANIFEST));
-    if (raw === null)
+    if (raw === null || raw.length > 1024 * 1024)
         return null;
     try {
         const parsed = JSON.parse(raw.toString("utf8"));
-        if (parsed.version !== 1 || !parsed.files || typeof parsed.files !== "object")
+        if (parsed.version !== 1 || !parsed.files || typeof parsed.files !== "object" || Array.isArray(parsed.files))
             return null;
-        return { version: 1, files: { ...parsed.files } };
+        const files = {};
+        for (const [key, hash] of Object.entries(parsed.files)) {
+            if (isSafeManifestKey(key) && typeof hash === "string")
+                files[key] = hash;
+        }
+        return { version: 1, files };
     }
     catch {
         return null;
@@ -174,9 +191,16 @@ export async function installAgentSkill(client, opts = {}) {
         if (current === null || !current.equals(content))
             toWrite.push(file);
     }
-    // Only files PortPilot itself recorded can be removed. A copy without a
-    // manifest (older installer, or installed by hand) loses nothing on upgrade.
-    const toRemove = Object.keys(previous?.files ?? {}).filter((file) => !bundle.has(file) && existsSync(join(skillDir, file)));
+    // Only plain files PortPilot itself recorded can be removed. A copy without
+    // a manifest (older installer, or installed by hand) loses nothing on upgrade.
+    const toRemove = [];
+    for (const file of Object.keys(previous?.files ?? {})) {
+        if (bundle.has(file))
+            continue;
+        const info = await lstat(join(skillDir, file)).catch(() => null);
+        if (info?.isFile())
+            toRemove.push(file);
+    }
     const manifest = {
         version: 1,
         files: Object.fromEntries([...bundle].map(([file, content]) => [file, sha256(content)])),
