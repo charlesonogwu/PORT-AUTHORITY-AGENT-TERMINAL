@@ -103,6 +103,14 @@ fn fetch_snapshot_parts() -> SnapshotParts {
     })
 }
 
+/// A snapshot computed after this call began, from the same long-lived
+/// helper as the refresh loop (else the one-shot CLI), so checking an action's
+/// target never starts an extra program while the helper is healthy.
+/// Blocking: call it from a spawn_blocking thread.
+pub(crate) fn fresh_snapshot() -> Result<Value, String> {
+    fetch_snapshot_parts().0
+}
+
 /// 0.2.3 fix: async + spawn_blocking. Previously this was a sync
 /// `pub fn`, which Tauri runs on the **main UI thread**. Every 3-second
 /// poll then blocked the message pump for ~500-1000 ms (cost of spawning
@@ -117,50 +125,57 @@ pub async fn get_snapshot() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(fetch_snapshot_parts)
         .await
         .map_err(|e| format!("snapshot worker join failed: {}", e))
-        .map(|(res, supervisor_status)| match res {
-            Ok(mut v) => {
-                let mut add_warning = |warning: String| {
-                    if let Some(object) = v.as_object_mut() {
-                        let warnings = object.entry("warnings").or_insert_with(|| json!([]));
-                        if let Some(array) = warnings.as_array_mut() {
-                            array.push(json!(warning));
-                        }
-                    }
-                };
-                if let Some(error) = supervisor_startup_error() {
-                    add_warning(format!("Persistent browser supervisor unavailable: {}", error));
-                }
-                let running = supervisor_status
-                    .as_ref()
-                    .ok()
-                    .and_then(|status| status.get("running"))
-                    .and_then(Value::as_bool)
-                    == Some(true);
-                if !running {
-                    add_warning("Persistent browser supervisor is not responding; new browser launches are disabled until PortPilot is restarted.".into());
-                }
-                v
+        .and_then(|(res, supervisor_status)| merge_snapshot(res, supervisor_status))
+}
+
+/// Merge the supervisor's state into the snapshot as warnings. A failed
+/// snapshot stays an error: disguising it as an empty dashboard told the
+/// user no browsers were running. The UI keeps its last verified snapshot
+/// and shows the error instead.
+fn merge_snapshot(
+    res: Result<Value, String>,
+    supervisor_status: Result<Value, String>,
+) -> Result<Value, String> {
+    let mut v = res.map_err(|e| format!("paat CLI unavailable: {}", e))?;
+    let mut add_warning = |warning: String| {
+        if let Some(object) = v.as_object_mut() {
+            let warnings = object.entry("warnings").or_insert_with(|| json!([]));
+            if let Some(array) = warnings.as_array_mut() {
+                array.push(json!(warning));
             }
-            Err(e) => json!({
-                "ok": false,
-                "generatedAt": "",
-                "scanSource": "empty",
-                "scanErrors": [e.clone()],
-                "home": "",
-                "registryPath": "",
-                "config": {},
-                "summary": { "liveSessions": 0, "distinctAgents": 0, "conflicts": 0 },
-                "liveSessions": [],
-                "registryHealth": { "portpilot": { "exists": false, "lockHealthy": false } },
-                "conflicts": [],
-                "warnings": [format!("paat CLI unavailable: {}", e)]
-            }),
-        })
+        }
+    };
+    if let Some(error) = supervisor_startup_error() {
+        add_warning(format!("Persistent browser supervisor unavailable: {}", error));
+    }
+    let running = supervisor_status
+        .as_ref()
+        .ok()
+        .and_then(|status| status.get("running"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if !running {
+        add_warning("Persistent browser supervisor is not responding; new browser launches are disabled until PortPilot is restarted.".into());
+    }
+    Ok(v)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_snapshot_is_reported_not_disguised_as_an_empty_dashboard() {
+        let result = merge_snapshot(Err("helper down".into()), Ok(json!({ "running": true })));
+        assert_eq!(result.unwrap_err(), "paat CLI unavailable: helper down");
+    }
+
+    #[test]
+    fn a_stopped_supervisor_becomes_a_snapshot_warning() {
+        let merged = merge_snapshot(Ok(json!({ "ok": true })), Ok(json!({ "running": false }))).unwrap();
+        let warnings = merged["warnings"].as_array().expect("warnings array");
+        assert!(warnings.iter().any(|w| w.as_str().unwrap_or("").contains("not responding")));
+    }
 
     fn fallback_marker(reason: String) -> SnapshotParts {
         (Err(format!("fallback: {reason}")), Err("fallback".into()))

@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Dashboard actions (Show, Hide, Unhide, Kill, Erase) re-check their target
+  against a fresh snapshot (lane, process ID, browser, debug port and
+  profile) before acting. Before, Kill and Erase trusted a process ID from
+  the last refresh, so if that browser had closed and Windows reused the
+  number for another program, the dashboard could close the wrong program
+  or erase the wrong profile.
+- A failed dashboard refresh no longer shows an empty "no browsers running"
+  view. The dashboard keeps the last good view and says the refresh failed.
 - Windows folder names are now compared case-insensitively for lane
   identity, so `C:\Users\me\Shop` and `c:\users\me\shop` (or a path with
   `.\` segments) reconnect to the same lane and the same saved logins
@@ -27,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The dashboard window now has a restrictive Content Security Policy: it
+  can load only its own bundled files and talk only to the dashboard app
+  itself. It previously had none.
 - Cleared every known vulnerability in PortPilot's runtime dependencies
   (9 advisories, including a critical one in `proxy-addr` and high ones in
   `@modelcontextprotocol/sdk`, `zod`, `hono`, `ip-address`, `fast-uri` and

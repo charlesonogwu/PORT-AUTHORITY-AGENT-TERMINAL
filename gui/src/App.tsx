@@ -31,7 +31,7 @@ import {
   hideChrome,
   killChrome,
   setDefaultBrowser,
-  setHiddenPids,
+  setHiddenTargets,
   unhideChrome,
   type DefaultBrowser,
   type WindowPlacement,
@@ -209,19 +209,19 @@ function useHideEnforcement(
     const api = apiRef.current
     const live = snap?.liveSessions ?? []
     const liveKeys = new Set<string>()
-    const hiddenPids: number[] = []
+    const hiddenSessions: LiveSession[] = []
     for (const s of live) {
       const key = stableKeyOf(s)
       liveKeys.add(key)
       const entry = api.map.get(key)
       if (!entry) continue
-      hiddenPids.push(s.pid)
+      hiddenSessions.push(s)
       // Chrome restarted for a hidden lane (new pid -> new on-screen window):
       // capture the fresh window's placement so a later Unhide restores right.
       // (The watcher already parks it via the pushed pid set below.)
       if (entry.lastPid !== s.pid && seenPidForKey.current.get(key) !== s.pid) {
         seenPidForKey.current.set(key, s.pid)
-        void hideChrome(s.pid)
+        void hideChrome(s)
           .then((res) => {
             if (res.ok) {
               apiRef.current.patchEntry(key, {
@@ -238,7 +238,7 @@ function useHideEnforcement(
     }
 
     // Keep the native watcher's pid set in sync (empty array -> watcher idles).
-    void setHiddenPids(hiddenPids).catch(() => {})
+    void setHiddenTargets(hiddenSessions).catch(() => {})
   }, [snap, hiddenApi.map])
 }
 
@@ -786,9 +786,9 @@ function SessionRow({
                 hidden window back on-screen, and the watcher would re-park it
                 anyway. So once a lane is hidden, the only bring-it-back action
                 is "Unhide" — hide the dead button to avoid the confusion. */}
-            {!hiddenApi.isHidden(s) && <FocusButton pid={s.pid} />}
+            {!hiddenApi.isHidden(s) && <FocusButton session={s} />}
             <HideToggleButton s={s} hiddenApi={hiddenApi} />
-            <KillButton pid={s.pid} onKilled={onKilled} />
+            <KillButton session={s} onKilled={onKilled} />
             <EraseButton s={s} onErased={onKilled} />
           </div>
         </TableCell>
@@ -1010,7 +1010,7 @@ function SourcePill({ session }: { session: LiveSession }) {
  * and the user wants to visually inspect one of them without hunting
  * through the taskbar.
  */
-function FocusButton({ pid }: { pid: number }) {
+function FocusButton({ session }: { session: LiveSession }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [shownAt, setShownAt] = useState<number | null>(null)
@@ -1032,7 +1032,7 @@ function FocusButton({ pid }: { pid: number }) {
     setBusy(true)
     setError(null)
     try {
-      const data = await focusChrome(pid)
+      const data = await focusChrome(session)
       if (!data.ok) {
         setError(data.error ?? "focus failed")
       } else {
@@ -1043,7 +1043,7 @@ function FocusButton({ pid }: { pid: number }) {
     } finally {
       setBusy(false)
     }
-  }, [busy, pid])
+  }, [busy, session])
 
   if (error) {
     return (
@@ -1060,7 +1060,7 @@ function FocusButton({ pid }: { pid: number }) {
       disabled={busy}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={`Bring Chrome pid ${pid} to the foreground`}
+      title={`Bring ${session.browser ?? "chrome"} pid ${session.pid} to the foreground`}
     >
       {busy ? (
         "showing…"
@@ -1123,10 +1123,10 @@ function HideAllButton({
           if (allHidden) {
             const entry = hiddenApi.getEntry(s)
             hiddenApi.clearHidden(s)
-            const res = await unhideChrome(s.pid, entry?.placement)
+            const res = await unhideChrome(s, entry?.placement)
             if (res.ok) ok++
           } else {
-            const res = await hideChrome(s.pid)
+            const res = await hideChrome(s)
             if (res.ok) {
               hiddenApi.markHidden(s, res.placement)
               ok++
@@ -1232,7 +1232,7 @@ function KillAllButton({
     const responses = await Promise.all(
       sessions.map(async (s) => {
         try {
-          const data = await killChrome(s.pid)
+          const data = await killChrome(s)
           return data.ok
         } catch {
           return false
@@ -1312,10 +1312,10 @@ function HideToggleButton({
         // Clear the persistent flag FIRST, so a concurrent poll tick can't
         // re-park the window we are about to bring back.
         hiddenApi.clearHidden(s)
-        const res = await unhideChrome(s.pid, entry?.placement)
+        const res = await unhideChrome(s, entry?.placement)
         if (!res.ok) setError(res.error ?? "unhide failed")
       } else {
-        const res = await hideChrome(s.pid)
+        const res = await hideChrome(s)
         if (!res.ok) setError(res.error ?? "hide failed")
         else hiddenApi.markHidden(s, res.placement)
       }
@@ -1358,7 +1358,13 @@ function HideToggleButton({
   )
 }
 
-function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
+function KillButton({
+  session,
+  onKilled,
+}: {
+  session: LiveSession
+  onKilled: () => void
+}) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1383,7 +1389,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
     setBusy(true)
     setError(null)
     try {
-      const data = await killChrome(pid)
+      const data = await killChrome(session)
       if (!data.ok) {
         setError(data.error ?? "unknown error")
         setBusy(false)
@@ -1396,7 +1402,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
       setBusy(false)
       setConfirming(false)
     }
-  }, [busy, confirming, pid, onKilled, reset])
+  }, [busy, confirming, session, onKilled, reset])
 
   if (error) {
     return (
@@ -1413,7 +1419,7 @@ function KillButton({ pid, onKilled }: { pid: number; onKilled: () => void }) {
       disabled={busy}
       onClick={onClick}
       className="h-7 px-2 text-[11px]"
-      title={`Terminate browser process pid ${pid}. Keeps profile cookies/logins and remembered website associations.`}
+      title={`Terminate ${session.browser ?? "chrome"} process pid ${session.pid}. Keeps profile cookies/logins and remembered website associations.`}
     >
       {busy ? (
         "killing…"
@@ -1459,7 +1465,7 @@ function EraseButton({ s, onErased }: { s: LiveSession; onErased: () => void }) 
     setBusy(true)
     setError(null)
     try {
-      const data = await eraseChrome(s.pid, s.chromeProfileDir, s.laneId)
+      const data = await eraseChrome(s)
       if (!data.ok) {
         setError(data.error ?? "unknown error")
         setBusy(false)
@@ -1542,6 +1548,15 @@ export function App() {
         )}
         {snap && (
           <>
+            {error && (
+              <Alert variant="destructive" className="mb-6">
+                <AlertTriangle className="size-4" />
+                <AlertTitle>Refresh failed. Showing the last good view</AlertTitle>
+                <AlertDescription className="mt-1 font-mono text-[11px]">
+                  {error}
+                </AlertDescription>
+              </Alert>
+            )}
             {(snap.warnings?.length ?? 0) > 0 && (
               <Alert variant="destructive" className="mb-6">
                 <AlertTriangle className="size-4" />
