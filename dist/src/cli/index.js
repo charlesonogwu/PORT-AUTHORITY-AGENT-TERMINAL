@@ -14,6 +14,7 @@ import { deleteProfileDir, forgetProfile, listProfiles, selectPruneCandidates } 
 import { configForMachine, configPath, loadConfig, saveConfig, recommendForMachine } from "../core/config.js";
 import { installShortcut, shortcutStatus, uninstallShortcut } from "./shortcut.js";
 import { installMcpFor } from "./install-mcp.js";
+import { installAgentSkill } from "./install-skill.js";
 import { formatMissingDependencyMessage, isMissingDependencyError, missingDependencyName } from "./mcp-preflight.js";
 import { flagBool, flagString, flagStrings, parseArgs, parseDurationMs, parsePortRange } from "./args.js";
 import { formatLanesTable, formatReserveBlock } from "./format.js";
@@ -1123,6 +1124,80 @@ async function cmdInstallMcp(ctx) {
     if (!allOk)
         process.exit(1);
 }
+async function cmdInstallSkill(ctx) {
+    const valid = ["codex", "claude"];
+    const target = ctx.args.positional[0];
+    const allFlag = flagBool(ctx.args, "all");
+    const onlyExistingApps = flagBool(ctx.args, "only-existing", false);
+    let clients;
+    if (!target || target === "all" || allFlag)
+        clients = valid;
+    else if (valid.includes(target))
+        clients = [target];
+    else
+        fail(ctx, `unknown skill client '${target}'. Try: paat install-skill <codex|claude|all>`);
+    const results = [];
+    for (const client of clients) {
+        try {
+            const result = await installAgentSkill(client, { onlyExistingApps });
+            results.push({
+                client,
+                // Under --only-existing (npm postinstall) a folder PortPilot leaves
+                // alone is a deliberate outcome, not a failure to re-run.
+                ok: result.action !== "conflict" || onlyExistingApps,
+                skillDir: result.skillDir,
+                backupPath: result.backupPath,
+                action: result.action,
+                ...(result.reason ? { reason: result.reason } : {}),
+            });
+        }
+        catch (err) {
+            results.push({ client, ok: false, error: err.message });
+        }
+    }
+    const allOk = results.every((result) => result.ok);
+    if (ctx.json) {
+        emit(ctx, { ok: allOk, results });
+        if (!allOk)
+            process.exit(1);
+        return;
+    }
+    for (const result of results) {
+        if (!result.ok) {
+            ctx.stderr.write(`x ${result.client}: ${result.reason ?? result.error}\n`);
+            continue;
+        }
+        if (result.action === "skipped") {
+            ctx.stdout.write(`- ${result.client}: skipped (${result.reason})\n`);
+            continue;
+        }
+        if (result.action === "conflict") {
+            ctx.stdout.write(`- ${result.client}: left unchanged (${result.reason})\n`);
+            continue;
+        }
+        const label = result.action === "installed"
+            ? "installed"
+            : result.action === "updated"
+                ? "updated"
+                : "already present (no change)";
+        ctx.stdout.write(`+ ${result.client}: ${label}\n`);
+        ctx.stdout.write(`  skill: ${result.skillDir}\n`);
+        if (result.backupPath)
+            ctx.stdout.write(`  backup: ${result.backupPath}\n`);
+    }
+    const installedFor = results
+        .filter((result) => result.ok && result.action !== "skipped" && result.action !== "conflict")
+        .map((result) => result.client);
+    if (allOk) {
+        if (installedFor.length > 0) {
+            const names = installedFor.map((client) => (client === "codex" ? "Codex" : "Claude Code")).join(" and ");
+            ctx.stdout.write(`\nThe PortPilot skill is set up for ${names}. Restart an open app if it does not refresh automatically.\n`);
+        }
+    }
+    else {
+        process.exit(1);
+    }
+}
 async function cmdAutostart(ctx) {
     const sub = ctx.args.positional[0] ?? "status";
     const autostart = await import("./autostart.js");
@@ -1220,6 +1295,8 @@ async function dispatch(args) {
             return cmdShortcut(ctx);
         case "install-mcp":
             return cmdInstallMcp(ctx);
+        case "install-skill":
+            return cmdInstallSkill(ctx);
         case "autostart":
             return cmdAutostart(ctx);
         case "prune":

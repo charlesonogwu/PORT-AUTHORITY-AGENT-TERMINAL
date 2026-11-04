@@ -25,7 +25,9 @@
  *
  * Skip rules:
  *   - PAAT_SKIP_POSTINSTALL=1: skip everything (CI / sandboxed users).
- *   - PAAT_SKIP_INSTALL_MCP=1: skip ONLY the MCP wire-up step.
+ *   - PAAT_SKIP_INSTALL_MCP=1: skip the MCP wire-up and the skill install.
+ *   - PAAT_SKIP_INSTALL_SKILL=1: skip ONLY the /portpilot skill install.
+ *   - SUDO_UID set: skip the skill install (root-owned files in $HOME).
  *   - PAAT_PREPARE_RUNNING=1: nested install during prepare — skip.
  *   - npm_config_global !== "true" AND not invoked from package root:
  *     skip — running postinstall from a transitive dep is a footgun.
@@ -46,14 +48,32 @@ function shouldSkip() {
   if (process.env.PAAT_SKIP_POSTINSTALL === "1") return "PAAT_SKIP_POSTINSTALL=1";
   if (process.env.CI === "true") return "running in CI";
   if (process.env.PAAT_PREPARE_RUNNING === "1") return "nested prepare-time install";
-  const isGlobal = process.env.npm_config_global === "true";
+  // `npm i -g` sets npm_config_global; `--location=global` (and
+  // `location=global` in .npmrc) sets only npm_config_location.
+  const isGlobal = process.env.npm_config_global === "true" || process.env.npm_config_location === "global";
   const ourName = "port-authority-agent-terminal-mcp";
+  // npm runs lifecycle scripts from this package's own folder, so process.cwd()
+  // always looks like "ourselves". INIT_CWD is where the user actually ran npm.
   let isLocalSelf = false;
   try {
-    const cwdPkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
+    const initCwd = process.env.INIT_CWD || process.cwd();
+    const cwdPkg = JSON.parse(fs.readFileSync(path.join(initCwd, "package.json"), "utf8"));
     if (cwdPkg && cwdPkg.name === ourName) isLocalSelf = true;
-  } catch { /* no package.json — likely npm i -g */ }
+  } catch { /* no package.json there — a dependency or npx install */ }
   if (!isGlobal && !isLocalSelf) return "transitive install";
+  return null;
+}
+
+/**
+ * Why the automatic skill install should not run, or null. The skill writes
+ * into the user's agent folders, so it honours both opt-outs, and it never
+ * runs under sudo: files created there would be owned by root and later
+ * block Claude Code, Codex and paat from writing their own folders.
+ */
+function skillSkipReason(env) {
+  if (env.PAAT_SKIP_INSTALL_SKILL === "1") return "PAAT_SKIP_INSTALL_SKILL=1";
+  if (env.PAAT_SKIP_INSTALL_MCP === "1") return "PAAT_SKIP_INSTALL_MCP=1";
+  if (env.SUDO_UID) return "running under sudo; run `paat install-skill all` as your own user";
   return null;
 }
 
@@ -183,7 +203,10 @@ function run(cliJs, args) {
 
 function main() {
   const skip = shouldSkip();
-  if (skip) return; // silent skip
+  if (skip) {
+    log(`Skipping setup (${skip}). Run \`paat install-mcp\`, \`paat install-skill all\` or \`paat shortcut install\` yourself if you need them.`);
+    return;
+  }
 
   const pkgRoot = packageRoot();
   const cliJs = findCli();
@@ -228,14 +251,33 @@ function main() {
     if (!mcpOk) warn("install-mcp returned a non-zero status — re-run `paat install-mcp` manually.");
   }
 
-  if (mcpOk) {
+  let skillOk = true;
+  const skipSkill = skillSkipReason(process.env);
+  if (skipSkill) {
+    log(`Skipping the /portpilot skill (${skipSkill}).`);
+  } else {
+    // --only-existing: never create ~/.codex or ~/.claude for apps the user
+    // doesn't have.
+    log("Installing the /portpilot skill for Codex and Claude Code (where installed)…");
+    skillOk = run(cliJs, ["install-skill", "all", "--only-existing"]);
+    if (!skillOk) {
+      warn("install-skill returned a non-zero status — re-run `paat install-skill` manually.");
+    }
+  }
+
+  if (mcpOk && skillOk) {
     log("Done. portpilot is ready. Open the dashboard with `portpilot` or `paat dashboard`.");
   }
 }
 
-try {
-  main();
-} catch (err) {
-  warn("postinstall threw: " + (err && err.message ? err.message : String(err)));
-  process.exit(0);
+// Tests load the skip rules without running the install.
+module.exports = { shouldSkip, skillSkipReason };
+
+if (process.env.PAAT_POSTINSTALL_NO_RUN !== "1") {
+  try {
+    main();
+  } catch (err) {
+    warn("postinstall threw: " + (err && err.message ? err.message : String(err)));
+    process.exit(0);
+  }
 }

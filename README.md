@@ -133,6 +133,61 @@ Restart the app and the agent has these tools:
 Then a prompt like *"Open https://example.com via PAAT in this folder"* just works:
 the agent calls `open` and the session appears on the dashboard.
 
+### Use PortPilot in T3 Code, Codex, or Claude Code
+
+The MCP connection supplies browser tools; it does not itself add a slash
+command. The npm installer adds a task-scoped **PortPilot** skill to Codex and
+Claude Code. This includes Claude Code's graphical **Code tab inside Claude
+Desktop**, but not ordinary Claude Desktop Chat or Cowork.
+
+In the **T3 Code GUI**, type `/portpilot` to filter the picker, select
+**`/skill:Portpilot`**, then describe the browser task. T3 Code may also show
+an older **`/skill:Use Portpilot`** plugin entry; the `Portpilot` entry is the
+task-scoped skill described here. In Codex, you can also write
+`$portpilot <browser task>`. In Claude Code, use `/portpilot <browser task>`.
+For example:
+
+```text
+$portpilot Search eBay for a used Pixel 7 and summarize three listings.
+```
+
+OpenCode's standalone CLI can have a separate custom `/portpilot` command,
+but `paat install-skill all` does not install that command or an OpenCode skill.
+In an OpenCode-backed T3 thread, the `/skill:Portpilot` picker entry appears
+when the skill is installed in a shared directory such as
+`~/.agents/skills/portpilot`.
+
+For that task, the agent must use PortPilot MCP only. It will not silently
+fall back to built-in web search, another browser tool, or a personal browser
+profile. If PortPilot is disconnected, it stops and tells you instead. The
+skill also keeps one lane for the task and uses `page_newtab` when it needs
+more pages, avoiding unnecessary full-browser processes.
+
+To reinstall the skill without reinstalling the package:
+
+```text
+paat install-skill all
+```
+
+PortPilot updates only copies it installed. An upgrade replaces only the files
+PortPilot put there, backs up any of them you edited (to
+`~/.portpilot/skill-backups/`, outside the skills folders so a backup never
+loads as a second copy of the skill), and keeps files you added yourself. A
+`portpilot` folder PortPilot didn't create, or one whose `SKILL.md` you renamed
+to switch the skill off, is left unchanged, and PortPilot never writes or
+deletes through a link at or inside the `portpilot` folder.
+
+The npm installer adds the skill only for apps that are already installed
+(their `~/.codex` or `~/.claude` folder exists), never under `sudo`, and not
+when PortPilot is installed as another project's dependency. Set
+`PAAT_SKIP_INSTALL_SKILL=1` (or `PAAT_SKIP_INSTALL_MCP=1`, which also skips
+the MCP wiring) to turn it off.
+
+The MCP entry for Claude Code is still written by Claude Code's own
+`claude mcp add`. If the standalone `claude` command isn't available, PortPilot
+skips that step and tells you the command to run, rather than editing
+`~/.claude.json` itself while Claude Code may be writing it.
+
 ### Persistent browser lifetime
 
 The native PortPilot app starts one local supervisor that owns persistent

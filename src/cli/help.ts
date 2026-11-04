@@ -127,6 +127,17 @@ COMMANDS:
                   codex                                            Codex Desktop   → ~\\.codex\\config.toml
                   all (default)                                    all three — same as 'install-mcp' with no args
                   (Claude / Codex configs get a timestamped backup; claude-code uses Claude Code's own CLI which has its own undo via \`claude mcp remove\`)
+  install-skill <client>        Add the task-scoped PortPilot skill to Codex and Claude Code
+                  codex                                            Codex skill → ~/.codex/skills/portpilot
+                  claude                                           Claude Code (CLI and Desktop Code tab) → ~/.claude/skills/portpilot
+                  all (default)                                    install both integrations
+                  In T3 Code, select /skill:Portpilot; in Codex use $portpilot;
+                  in Claude Code use /portpilot. The skill uses PortPilot MCP
+                  only and never falls back to another browser tool.
+                  Upgrades replace only files PortPilot installed, back up
+                  any you edited, and keep files you added. A portpilot
+                  folder PortPilot didn't create (or a link) is left unchanged.
+                  --only-existing                                  skip apps whose folder doesn't exist (npm postinstall)
   mcp                           Run the MCP server over stdio
   supervisor <serve|status>     Internal user-scoped persistent-browser supervisor
   help                          Show this help

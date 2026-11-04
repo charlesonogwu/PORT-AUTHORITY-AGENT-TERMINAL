@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A task-scoped PortPilot skill for Codex and Claude Code, including the Code
+  tab inside Claude Desktop. Claude Code uses `/portpilot`; T3 Code's GUI
+  exposes the skill as `/skill:Portpilot`, and Codex also accepts `$portpilot`.
+  The MCP connection supplies tools separately from the skill. Ordinary Claude
+  Desktop Chat and Cowork do not load local Claude Code skills.
+- `paat install-skill <codex|claude|all>` installs the integration
+  idempotently. npm postinstall runs it for apps that are already installed
+  (`--only-existing`). Turn it off with `PAAT_SKIP_INSTALL_SKILL=1` or
+  `PAAT_SKIP_INSTALL_MCP=1`. It never runs under `sudo`, and postinstall no
+  longer runs at all when PortPilot is installed as another project's
+  dependency or through `npx` (the old guard looked at the wrong folder).
+
+### Safety
+
+- Skill upgrades reject NTFS stream paths and preserve shipped files addressed
+  through short-name aliases. Parent folders are checked before creation so a
+  junction cannot create directories outside the skill folder.
+
+- The skill uses one stable, task-specific sessionId (lowercase letters,
+  digits and hyphens, at most 40 characters), so each task gets its own
+  browser. It uses `page_newtab` for extra pages and passes `tab` to page
+  tools once there is more than one. It navigates an already-running browser
+  with `page_goto`, closes with `close_browser` before `release_lane`, and
+  never uses personal/default browser profiles.
+- The installer only replaces or removes files it recorded installing
+  (`.portpilot-skill.json`), backs up any of them you edited to
+  `~/.portpilot/skill-backups/` (never next to the skill, where it would load
+  as a stale duplicate), keeps files you added, writes each file atomically,
+  and keeps the newest three backups. It never writes or deletes through a link
+  at or inside the `portpilot` folder, and leaves alone a `portpilot` folder it
+  didn't create (including one whose `SKILL.md` was renamed to switch it off).
+  An interrupted install leaves nothing that blocks the next one.
+- `npm i --location=global` now counts as a global install, and a skipped
+  postinstall says why instead of exiting silently.
+
 ## [0.4.7] — 2026-11-03
 
 ### Fixed
