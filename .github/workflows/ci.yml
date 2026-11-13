@@ -5,9 +5,11 @@
 # hook. CI runs on both runners to keep both paths honest.
 #
 # Triggers:
-#   • Every PR into main
-#   • Every push to main (so the tip is always known-good)
-#   • Manual dispatch from the Actions tab
+#   • Every PR into main and every push to main: tests on Windows only (Node 22 and 24)
+#   • A published release, or a manual run from the Actions tab: the full set,
+#     Windows + macOS tests and both Tauri dashboard builds
+# macOS minutes count 10x and Windows 2x against the free Actions allowance, and the
+# dashboard builds compile tauri-cli from scratch, so the expensive jobs run only for releases.
 name: CI
 
 on:
@@ -15,6 +17,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
 
 concurrency:
@@ -33,7 +37,7 @@ jobs:
         # Node 22.4 is the supported runtime floor: CDP and WebDriver BiDi use
         # Node's native WebSocket. macos-latest is a generic hosted runner, not
         # an Apple-silicon compatibility claim.
-        os: [windows-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name == 'release' || github.event_name == 'workflow_dispatch') && '["windows-latest","macos-latest"]' || '["windows-latest"]') }}
         node: ["22.x", "24.x"]
 
     steps:
@@ -79,6 +83,7 @@ jobs:
   # on Linux because PAAT isn't officially supported there yet.
   build-dashboard:
     name: Build Tauri dashboard on ${{ matrix.os }}
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
