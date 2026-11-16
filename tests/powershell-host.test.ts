@@ -30,107 +30,85 @@ async function withHost<T>(fn: (host: PersistentPowerShell) => Promise<T>, optio
   }
 }
 
+
 async function hostPid(host: PersistentPowerShell): Promise<number> {
-  return Number((await host.run("$PID")).stdout.trim());
+  const result = await host.run("owners");
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.ok(JSON.parse(result.stdout).some((p: { ProcessId: number }) => p.ProcessId === host.pid));
+  return host.pid!;
 }
 
-test("persistent PowerShell runs many scripts in one powershell.exe", windowsOnly, async () => {
+test("fixed queries reuse one PowerShell and return real ports and processes", windowsOnly, async () => {
   await withHost(async (host) => {
-    const first = await host.run("$PID");
-    const second = await host.run("$PID");
-    assert.equal(first.code, 0);
-    assert.equal(first.stdout.trim(), second.stdout.trim(), "each script started a new powershell.exe");
-    assert.equal(Number(first.stdout.trim()), host.pid);
+    const first = await hostPid(host);
+    const ports = await host.run("ports");
+    assert.equal(ports.code, 0);
+    assert.ok(JSON.parse(ports.stdout).length > 0);
+    const table = JSON.parse((await host.run("processes")).stdout);
+    assert.ok(table.processes.some((p: { pid: number }) => p.pid === process.pid));
+    assert.ok(Array.isArray(table.connections));
+    const debug = await host.run("debug-processes");
+    assert.equal(debug.code, 0);
+    assert.equal(host.pid, first);
   });
 });
 
-test("persistent PowerShell returns script output as UTF-8 text", windowsOnly, async () => {
+test("runner refuses arbitrary script text without starting PowerShell", async () => {
   await withHost(async (host) => {
-    const result = await host.run("@{ name = 'Zoë'; n = 2 } | ConvertTo-Json -Compress");
-    assert.deepEqual(JSON.parse(result.stdout), { name: "Zoë", n: 2 });
+    // @ts-expect-error exercise the runtime boundary too
+    await assert.rejects(host.run("Write-Output 'injected'"), /Unknown PowerShell query/);
+    assert.equal(host.pid, undefined);
   });
 });
 
-test("persistent PowerShell keeps one script's variables out of the next", windowsOnly, async () => {
+test("fixed queries queue in order", windowsOnly, async () => {
   await withHost(async (host) => {
-    await host.run("$leak = 'x'");
-    const result = await host.run("if ($null -eq $leak) { 'clean' } else { 'leaked' }");
-    assert.equal(result.stdout.trim(), "clean");
+    const results = await Promise.all([host.run("owners"), host.run("processes")]);
+    assert.ok(Array.isArray(JSON.parse(results[0]!.stdout)));
+    assert.ok(Array.isArray(JSON.parse(results[1]!.stdout).processes));
   });
 });
 
-test("persistent PowerShell reports a throwing script and keeps working", windowsOnly, async () => {
+test("timeout kills the helper and later queries recover in a persistent session", windowsOnly, async () => {
   await withHost(async (host) => {
-    const failed = await host.run("throw 'boom'");
-    assert.equal(failed.code, 1);
-    assert.match(failed.stderr, /boom/);
-    const after = await host.run("'still alive'");
-    assert.equal(after.code, 0);
-    assert.equal(after.stdout.trim(), "still alive");
+    await assert.rejects(host.run("processes", { timeoutMs: 1 }), /timed out/);
+    const pid = await hostPid(host);
+    assert.equal(pid, host.pid);
   });
 });
 
-test("persistent PowerShell runs queued scripts one at a time, in order", windowsOnly, async () => {
-  await withHost(async (host) => {
-    const results = await Promise.all([host.run("'a'"), host.run("'b'"), host.run("'c'")]);
-    assert.deepEqual(results.map((result) => result.stdout.trim()), ["a", "b", "c"]);
-  });
-});
-
-test("persistent PowerShell kills a hung script and recovers in a fresh process", windowsOnly, async () => {
-  await withHost(async (host) => {
-    const before = await hostPid(host);
-    await assert.rejects(host.run("Start-Sleep -Seconds 30", { timeoutMs: 500 }), /timed out/);
-    await waitFor(() => !isAlive(before), 5_000);
-    const after = await hostPid(host);
-    assert.notEqual(after, before);
-  });
-});
-
-test("persistent PowerShell shuts its process down after sitting idle", windowsOnly, async () => {
+test("persistent PowerShell shuts down after sitting idle", windowsOnly, async () => {
   await withHost(async (host) => {
     const pid = await hostPid(host);
     await waitFor(() => !isAlive(pid), 5_000);
     assert.equal(host.pid, undefined);
-    const next = await hostPid(host);
-    assert.notEqual(next, pid);
+    assert.notEqual(await hostPid(host), pid);
   }, { idleMs: 200 });
 });
 
-test("persistent PowerShell starts a fresh process after maxRuns scripts", windowsOnly, async () => {
+test("persistent PowerShell rotates at maxRuns", windowsOnly, async () => {
   await withHost(async (host) => {
     const first = await hostPid(host);
-    const second = await hostPid(host);
-    const third = await hostPid(host);
-    assert.equal(second, first);
-    assert.notEqual(third, first);
+    assert.equal(await hostPid(host), first);
+    assert.notEqual(await hostPid(host), first);
   }, { maxRuns: 2 });
 });
 
-test("persistent PowerShell falls back to one-off runs when its session cannot start", windowsOnly, async () => {
-  // Simulates e.g. Constrained Language Mode, where the session loop itself is refused.
+test("startup failure falls back to the packaged one-off File query", windowsOnly, async () => {
   await withHost(async (host) => {
-    const first = await host.run("'still answered'");
-    assert.equal(first.code, 0);
-    assert.equal(first.stdout.trim(), "still answered");
-    const second = await host.run("'and again'");
-    assert.equal(second.stdout.trim(), "and again");
-    assert.equal(host.pid, undefined, "no long-lived session should be running");
-  }, { hostScript: "exit 3" });
+    for (let i = 0; i < 2; i++) {
+      const result = await host.run("processes");
+      assert.equal(result.code, 0, result.stderr);
+      assert.ok(JSON.parse(result.stdout).processes.length > 0);
+      assert.equal(host.pid, undefined);
+    }
+  }, { sessionFile: "C:/paat-nonexistent-session.ps1" });
 });
 
-test("a first script that times out does not switch the session off", windowsOnly, async () => {
-  await withHost(async (host) => {
-    await assert.rejects(host.run("Start-Sleep -Seconds 30", { timeoutMs: 500 }), /timed out/);
-    const pid = await hostPid(host);
-    assert.equal(pid, host.pid, "later scripts should still run in a long-lived session");
-  });
-});
-
-test("closing the persistent PowerShell ends its process and refuses new work", windowsOnly, async () => {
+test("closing ends the helper and refuses new work", windowsOnly, async () => {
   const host = createPersistentPowerShell();
   const pid = await hostPid(host);
   host.close();
   await waitFor(() => !isAlive(pid), 5_000);
-  await assert.rejects(host.run("'x'"), /closed/);
+  await assert.rejects(host.run("ports"), /closed/);
 });

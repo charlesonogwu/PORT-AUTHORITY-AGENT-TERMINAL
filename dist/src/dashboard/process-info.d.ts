@@ -13,7 +13,7 @@
  * On non-Windows we return an empty snapshot (no inference possible).
  * Inference falls back to the legacy profile-keyword heuristic.
  */
-import type { PowerShellRunner } from "../core/powershell-host.js";
+import { type PowerShellRunner } from "../core/powershell-host.js";
 export interface ProcessRecord {
     pid: number;
     ppid: number;

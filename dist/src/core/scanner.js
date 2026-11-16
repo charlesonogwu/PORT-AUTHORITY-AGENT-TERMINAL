@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { isWindows } from "./paths.js";
+import { runPowerShellQuery } from "./powershell-host.js";
 function runCommand(cmd, args, opts = {}) {
     return new Promise((resolve, reject) => {
         const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, signal: opts.signal });
@@ -35,7 +36,8 @@ async function runPowerShell(script, opts) {
         opts.signal?.throwIfAborted();
         return opts.powershell.run(script, { timeoutMs: opts.timeoutMs });
     }
-    return runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { signal: opts.signal, timeoutMs: opts.timeoutMs });
+    opts.signal?.throwIfAborted();
+    return runPowerShellQuery(script, opts.timeoutMs, opts.signal);
 }
 /** lsof exits 1 with no output when there are no matching listeners. A null
  * exit means the process was killed/timed out and must never mean "no ports". */
@@ -163,10 +165,8 @@ async function lookupWindowsProcesses(pids, signal, powershell) {
     const wanted = Array.from(new Set(Array.from(pids).filter((p) => Number.isInteger(p) && p > 0)));
     if (wanted.length === 0)
         return { byPid };
-    const filter = wanted.map((p) => `ProcessId=${p}`).join(" OR ");
-    const ps = `Get-CimInstance Win32_Process -Filter "${filter.replace(/"/g, '\\"')}" | Select-Object ProcessId,Name,CommandLine,@{Name='CreationDate';Expression={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress -Depth 3`;
     try {
-        const res = await runPowerShell(ps, { signal, timeoutMs: 8000, powershell });
+        const res = await runPowerShell("owners", { signal, timeoutMs: 8000, powershell });
         if (!res.stdout.trim())
             return { byPid };
         let parsed;
@@ -197,11 +197,10 @@ async function lookupWindowsProcesses(pids, signal, powershell) {
 }
 async function scanWindowsNative(opts) {
     // Get-NetTCPConnection is the modern API; fall back to netstat if missing.
-    const ps = `Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object LocalPort,OwningProcess,LocalAddress | ConvertTo-Json -Compress -Depth 3`;
     let stdout = "";
     let primaryAvailable = false;
     try {
-        const res = await runPowerShell(ps, { signal: opts.signal, timeoutMs: 8000, powershell: opts.powershell });
+        const res = await runPowerShell("ports", { signal: opts.signal, timeoutMs: 8000, powershell: opts.powershell });
         if (res.code === 0) {
             primaryAvailable = true;
             stdout = res.stdout;
@@ -393,8 +392,7 @@ function parseSsOutput(stdout) {
  */
 export async function listDebugPortProcesses(opts = {}) {
     if (isWindows()) {
-        const ps = `Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%remote-debugging-port%'" | Select-Object ProcessId,Name,CommandLine,@{Name='CreationDate';Expression={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress -Depth 3`;
-        const res = await runPowerShell(ps, { signal: opts.signal, timeoutMs: 8000, powershell: opts.powershell });
+        const res = await runPowerShell("debug-processes", { signal: opts.signal, timeoutMs: 8000, powershell: opts.powershell });
         if (res.code !== 0)
             throw new Error(`process list failed (code ${res.code}): ${res.stderr.trim()}`);
         return parseWindowsProcessJson(res.stdout);

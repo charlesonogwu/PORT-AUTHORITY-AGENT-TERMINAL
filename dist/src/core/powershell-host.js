@@ -1,60 +1,15 @@
-/**
- * A long-lived powershell.exe that runs one script after another.
- *
- * Every dashboard refresh needs three PowerShell queries (listening ports,
- * the processes that own them, and the full process table). Starting
- * powershell.exe costs far more than the queries themselves, so the
- * dashboard's helper process keeps one session open and feeds it scripts
- * over stdin instead of starting PowerShell three times per refresh.
- *
- * Wire format, one script at a time (UTF-8 both ways):
- *   request:  "<marker>\n<script lines>\n<marker>\n"
- *   reply:    "<script output>\n<marker> <0|1>\n"   (1 = the script threw)
- * The marker is random per run, so neither a script nor its output can fake
- * the end of a message. Scripts run in their own scope (no variables leak
- * between runs), must not read stdin (it carries the requests), and anything
- * they print with Write-Host becomes part of their output.
- *
- * If the session itself can't start (for example PowerShell's Constrained
- * Language Mode refuses the loop below), every run falls back to a one-off
- * `powershell.exe -Command <script>`, exactly as if no session were used.
- */
+/** Fixed dashboard queries over stdin; script text is never accepted. */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+const QUERIES = ["ports", "owners", "processes", "debug-processes"];
+// tsx runs src/core; the published build runs dist/src/core.
+export const QUERY_FILE = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "../../scripts/dashboard-queries.ps1" : "../../../scripts/dashboard-queries.ps1", import.meta.url));
 const DEFAULT_TIMEOUT_MS = 8_000;
 const DEFAULT_IDLE_MS = 30_000;
 const DEFAULT_MAX_RUNS = 1_000;
-const POWERSHELL_ARGS = ["-NoProfile", "-NonInteractive", "-Command"];
-/** The session loop, passed in plain text like the one-off scripts. */
-const HOST_SCRIPT = [
-    "$ErrorActionPreference = 'Continue'",
-    "$__paatUtf8 = New-Object System.Text.UTF8Encoding($false)",
-    "$__paatIn = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), $__paatUtf8)",
-    "$__paatOut = [Console]::OpenStandardOutput()",
-    "while ($true) {",
-    "  $__paatMarker = $__paatIn.ReadLine()",
-    "  if ($null -eq $__paatMarker) { break }",
-    "  if ($__paatMarker -eq '') { continue }",
-    "  $__paatLines = New-Object System.Collections.Generic.List[string]",
-    "  while ($true) {",
-    "    $__paatLine = $__paatIn.ReadLine()",
-    "    if ($null -eq $__paatLine -or $__paatLine -eq $__paatMarker) { break }",
-    "    $__paatLines.Add($__paatLine)",
-    "  }",
-    "  if ($null -eq $__paatLine) { break }",
-    "  $__paatCode = 0",
-    "  $__paatText = ''",
-    "  try {",
-    "    $__paatText = & ([ScriptBlock]::Create($__paatLines -join \"`n\")) | Out-String -Width 8192",
-    "  } catch {",
-    "    $__paatCode = 1",
-    "    [Console]::Error.WriteLine($_.Exception.Message)",
-    "  }",
-    "  $__paatBytes = $__paatUtf8.GetBytes([string]$__paatText + \"`n\" + $__paatMarker + ' ' + $__paatCode + \"`n\")",
-    "  $__paatOut.Write($__paatBytes, 0, $__paatBytes.Length)",
-    "  $__paatOut.Flush()",
-    "}",
-].join("\n");
+// Applies only to this child process; never changes the machine's policy.
+const POWERSHELL_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"];
 /** A byte-order mark is never meaningful output; drop one if PowerShell adds it. */
 const BOM = String.fromCharCode(0xfeff);
 function stripBom(text) {
@@ -77,9 +32,11 @@ function completedResult(run) {
     };
 }
 /** Run one script in its own powershell.exe: the behaviour without a session. */
-function runOneOff(script, timeoutMs) {
+export function runPowerShellQuery(script, timeoutMs, signal) {
+    if (!QUERIES.includes(script))
+        return Promise.reject(new Error("Unknown PowerShell query"));
     return new Promise((resolve, reject) => {
-        const child = spawn("powershell.exe", [...POWERSHELL_ARGS, script], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+        const child = spawn("powershell.exe", [...POWERSHELL_ARGS, QUERY_FILE, "-Query", script], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, signal });
         let stdout = "";
         let stderr = "";
         let timedOut = false;
@@ -107,7 +64,7 @@ function runOneOff(script, timeoutMs) {
 export function createPersistentPowerShell(options = {}) {
     const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
     const maxRuns = options.maxRuns ?? DEFAULT_MAX_RUNS;
-    const hostScript = options.hostScript ?? HOST_SCRIPT;
+    const sessionFile = options.sessionFile ?? QUERY_FILE;
     let child;
     let runsOnChild = 0;
     let pending;
@@ -142,7 +99,7 @@ export function createPersistentPowerShell(options = {}) {
         idleTimer.unref();
     };
     const start = () => {
-        const proc = spawn("powershell.exe", [...POWERSHELL_ARGS, hostScript], {
+        const proc = spawn("powershell.exe", [...POWERSHELL_ARGS, sessionFile], {
             stdio: ["pipe", "pipe", "pipe"],
             windowsHide: true,
         });
@@ -208,8 +165,7 @@ export function createPersistentPowerShell(options = {}) {
                 },
             };
             pending = run;
-            const body = script.replace(/\r\n?/g, "\n");
-            proc.stdin.write(`${run.marker}\n${body}\n${run.marker}\n`);
+            proc.stdin.write(`${run.marker} ${script}\n`);
         });
         return finished.finally(armIdle);
     };
@@ -217,14 +173,14 @@ export function createPersistentPowerShell(options = {}) {
         if (closed)
             throw new Error("PowerShell session is closed");
         if (sessionUnusable)
-            return runOneOff(script, timeoutMs);
+            return runPowerShellQuery(script, timeoutMs);
         try {
             return await runInSession(script, timeoutMs);
         }
         catch (error) {
             // The session refused to start; answer this run the one-off way too.
             if (sessionUnusable && !closed)
-                return runOneOff(script, timeoutMs);
+                return runPowerShellQuery(script, timeoutMs);
             throw error;
         }
     };
@@ -233,6 +189,8 @@ export function createPersistentPowerShell(options = {}) {
             return child?.pid;
         },
         run(script, runOptions = {}) {
+            if (!QUERIES.includes(script))
+                return Promise.reject(new Error("Unknown PowerShell query"));
             if (closed)
                 return Promise.reject(new Error("PowerShell session is closed"));
             const timeoutMs = runOptions.timeoutMs ?? DEFAULT_TIMEOUT_MS;
