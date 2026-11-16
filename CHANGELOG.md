@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.8
+
+- Replace the dashboard's stdin script executor with a packaged, fixed-query
+  PowerShell file to remove the pattern flagged by Defender as
+  `Trojan:Win32/Commando.B!ml`. The long-lived session still amortizes startup;
+  its one-off fallback also uses `-File` and accepts only known query verbs.
+- The owners query now reads the process table once instead of constructing
+  a PID-specific PowerShell script.
+
 All notable changes to `port-authority-agent-terminal-mcp` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

@@ -29,8 +29,8 @@ function recordingRunner(): PowerShellRunner & { scripts: string[] } {
     scripts,
     run: async (script) => {
       scripts.push(script);
-      if (script.includes("-State Listen")) return { stdout: JSON.stringify([LISTENER]), stderr: "", code: 0 };
-      if (script.includes("-Filter")) return { stdout: JSON.stringify(LISTENER_PROCESS), stderr: "", code: 0 };
+      if (script === "ports") return { stdout: JSON.stringify([LISTENER]), stderr: "", code: 0 };
+      if (script === "owners") return { stdout: JSON.stringify(LISTENER_PROCESS), stderr: "", code: 0 };
       return { stdout: JSON.stringify(PROCESS_TABLE), stderr: "", code: 0 };
     },
   };
@@ -40,7 +40,7 @@ test("process snapshot reuses the dashboard's PowerShell session", windowsOnly, 
   const runner = recordingRunner();
   const snapshot = await collectProcessSnapshot({ powershell: runner });
   assert.equal(runner.scripts.length, 1);
-  assert.match(runner.scripts[0]!, /Win32_Process/);
+  assert.equal(runner.scripts[0], "processes");
   assert.equal(snapshot.processes.get(777)?.name, "node.exe");
 });
 
@@ -59,9 +59,9 @@ test("dashboard snapshot runs every PowerShell query through the shared session"
     const runner = recordingRunner();
     const snapshot = await buildSnapshot({ powershell: runner });
     assert.equal(runner.scripts.length, 3, "a dashboard refresh started its own powershell.exe");
-    assert.ok(runner.scripts.some((script) => script.includes("-State Listen")));
-    assert.ok(runner.scripts.some((script) => script.includes("-Filter")));
-    assert.ok(runner.scripts.some((script) => script.includes("-State Established")));
+    assert.ok(runner.scripts.some((script) => script === "ports"));
+    assert.ok(runner.scripts.some((script) => script === "owners"));
+    assert.ok(runner.scripts.some((script) => script === "processes"));
     assert.ok(Array.isArray(snapshot.liveSessions));
   });
 });

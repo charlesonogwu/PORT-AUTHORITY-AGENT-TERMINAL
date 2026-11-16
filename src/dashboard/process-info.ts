@@ -14,9 +14,8 @@
  * Inference falls back to the legacy profile-keyword heuristic.
  */
 
-import { spawn } from "node:child_process";
 import process from "node:process";
-import type { PowerShellRunner } from "../core/powershell-host.js";
+import { runPowerShellQuery, type PowerShellRunner } from "../core/powershell-host.js";
 
 export interface ProcessRecord {
   pid: number;
@@ -47,35 +46,6 @@ export const EMPTY_PROCESS_SNAPSHOT: ProcessSnapshot = {
   connections: [],
 };
 
-/**
- * The PowerShell script we run. Emits one JSON object on stdout. Wrapped
- * in -ErrorAction SilentlyContinue so individual process / connection
- * lookups that get denied don't kill the whole listing — we'd rather get
- * partial data than no data.
- */
-const COLLECT_SCRIPT = [
-  '$ErrorActionPreference = "SilentlyContinue"',
-  "$procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {",
-  "  [pscustomobject]@{",
-  "    pid = [int]$_.ProcessId",
-  "    ppid = [int]$_.ParentProcessId",
-  "    name = $_.Name",
-  "    commandLine = $_.CommandLine",
-  "    memoryBytes = [int64]$_.WorkingSetSize",
-  "  }",
-  "}",
-  "$conns = Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | ForEach-Object {",
-  "  [pscustomobject]@{",
-  "    localPort = [int]$_.LocalPort",
-  "    remoteAddress = [string]$_.RemoteAddress",
-  "    remotePort = [int]$_.RemotePort",
-  "    owningPid = [int]$_.OwningProcess",
-  "  }",
-  "}",
-  "$out = [pscustomobject]@{ processes = @($procs); connections = @($conns) }",
-  "$out | ConvertTo-Json -Depth 4 -Compress",
-].join("\n");
-
 interface RawSnapshot {
   processes: Array<Partial<ProcessRecord>>;
   connections: Array<Partial<TcpConnection>>;
@@ -94,52 +64,19 @@ export async function collectProcessSnapshot(opts: { timeoutMs?: number; powersh
   // refresh costs one query instead of a whole powershell.exe start.
   if (opts.powershell) {
     try {
-      const result = await opts.powershell.run(COLLECT_SCRIPT, { timeoutMs });
+      const result = await opts.powershell.run("processes", { timeoutMs });
       return parseCollectorOutput(result.stdout);
     } catch {
       return EMPTY_PROCESS_SNAPSHOT;
     }
   }
 
-  return new Promise<ProcessSnapshot>((resolve) => {
-    let settled = false;
-    const settle = (v: ProcessSnapshot): void => {
-      if (settled) return;
-      settled = true;
-      resolve(v);
-    };
-
-    let child;
-    try {
-      child = spawn(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", COLLECT_SCRIPT],
-        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
-      );
-    } catch {
-      settle(EMPTY_PROCESS_SNAPSHOT);
-      return;
-    }
-
-    let stdout = "";
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-
-    const timer = setTimeout(() => {
-      try { child.kill(); } catch { /* ignore */ }
-      settle(EMPTY_PROCESS_SNAPSHOT);
-    }, timeoutMs);
-
-    child.on("error", () => {
-      clearTimeout(timer);
-      settle(EMPTY_PROCESS_SNAPSHOT);
-    });
-
-    child.on("close", () => {
-      clearTimeout(timer);
-      settle(parseCollectorOutput(stdout));
-    });
-  });
+  try {
+    const result = await runPowerShellQuery("processes", timeoutMs);
+    return parseCollectorOutput(result.stdout);
+  } catch {
+    return EMPTY_PROCESS_SNAPSHOT;
+  }
 }
 
 /** Parse the collector's JSON. Partial data beats no data, so bad output yields an empty snapshot. */

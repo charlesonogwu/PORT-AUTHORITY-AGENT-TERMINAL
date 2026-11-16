@@ -1,4 +1,4 @@
-import type { PowerShellRunner } from "./powershell-host.js";
+import { type PowerShellRunner } from "./powershell-host.js";
 /**
  * One observation of a TCP listener on the local machine.
  */
